@@ -4,13 +4,25 @@
     "type": "git",
     "url": "git+https://github.com/Scott-Meyer/pi-parley.git"
   },
-  "version": "1.2.0",
+  "version": "1.3.0",
   "license": "MIT",
   "type": "module",
   "main": "index.ts",
+  "exports": {
+    ".": "./index.ts",
+    "./extension": "./extension.ts",
+    "./federation": {
+      "types": "./dist/federation.d.ts",
+      "import": "./dist/federation.js",
+      "default": "./dist/federation.js"
+    },
+    "./package.json": "./package.json",
+    "./*": "./*"
+  },
   "files": [
     "CHANGELOG.md",
     "index.ts",
+    "extension.ts",
     "pi-compat.ts",
     "types.ts",
     "config.ts",
@@ -24,7 +36,9 @@
     "reply-tracker.ts",
     "message-results.ts",
     "conversation-history.ts",
+    "dist/**",
     "scripts/smoke-host-compat.mjs",
+    "scripts/smoke-federation-package.mjs",
     "broker/broker.ts",
     "broker/build.ts",
     "broker/client.ts",
@@ -48,16 +62,19 @@
     "skills/**/*"
   ],
   "scripts": {
-    "test": "tsx --test broker/federation-protocol.test.ts broker/federation-roster.test.ts broker/federation-send.test.ts broker/federation-origin.test.ts broker/peer-link.test.ts broker/federation.integration.test.ts broker/federation-conversation.test.ts broker/federation-conversation.integration.test.ts broker/attachment.test.ts broker/attachment-roster-lifecycle.test.ts broker/client.test.ts broker/client-liveness.test.ts broker/collaboration-state.test.ts broker/extension.test.ts broker/framing.test.ts broker/paths.test.ts flightdeck-context.test.ts broker/build.test.ts broker/process-lock.test.ts broker/runtime-claim.test.ts broker/runtime-lifecycle.test.ts broker/spawn.test.ts broker/subagent-acl.test.ts broker/delivery-feedback.test.ts config.test.ts conversation-history.test.ts cwd.test.ts format-context.test.ts pi-compat.test.ts session-profile.test.ts project-agent.test.ts reply-tracker.test.ts parley.integration.test.ts test/inline-message.test.ts test/overlay-width.test.ts test/session-id-prefixes.test.ts recipient-context.integration.test.ts federation-extension.integration.test.ts",
+    "test": "tsx --test broker/federation-protocol.test.ts broker/federation-roster.test.ts broker/federation-send.test.ts broker/federation-origin.test.ts broker/peer-link.test.ts broker/federation.integration.test.ts broker/federation-conversation.test.ts broker/federation-conversation.integration.test.ts broker/attachment.test.ts broker/attachment-roster-lifecycle.test.ts federation.test.ts extension-entry.test.ts broker/client.test.ts broker/client-liveness.test.ts broker/collaboration-state.test.ts broker/extension.test.ts broker/framing.test.ts broker/paths.test.ts flightdeck-context.test.ts broker/build.test.ts broker/process-lock.test.ts broker/runtime-claim.test.ts broker/runtime-lifecycle.test.ts broker/spawn.test.ts broker/subagent-acl.test.ts broker/delivery-feedback.test.ts config.test.ts conversation-history.test.ts cwd.test.ts format-context.test.ts pi-compat.test.ts session-profile.test.ts project-agent.test.ts reply-tracker.test.ts parley.integration.test.ts test/inline-message.test.ts test/overlay-width.test.ts test/session-id-prefixes.test.ts recipient-context.integration.test.ts federation-extension.integration.test.ts",
+    "build:federation": "node scripts/build-federation.mjs",
+    "prepack": "npm run build:federation",
     "test:host-compat": "node scripts/smoke-host-compat.mjs",
-    "typecheck": "tsc --noEmit --module nodenext --moduleResolution nodenext --target es2022 --strict --skipLibCheck --allowImportingTsExtensions --types node index.ts pi-compat.ts compaction-awareness.ts session-profile.ts broker/federation-types.ts broker/federation-protocol.ts broker/federation-roster.ts broker/federation-send.ts broker/federation-conversation.ts broker/attachment.ts broker/federation-origin.ts broker/peer-link.ts broker/broker.ts broker/collaboration-state.ts ui/*.ts"
+    "test:package:federation": "node scripts/smoke-federation-package.mjs",
+    "typecheck": "tsc --noEmit --module nodenext --moduleResolution nodenext --target es2022 --strict --skipLibCheck --allowImportingTsExtensions --types node federation.ts extension.ts index.ts pi-compat.ts compaction-awareness.ts session-profile.ts broker/federation-types.ts broker/federation-protocol.ts broker/federation-roster.ts broker/federation-send.ts broker/federation-conversation.ts broker/attachment.ts broker/federation-origin.ts broker/peer-link.ts broker/broker.ts broker/collaboration-state.ts ui/*.ts"
   },
   "keywords": [
     "pi-package"
   ],
   "pi": {
     "extensions": [
-      "./index.ts"
+      "./extension.ts"
     ],
     "skills": [
       "./skills"
@@ -86,6 +103,7 @@
   "devDependencies": {
     "@mariozechner/pi-coding-agent": "^0.73.1",
     "@mariozechner/pi-tui": "^0.73.1",
+    "@types/node": "^26.5.1",
     "typebox": "^1.3.30",
     "typescript": "^6.0.3"
   }

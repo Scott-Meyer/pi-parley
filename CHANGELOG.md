@@ -1,5 +1,17 @@
 # Changelog
 
+## 1.3.0 - 2026-09-21
+
+### Added
+
+- A compiled `pi-parley/federation` facade for inspecting and attaching exact brokers from plain Node hosts.
+- An explicit, runtime-idempotent `pi-parley/extension` entrypoint for application-owned Pi actor wrappers.
+
+### Changed
+
+- Federation attachment now keeps broker endpoints, TCP credentials, framing, and handshake details behind opaque rooted host capabilities.
+- A temporary FlightDeck launch-context scope bridge remains while generic scope propagation and version-matched remote actors roll out.
+
 ## 1.2.0
 
 ### Added

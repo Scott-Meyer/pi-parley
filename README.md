@@ -277,24 +277,65 @@ pi.events.emit(PARLEY_OUTBOX_REQUEST_EVENT, {
 
 `confirmSend` applies to outbox requests. If confirmation is required and no UI is available, the request fails closed with `confirmation_unavailable`. The outbox resolves the target through the current session's scoped parley client, so extensions cannot choose the sender, scope, or resolved target ID. Duplicate `requestId` values are rejected and do not deliver again. Receiver messages include structured `extension_outbox` provenance in message details and model-visible sender context.
 
-### Peer-stream providers
+### Embedded actor extension
 
-Cross-computer transport is caller-loaded and opt-in. Parley does not discover hosts, import a transport provider, choose default remote endpoints, or require a particular operating system or management application.
+Applications that must enroll every Pi actor can bundle the complete package and call the explicit Pi-only TypeScript entrypoint from their required extension wrapper:
 
 ```typescript
-import { PeerStreamController } from "pi-parley/broker/attachment.ts";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { registerParleyExtension } from "pi-parley/extension";
 
-const peers = new PeerStreamController();
-const provider = peers.registerProvider(acquireAuthenticatedDuplex);
-// Registration alone does not acquire or connect.
-const link = await provider.attach(binding, brokerAuthority);
-// Later: revoke admissions and join acquisitions, links, and cleanup.
-await peers.close();
+export default function applicationExtension(pi: ExtensionAPI) {
+  registerApplicationStatus(pi);
+  registerParleyExtension(pi);
+}
 ```
 
-The factory receives an opaque caller-defined binding and an abort signal, and returns an owned binary Node `Duplex` authenticated to the exact destination broker. `brokerAuthority` supplies an explicit local broker endpoint, expected Parley origins, and independently authorized scope bindings for each end. Provider/host identities do not define Parley origins or broker/session incarnations.
+Call `registerParleyExtension()` once as the wrapper factory's final potentially throwing operation, not from `session_start`, and load the required wrapper before optional user packages. Register the application's own resources first and do not throw after Parley returns: older supported Pi hosts do not retract event subscriptions when an outer extension factory later fails. Registration is idempotent across physical copies that implement this v1 actor entrypoint in one Pi runtime; shutdown releases that runtime claim so reload and session replacement bind fresh handlers. An older ambient pi-parley release cannot participate in the claim protocol and must be updated or excluded before an application forces its bundled actor. The factory starts no process, socket, watcher, or timer. Session-scoped work starts from lifecycle events or the first operation and is joined by Parley's `session_shutdown` handler; the wrapper owns no Parley teardown.
 
-`attachPeerStream(options)` and `peers.attachOwnedStream(options)` accept an already-owned stream instead. Ownership transfers at invocation, including failed startup. Adapters may use `Duplex.from({ readable, writable })` for stdio, but stream destruction must join the provider's own cleanup obligations. EOF half-closes sending after admitted writes settle; receiving remains open. No acquire/connect/retry/replay happens implicitly. An attachment resolves only after broker handshake acceptance; its non-rejecting `completion` and idempotent `close()` join admitted writes and owned cleanup. Neither transport setup nor a write callback is a message-delivery receipt.
+Install the bundled tarball as the wrapper's private ordinary dependency rather than as another Pi package. The complete tarball and its production dependencies are required because the actor uses Parley's TypeScript extension, UI, client, broker, and spawn modules. Pi supplies the peer extension-runtime, TUI, and TypeBox modules. The application must set generic routing such as `PI_PARLEY_SCOPE_ID` before Pi loads extensions. A temporary FlightDeck launch-context bridge remains during rollout of that generic variable and version-matched remote actor enrollment; it is compatibility behavior, not part of the public embedding contract.
+
+### Broker federation facade
+
+Cross-computer transport is caller-loaded and opt-in. Parley does not discover hosts, approve topology, import a transport provider, or reconnect links. The compiled `pi-parley/federation` entrypoint works in plain Node ESM without a TypeScript loader and keeps broker paths, endpoint credentials, control frames, origins, and handshake machinery behind one public boundary.
+
+```typescript
+import {
+  inspectBroker,
+  attachBrokers,
+  type BrokerHostAccess,
+  type ScopeBinding,
+} from "pi-parley/federation";
+
+const laptop = await inspectBroker(laptopAccess, { signal });
+const server = await inspectBroker(serverAccess, { signal });
+
+const laptopScopes: ScopeBinding[] = [{
+  localScopeId: "team",
+  localScopeAlias: "laptop",
+  remoteScopeAlias: "server",
+}];
+const serverScopes: ScopeBinding[] = [{
+  localScopeId: "team",
+  localScopeAlias: "server",
+  remoteScopeAlias: "laptop",
+}];
+
+const link = await attachBrokers({
+  initiator: { broker: laptop, originLabel: "Laptop", scopeBindings: laptopScopes },
+  acceptor: { broker: server, originLabel: "Server", scopeBindings: serverScopes },
+  signal,
+  timeoutMs: 10_000,
+});
+
+await link.close();
+```
+
+A `BrokerHostAccess` is rooted at one Pi agent directory. It offers bounded reads relative to that root and opens only exact host-local Unix sockets, named pipes, or loopback TCP endpoints requested by Parley. `createLocalBrokerAccess()` provides this capability for the current machine; remote-management applications can adapt their existing authenticated host streams. TCP state credentials never leave the facade in endpoints, handles, JSON, or errors.
+
+`inspectBroker()` returns a frozen, runtime-opaque handle containing the canonical Parley installation origin and an immutable live-scope snapshot. It owns no persistent stream. Inspection may mint the installation's first federation origin, so caller consent belongs before inspection. A TCP handle becomes stale after broker restart.
+
+`attachBrokers()` validates both handles and independently supplied scope mappings before opening either endpoint. It opens both streams concurrently under one deadline, aborts a sibling acquisition after failure, joins late streams, and transfers ownership to the brokers only after both opens succeed. It never rediscovers, retries, reconnects, or replays. Readiness means both brokers accepted the handshake. The returned attachment has a non-rejecting `completion` and idempotent `close()`; both join admitted writes and owned stream cleanup. Sanitized `BrokerInspectionError` and `BrokerAttachmentError` codes contain no provider diagnostics, paths, credentials, or raw frames.
 
 ## How It Works
 

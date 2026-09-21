@@ -714,7 +714,49 @@ function formatInboundDeliveryMetadata(message: Message): string {
   if (Date.now() - message.timestamp > 60_000) parts.push(`Originally sent: ${formatMessageTimestamp(message.timestamp)}`);
   return parts.join("\n");
 }
-export default function piParleyExtension(pi: ExtensionAPI) {
+const PARLEY_EXTENSION_RUNTIME_CLAIM_EVENT = "pi-parley:extension-runtime-claim:v1";
+type ParleyExtensionRuntimeClaim = { version: 1; claim(): void };
+
+/** Register Parley once in one Pi extension runtime.
+ *
+ * Every ExtensionAPI created by the same Pi runtime shares its event bus. That
+ * bus is the identity boundary, so an app-owned wrapper and an ambient package
+ * cannot install duplicate clients, tools, or lifecycle handlers. */
+export function registerParleyExtension(pi: ExtensionAPI): void {
+  // Pi creates a different ExtensionAPI facade (and jiti may create a separate
+  // module realm) for every extension path. Their facades still route through
+  // one synchronous runtime event bus, which is the cross-copy identity and
+  // claim boundary.
+  let alreadyClaimed = false;
+  const probe: ParleyExtensionRuntimeClaim = { version: 1, claim: () => { alreadyClaimed = true; } };
+  pi.events.emit(PARLEY_EXTENSION_RUNTIME_CLAIM_EVENT, probe);
+  if (alreadyClaimed) return;
+
+  // Claim before registering tools/handlers, and release it if Parley's own
+  // registration fails. A wrapper must call this as its final throwing step:
+  // older Pi hosts do not discard event subscriptions if the wrapper throws
+  // after this function returns.
+  const releaseRuntimeClaim = pi.events.on(PARLEY_EXTENSION_RUNTIME_CLAIM_EVENT, (payload) => {
+    if (!payload || typeof payload !== "object") return;
+    const candidate = payload as Partial<ParleyExtensionRuntimeClaim>;
+    if (candidate.version === 1 && typeof candidate.claim === "function") candidate.claim();
+  });
+  const registrationRollback = [releaseRuntimeClaim];
+  try {
+    installParleyExtension(pi, releaseRuntimeClaim, (cleanup) => registrationRollback.push(cleanup));
+  } catch (error) {
+    for (const cleanup of registrationRollback.reverse()) {
+      try { cleanup(); } catch { /* Preserve the registration failure. */ }
+    }
+    throw error;
+  }
+}
+
+function installParleyExtension(
+  pi: ExtensionAPI,
+  releaseRuntimeClaim: () => void,
+  retainRegistrationCleanup: (cleanup: () => void) => void,
+): void {
   let client: ParleyClient | null = null;
   const config: ParleyConfig = loadRuntimeConfig((error) => console.error(error.message));
   const askTimeoutMs = getAskTimeoutMs();
@@ -2586,7 +2628,7 @@ export default function piParleyExtension(pi: ExtensionAPI) {
     }
     registerLocalExtension(registration as ParleyExtensionRegistration);
   });
-  pi.events.emit(PARLEY_EXTENSION_REGISTRY_READY_EVENT, { version: 1 });
+  retainRegistrationCleanup(unsubscribeExtensionRegister);
   const unsubscribeSubagentControlParley = pi.events.on(SUBAGENT_CONTROL_PARLEY_EVENT, (payload) => {
     relaySubagentParleyPayload(payload, {
       sender: "subagent-control",
@@ -2594,6 +2636,7 @@ export default function piParleyExtension(pi: ExtensionAPI) {
       errorEntryType: "parley_control_error",
     });
   });
+  retainRegistrationCleanup(unsubscribeSubagentControlParley);
   const unsubscribeSubagentResultParley = pi.events.on(SUBAGENT_RESULT_PARLEY_EVENT, (payload) => {
     relaySubagentParleyPayload(payload, {
       sender: "subagent-result",
@@ -2602,7 +2645,9 @@ export default function piParleyExtension(pi: ExtensionAPI) {
       acknowledge: true,
     });
   });
+  retainRegistrationCleanup(unsubscribeSubagentResultParley);
   const unsubscribeOutboxRequest = pi.events.on(PARLEY_OUTBOX_REQUEST_EVENT, handleOutboxRequest);
+  retainRegistrationCleanup(unsubscribeOutboxRequest);
   pi.on("session_start", (_event, ctx) => {
     if (!config.enabled) {
       return;
@@ -4711,4 +4756,16 @@ Receipts include sender/recipient identity, exact message IDs, delivery state, a
     description: "Open session parley",
     handler: async (ctx) => openParleyOverlay(ctx),
   });
+
+  // The resource loader retains its underlying event bus across /reload and
+  // session replacement. Release after Parley's ordinary shutdown handler has
+  // joined session-scoped resources, allowing the fresh runtime to bind.
+  pi.on("session_shutdown", () => releaseRuntimeClaim());
+
+  // Announce availability only after every Pi resource and shared-bus handler
+  // is installed. A failed factory therefore cannot expose a channel owned by
+  // a registration that the host will discard.
+  pi.events.emit(PARLEY_EXTENSION_REGISTRY_READY_EVENT, { version: 1 });
 }
+
+export default registerParleyExtension;

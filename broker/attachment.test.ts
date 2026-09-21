@@ -9,6 +9,7 @@ import { tmpdir } from "node:os";
 import { spawn, type ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { attachPeerStreams, attachPeerStream, PEER_STREAM_COPY_BYTES, PeerStreamAttachmentError, PeerStreamController, type AttachPeerStreamOptions, type AttachPeerStreamsOptions } from "./attachment.ts";
+import { attachBrokers, createLocalBrokerAccess, inspectBroker } from "../federation.ts";
 import { createMessageReader, writeMessage } from "./framing.ts";
 import { getBrokerSocketPath, readBrokerTcpEndpoint, getParleyDirPath, type BrokerConnectTarget } from "./paths.ts";
 import { getTsxCliPath } from "./spawn.ts";
@@ -158,7 +159,10 @@ async function fixture(t: test.TestContext, tcp = false) {
     const broker = target(dir);
     return { broker, origin: await origin(broker), client: await ordinary(broker, `${name}-client`, `${name}-authority`) };
   };
-  return { options, pairOptions, brokerStream, addBroker, stream, local, remote, localBroker, remoteBroker, ordinary, sockets };
+  return {
+    options, pairOptions, brokerStream, addBroker, stream, local, remote,
+    localBroker, remoteBroker, localDir, remoteDir, ordinary, sockets,
+  };
 }
 
 async function roster(inbox: Inbox, present: boolean): Promise<SessionInfo | undefined> {
@@ -643,6 +647,44 @@ test("readiness waits for broker handshake acceptance, not preparation or opaque
   await send(f.local, f.remote, remote, "after true readiness");
   await link.close();
   await roster(f.local, false); await roster(f.remote, false);
+});
+
+test("the public facade inspects and attaches exact brokers without exposing endpoint authority", { timeout: 20_000 }, async (t) => {
+  const f = await fixture(t, true);
+  const [initiator, acceptor] = await Promise.all([
+    inspectBroker(createLocalBrokerAccess({ agentDir: f.localDir })),
+    inspectBroker(createLocalBrokerAccess({ agentDir: f.remoteDir })),
+  ]);
+  assert.equal(initiator.scopes.some((scope) => scope.scopeId === "local-authority"), true);
+  assert.equal(acceptor.scopes.some((scope) => scope.scopeId === "remote-authority"), true);
+  assert.equal(JSON.stringify([initiator, acceptor]).includes("stateId"), false);
+
+  const link = await attachBrokers({
+    initiator: {
+      broker: initiator,
+      originLabel: "Initiator",
+      scopeBindings: [{ localScopeId: "local-authority", localScopeAlias: "local", remoteScopeAlias: "remote" }],
+    },
+    acceptor: {
+      broker: acceptor,
+      originLabel: "Acceptor",
+      scopeBindings: [{ localScopeId: "remote-authority", localScopeAlias: "remote", remoteScopeAlias: "local" }],
+    },
+  });
+  assert.equal(link.initiatorOrigin.label, "Initiator");
+  assert.equal(link.acceptorOrigin.label, "Acceptor");
+  const importedRemote = (await roster(f.local, true))!;
+  const importedLocal = (await roster(f.remote, true))!;
+  assert.equal(importedRemote.federation?.originLabel, "Acceptor");
+  assert.equal(importedLocal.federation?.originLabel, "Initiator");
+  await send(f.local, f.remote, importedRemote, "public facade → remote");
+  await send(f.remote, f.local, importedLocal, "public facade ← remote");
+  const closing = link.close();
+  assert.strictEqual(closing, link.close());
+  assert.strictEqual(closing, link.completion);
+  assert.deepEqual(await closing, { status: "closed", reason: "close" });
+  await roster(f.local, false);
+  await roster(f.remote, false);
 });
 
 test("supplied broker pairs form a direct full mesh without relaying imported sessions", { timeout: 20_000 }, async (t) => {

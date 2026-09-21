@@ -9,6 +9,13 @@ import type { BrokerMessage, SessionRegistration } from "../types.ts";
 import { ParleyClient } from "./client.ts";
 import { ExtensionStateManager } from "./extension-state.ts";
 
+// Standalone broker fixtures must not inherit routing from the invoking tab.
+for (const key of Object.keys(process.env)) {
+  if ((key.startsWith("PI_PARLEY_") && !key.startsWith("PI_PARLEY_TEST_")) || key.startsWith("FLIGHTDECK_") || key === "PI_CODING_AGENT_DIR") {
+    delete process.env[key];
+  }
+}
+
 const repoDir = process.cwd();
 
 function registration(name: string, startedAt: number, ownerEligible?: boolean): SessionRegistration {

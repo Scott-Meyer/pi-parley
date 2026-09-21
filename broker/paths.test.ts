@@ -8,6 +8,7 @@ import {
   getAgentDirPath,
   getBrokerConnectTarget,
   getBrokerListenTarget,
+  getBrokerPipeName,
   getBrokerPortFilePath,
   getBrokerSocketPath,
   getParleyDirPath,
@@ -38,10 +39,16 @@ test("getParleyDirPath points at the parley runtime directory under the agent di
   assert.equal(getParleyDirPath("/tmp/pi-agent"), join("/tmp/pi-agent", "parley"));
 });
 
-test("getBrokerSocketPath uses named pipe on Windows", () => {
+test("getBrokerSocketPath uses a bounded collision-resistant Windows namespace", () => {
   const pipePath = getBrokerSocketPath("win32", "C:/Users/rcroh/.pi/agent");
-  assert.match(pipePath, /^\\\\\.\\pipe\\pi-parley-/);
-  assert.doesNotMatch(pipePath, /broker\.sock$/);
+  assert.equal(pipePath, `\\\\.\\pipe\\${getBrokerPipeName("c:\\users\\rcroh\\.pi\\agent\\")}`);
+  assert.match(pipePath, /^\\\\\.\\pipe\\pi-parley-[a-f0-9]{64}$/);
+  assert.notEqual(
+    getBrokerPipeName("C:\\tenant\\a-b"),
+    getBrokerPipeName("C:\\tenant\\a\\b"),
+    "different roots that sanitize alike must not share broker authority",
+  );
+  assert.ok(getBrokerPipeName(`C:\\${"nested\\".repeat(1000)}agent`).length < 80);
 });
 
 test("getBrokerSocketPath uses broker.sock under PI_CODING_AGENT_DIR on non-Windows", () => {

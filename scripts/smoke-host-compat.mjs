@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -139,7 +139,7 @@ try {
       private: true,
       ...(host.overrides ? { overrides: host.overrides } : {}),
     }));
-    run("npm", ["install", "--silent", host.spec, tarball], { cwd: project });
+    run("npm", ["install", "--silent", "--ignore-scripts", "--omit=dev", host.spec, tarball], { cwd: project });
 
     const hostPackage = join(project, "node_modules", host.packagePath);
     if (!existsSync(hostPackage)) throw new Error(`${host.label}: expected host package is missing`);
@@ -153,7 +153,16 @@ try {
     const extensionRoot = join(project, "node_modules", "pi-parley");
     const extensionManifest = JSON.parse(readFileSync(join(extensionRoot, "package.json"), "utf8"));
     assert.deepEqual(extensionManifest.dependencies, { "fs-native-extensions": "^1.5.1", tsx: "^4.23.13" });
-    const extensionPath = join(extensionRoot, "index.ts");
+    const extensionPath = join(extensionRoot, "extension.ts");
+    const wrapperPath = join(project, "flightdeck-wrapper.mjs");
+    writeFileSync(wrapperPath, [
+      'import { registerParleyExtension } from "pi-parley/extension";',
+      'export default function flightdeck(pi) { registerParleyExtension(pi); }',
+      '',
+    ].join("\n"));
+    const ambientExtensionRoot = join(project, "ambient-copy", "pi-parley");
+    cpSync(extensionRoot, ambientExtensionRoot, { recursive: true });
+    const ambientExtensionPath = join(ambientExtensionRoot, "extension.ts");
     // Publish the fixture broker before RPC stdin can end the host. Otherwise its
     // asynchronous auto-spawn can finish after cleanup's PID census and recreate
     // a directory while it is being removed. This also exercises packed spawning.
@@ -177,7 +186,8 @@ try {
         "--model", "gpt-4o-mini",
         "--api-key", "host-compat-smoke-only",
         "--no-extensions",
-        "-e", extensionPath,
+        "-e", wrapperPath,
+        "-e", ambientExtensionPath,
       ],
       {
         cwd: project,
@@ -194,8 +204,9 @@ try {
       (record) => record.type === "session_info_changed" && record.name === `${host.label}-compatible`,
     );
     const availableCommands = commands?.data?.commands ?? commands?.data ?? [];
-    if (!commands?.success || !availableCommands.some((command) => command.name === "parley")) {
-      throw new Error(`${host.label}: pi-parley commands were not loaded`);
+    const parleyCommands = availableCommands.filter((command) => command.name === "parley" || /^parley:\d+$/.test(command.name));
+    if (!commands?.success || parleyCommands.length !== 1) {
+      throw new Error(`${host.label}: bundled wrapper and ambient physical copy did not deduplicate Parley registration`);
     }
     if (!alias?.success || !nameEvent || !state?.success || state.data?.sessionName !== `${host.label}-compatible`) {
       throw new Error(`${host.label}: extension command or host session-name event failed`);

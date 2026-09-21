@@ -20,7 +20,8 @@ import { restoreConversationHistory } from "./conversation-history.ts";
 
 // This test process owns its fixture brokers, never the invoking agent's runtime.
 for (const key of Object.keys(process.env)) {
-  if (key.startsWith("PI_PARLEY_") || key.startsWith("PI_SUBAGENT_") || key === "PI_CODING_AGENT_DIR") delete process.env[key];
+  if ((key.startsWith("PI_PARLEY_") && !key.startsWith("PI_PARLEY_TEST_")) || key.startsWith("PI_SUBAGENT_")
+    || key.startsWith("FLIGHTDECK_") || key === "PI_CODING_AGENT_DIR") delete process.env[key];
 }
 const repo = process.cwd();
 const text = (result: CapturedToolResult) => result.content.map((part) => part.text).join("\n");

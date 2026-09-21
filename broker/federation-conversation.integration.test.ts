@@ -14,6 +14,13 @@ import { getTsxCliPath } from "./spawn.ts";
 import { FEDERATION_CONVERSATION_FEATURE, FEDERATION_EXACT_SEND_FEATURE } from "./federation-types.ts";
 import type { Message, SessionInfo } from "../types.ts";
 
+// Fixture clients own their routing context; never inherit the invoking tab.
+for (const key of Object.keys(process.env)) {
+  if ((key.startsWith("PI_PARLEY_") && !key.startsWith("PI_PARLEY_TEST_")) || key.startsWith("FLIGHTDECK_") || key === "PI_CODING_AGENT_DIR") {
+    delete process.env[key];
+  }
+}
+
 async function until<T>(read: () => T | undefined | Promise<T | undefined>): Promise<T> {
   for (let attempt = 0; attempt < 1000; attempt++) {
     const result = await read();
@@ -531,12 +538,13 @@ test("canonical alias admission supersedes an older local rebound verdict", { co
     const snapshot = (await a.listSessions()).find(row => row.id === local.sessionId)!;
     await local.disconnect();
     const replacement = await f.connect(0, "local"), li = inbox(replacement);
-    const options = { messageId: "stale_alias_recovery_1234", text: "execute this once", timeoutMs: 100 };
+    const options = { messageId: "stale_alias_recovery_1234", text: "execute this once" };
     const rebound = await a.sendToSession(snapshot, options);
     assert.equal(rebound.code, "E_TARGET_REBOUND");
     assert.equal(rebound.outcomeKnown, true);
     f.dropResults(true);
-    const dispatched = await a.send("b", options);
+    // Only the deliberately lost peer ACK needs an artificially short deadline.
+    const dispatched = await a.send("b", { ...options, timeoutMs: 100 });
     assert.equal(dispatched.delivery, "unknown");
     await until(() => bi.find(row => row.message.id === dispatched.id));
     const before = f.frames.length;
@@ -687,7 +695,10 @@ test("capability downgrade cannot replace a retained unknown or acknowledged con
       const a = await f.connect(0, "a"), b = await f.connect(1, "b"), bi = inbox(b);
       await f.remote(a, "b");
       f.dropResults(lostAck);
-      const initial = await a.send("b", { text: "retain this exact operation", timeoutMs: 100 });
+      const initial = await a.send("b", {
+        text: "retain this exact operation",
+        timeoutMs: lostAck ? 100 : 2_000,
+      });
       assert.equal(initial.delivery, lostAck ? "unknown" : "socket_delivered");
       await until(() => bi.find(row => row.message.id === initial.id));
       await f.unlink();

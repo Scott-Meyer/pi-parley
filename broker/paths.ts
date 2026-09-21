@@ -1,5 +1,6 @@
+import { createHash } from "crypto";
 import { chmodSync, mkdirSync, readFileSync } from "fs";
-import { isAbsolute, join, resolve } from "path";
+import { isAbsolute, join, resolve, win32 } from "path";
 import { homedir } from "os";
 
 export const PARLEY_DIR_MODE = 0o700;
@@ -17,11 +18,20 @@ export interface BrokerTcpEndpoint {
 
 export type BrokerConnectTarget = string | BrokerTcpEndpoint;
 
-function sanitizePipeSegment(value: string): string {
-  return value
-    .replace(/[^a-zA-Z0-9]+/g, "-")
-    .replace(/^-+|-+$/g, "")
-    .toLowerCase() || "default";
+/** Bounded, collision-resistant Windows IPC namespace for one agent root.
+ * Normalize Windows' case-insensitive path spelling before hashing so every
+ * participant derives the same broker name without exposing or truncating it. */
+export function getBrokerPipeName(agentDir: string): string {
+  let normalized = win32.normalize(agentDir).toLowerCase();
+  const rootLength = win32.parse(normalized).root.length;
+  while (normalized.length > rootLength && normalized.endsWith("\\")) {
+    normalized = normalized.slice(0, -1);
+  }
+  const digest = createHash("sha256")
+    .update("pi-parley-agent-dir\0", "utf8")
+    .update(normalized, "utf8")
+    .digest("hex");
+  return `pi-parley-${digest}`;
 }
 
 export function getAgentDirPath(
@@ -66,7 +76,7 @@ export function getBrokerSocketPath(
   agentDir: string = getAgentDirPath(),
 ): string {
   if (platform === "win32") {
-    return `\\\\.\\pipe\\pi-parley-${sanitizePipeSegment(agentDir)}`;
+    return `\\\\.\\pipe\\${getBrokerPipeName(agentDir)}`;
   }
 
   return join(getParleyDirPath(agentDir), "broker.sock");

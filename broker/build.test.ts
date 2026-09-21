@@ -8,7 +8,7 @@ import { getBrokerBuildIdentity } from "./build.ts";
 function installation(root: string): string {
   mkdirSync(join(root, "broker"), { recursive: true });
   writeFileSync(join(root, "package.json"), JSON.stringify({
-    version: "1.0.0", files: ["config.ts", "broker/broker.ts", "ui/**/*.ts"],
+    version: "1.0.0", files: ["config.ts", "broker/broker.ts", "ui/**/*.ts", "dist/**"],
   }));
   writeFileSync(join(root, "config.ts"), "export const enabled = true;\n");
   writeFileSync(join(root, "broker/broker.ts"), "export const broker = true;\n");
@@ -49,6 +49,9 @@ test("UI, tests and generated files are not broker build inputs", () => {
     writeFileSync(join(root, "ui/card.ts"), "changed presentation");
     writeFileSync(join(root, "broker/broker.test.ts"), "changed test");
     writeFileSync(join(root, "broker/output.log"), "generated output");
+    mkdirSync(join(root, "dist"));
+    writeFileSync(join(root, "dist/federation.js"), "changed compiled facade");
+    writeFileSync(join(root, "dist/federation.d.ts"), "changed generated declarations");
     assert.deepEqual(getBrokerBuildIdentity(root), before);
   } finally { rmSync(scratch, { recursive: true, force: true }); }
 });

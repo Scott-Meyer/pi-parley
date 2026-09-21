@@ -22,6 +22,13 @@ import { ParleyClient } from "./client.ts";
 import { createMessageReader, writeMessage, MAX_FRAME_BYTES } from "./framing.ts";
 import { getBrokerSocketPath } from "./paths.ts";
 
+// Standalone broker fixtures must not inherit routing from the invoking tab.
+for (const key of Object.keys(process.env)) {
+  if ((key.startsWith("PI_PARLEY_") && !key.startsWith("PI_PARLEY_TEST_")) || key.startsWith("FLIGHTDECK_") || key === "PI_CODING_AGENT_DIR") {
+    delete process.env[key];
+  }
+}
+
 const repoDir = process.cwd();
 const TSX_BIN = process.env.PI_PARLEY_TEST_TSX_BIN
   ?? path.join(repoDir, "node_modules", "tsx", "dist", "cli.mjs");

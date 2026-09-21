@@ -15,6 +15,13 @@ import { getTsxCliPath } from "./spawn.ts";
 import { ParleyClient } from "./client.ts";
 import { FEDERATION_EXACT_SEND_FEATURE } from "./federation-types.ts";
 
+// Fixture clients own their routing context; never inherit the invoking tab.
+for (const key of Object.keys(process.env)) {
+  if ((key.startsWith("PI_PARLEY_") && !key.startsWith("PI_PARLEY_TEST_")) || key.startsWith("FLIGHTDECK_") || key === "PI_CODING_AGENT_DIR") {
+    delete process.env[key];
+  }
+}
+
 const repoDir = process.cwd();
 
 async function startBroker(agentDir: string): Promise<ChildProcess> {
