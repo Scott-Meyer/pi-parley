@@ -14,6 +14,8 @@ import {
   FEDERATION_SESSION_ID_MAX_LENGTH,
   FEDERATION_SINGLE_HOP_FEATURE,
   type BrokerAcceptPeerRequest,
+  type BrokerStartPeerRequest,
+  type BrokerStartPeerResult,
   type BrokerListScopesRequest,
   type BrokerListScopesResult,
   type BrokerAcceptPeerResult,
@@ -186,13 +188,13 @@ export function isBrokerDialPeerRequest(value: unknown): value is BrokerDialPeer
     && (value.stateId === undefined || isFederationCorrelationId(value.stateId));
 }
 
-export function isBrokerAcceptPeerRequest(value: unknown): value is BrokerAcceptPeerRequest {
+function isSuppliedPeerRequest(value: unknown, type: "broker_accept_peer" | "broker_start_peer"): value is BrokerAcceptPeerRequest | BrokerStartPeerRequest {
   if (!isRecord(value) || !hasOnlyKeys(
     value,
     ["type", "requestId", "linkId", "localOrigin", "remoteOrigin", "scopeBindings"],
     ["stateId"],
   )) return false;
-  return value.type === "broker_accept_peer"
+  return value.type === type
     && isFederationCorrelationId(value.requestId)
     && isFederationCorrelationId(value.linkId)
     && isFederationOrigin(value.localOrigin)
@@ -200,6 +202,14 @@ export function isBrokerAcceptPeerRequest(value: unknown): value is BrokerAccept
     && value.localOrigin.id !== value.remoteOrigin.id
     && isScopeBindings(value.scopeBindings)
     && (value.stateId === undefined || isFederationCorrelationId(value.stateId));
+}
+
+export function isBrokerAcceptPeerRequest(value: unknown): value is BrokerAcceptPeerRequest {
+  return isSuppliedPeerRequest(value, "broker_accept_peer");
+}
+
+export function isBrokerStartPeerRequest(value: unknown): value is BrokerStartPeerRequest {
+  return isSuppliedPeerRequest(value, "broker_start_peer");
 }
 
 export function isBrokerListScopesRequest(value: unknown): value is BrokerListScopesRequest {
@@ -304,8 +314,8 @@ export function isPeerHelloAck(value: unknown): value is PeerHelloAck {
 
 function isControlResult(
   value: unknown,
-  type: "broker_dial_peer_result" | "broker_accept_peer_result",
-): value is BrokerDialPeerResult | BrokerAcceptPeerResult {
+  type: "broker_dial_peer_result" | "broker_accept_peer_result" | "broker_start_peer_result",
+): value is BrokerDialPeerResult | BrokerAcceptPeerResult | BrokerStartPeerResult {
   if (!isRecord(value) || value.type !== type || !isFederationCorrelationId(value.requestId) || typeof value.ok !== "boolean") return false;
   if (value.ok) {
     return hasOnlyKeys(value, ["type", "requestId", "ok", "linkId"])
@@ -322,6 +332,10 @@ export function isBrokerDialPeerResult(value: unknown): value is BrokerDialPeerR
 
 export function isBrokerAcceptPeerResult(value: unknown): value is BrokerAcceptPeerResult {
   return isControlResult(value, "broker_accept_peer_result");
+}
+
+export function isBrokerStartPeerResult(value: unknown): value is BrokerStartPeerResult {
+  return isControlResult(value, "broker_start_peer_result");
 }
 
 function isStableSessionId(value: unknown): value is string {

@@ -28,12 +28,13 @@ import { isValidSessionDescription, isValidSessionName, RESERVED_SESSION_NAME_PR
 import {
   isBrokerAcceptPeerRequest,
   isBrokerDialPeerRequest,
+  isBrokerStartPeerRequest,
   isBrokerListScopesRequest,
   isCanonicalFederationOriginId,
   isFederationCorrelationId,
   isPeerHello,
 } from "./federation-protocol.ts";
-import { FederationPeerError, PeerLinkManager, type FederationPeerLink, type PreparedInboundPeer } from "./peer-link.ts";
+import { FederationPeerError, PeerLinkManager, type FederationPeerLink, type PreparedInboundPeer, type PreparedOutboundPeer } from "./peer-link.ts";
 import {
   FederationRosterState,
   type ImportedFederatedSession,
@@ -615,8 +616,9 @@ class ParleyBroker {
     }
     this.connections.add(socket);
     let sessionKey: string | null = null;
-    let connectionRole: "unregistered" | "client" | "peer-prepared" | "peer" | "control" = "unregistered";
+    let connectionRole: "unregistered" | "client" | "peer-prepared" | "peer-starting" | "peer" | "control" = "unregistered";
     let preparedPeer: PreparedInboundPeer | null = null;
+    let startingPeer: { requestId: string; prepared: PreparedOutboundPeer } | null = null;
     let dialAbortController: AbortController | null = null;
     let peerLinkId: string | null = null;
     let registrationTimeout: NodeJS.Timeout | null = null;
@@ -628,7 +630,7 @@ class ParleyBroker {
       this.unregisteredConnections.add(socket);
       this.evictOldestUnregisteredConnections(socket);
       registrationTimeout = setTimeout(() => {
-        if (connectionRole === "unregistered" || connectionRole === "peer-prepared") socket.destroy();
+        if (connectionRole === "unregistered" || connectionRole === "peer-prepared" || connectionRole === "peer-starting") socket.destroy();
       }, timeoutMs);
       registrationTimeout.unref?.();
     };
@@ -672,6 +674,30 @@ class ParleyBroker {
         throw new Error("Broker control connections accept exactly one request");
       }
 
+      if (connectionRole === "peer-starting") {
+        clearRegistrationTimeout();
+        if (!startingPeer) throw new Error("Outbound peer authority missing");
+        const { requestId, prepared } = startingPeer;
+        startingPeer = null;
+        let link: FederationPeerLink;
+        try {
+          link = this.peerLinks.acceptOutbound(socket, msg, prepared);
+        } catch (error) {
+          const failure = error instanceof FederationPeerError ? error : new FederationPeerError("E_HANDSHAKE_FAILED", "Peer start failed", { cause: error });
+          connectionRole = "control";
+          this.writeBrokerFrame(socket, { type: "broker_start_peer_result", requestId, ok: false, code: failure.code, error: failure.message });
+          socket.end();
+          return;
+        }
+        connectionRole = "peer";
+        peerLinkId = link.linkId;
+        // This frame belongs to the controller, not the peer. Queue it before
+        // activation can emit rosters, including when the ack has a peer tail.
+        this.writeBrokerFrame(socket, { type: "broker_start_peer_result", requestId, ok: true, linkId: link.linkId });
+        this.peerLinks.activateLink(link.linkId);
+        return;
+      }
+
       if (connectionRole === "peer-prepared") {
         clearRegistrationTimeout();
         if (!preparedPeer) throw new Error("Prepared peer authority missing");
@@ -712,6 +738,37 @@ class ParleyBroker {
         connectionRole = "peer";
         peerLinkId = accepted.link.linkId;
         this.peerLinks.activateLink(accepted.link.linkId);
+        return;
+      }
+
+      if (connectionRole === "unregistered" && claimedType === "broker_start_peer") {
+        connectionRole = "control";
+        clearRegistrationTimeout();
+        if (typeof LISTEN_TARGET !== "string" && record?.stateId !== BROKER_STATE_ID) {
+          throw new Error("Invalid parley TCP endpoint credentials");
+        }
+        const requestId = record && isFederationCorrelationId(record.requestId) ? record.requestId : undefined;
+        if (!isBrokerStartPeerRequest(msg)) {
+          if (requestId) this.writeBrokerFrame(socket, { type: "broker_start_peer_result", requestId, ok: false, code: "E_INVALID_REQUEST", error: "Invalid broker start peer request" });
+          else this.writeBrokerFrame(socket, { type: "error", error: "Invalid broker start peer request" });
+          socket.end();
+          return;
+        }
+        try {
+          this.enforceCanonicalFederationOrigin(msg.localOrigin);
+          const prepared = this.peerLinks.prepareOutbound(msg);
+          startingPeer = { requestId: msg.requestId, prepared };
+          connectionRole = "peer-starting";
+          this.cancelShutdownTimer();
+          armRegistrationTimeout(PEER_PREPARED_TIMEOUT_MS);
+          this.writeBrokerFrame(socket, this.peerLinks.outboundHello(prepared));
+        } catch (error) {
+          startingPeer = null;
+          connectionRole = "control";
+          const failure = error instanceof FederationPeerError ? error : new FederationPeerError("E_INVALID_REQUEST", "Peer start failed", { cause: error });
+          this.writeBrokerFrame(socket, { type: "broker_start_peer_result", requestId: msg.requestId, ok: false, code: failure.code, error: failure.message });
+          socket.end();
+        }
         return;
       }
 

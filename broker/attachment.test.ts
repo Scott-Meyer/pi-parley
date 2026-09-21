@@ -8,7 +8,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { spawn, type ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { attachPeerStream, PEER_STREAM_COPY_BYTES, PeerStreamAttachmentError, PeerStreamController, type AttachPeerStreamOptions } from "./attachment.ts";
+import { attachPeerStreams, attachPeerStream, PEER_STREAM_COPY_BYTES, PeerStreamAttachmentError, PeerStreamController, type AttachPeerStreamOptions, type AttachPeerStreamsOptions } from "./attachment.ts";
 import { createMessageReader, writeMessage } from "./framing.ts";
 import { getBrokerSocketPath, readBrokerTcpEndpoint, getParleyDirPath, type BrokerConnectTarget } from "./paths.ts";
 import { getTsxCliPath } from "./spawn.ts";
@@ -145,7 +145,20 @@ async function fixture(t: test.TestContext, tcp = false) {
   };
   const local = await ordinary(localBroker, "local-client", "local-authority");
   const remote = await ordinary(remoteBroker, "remote-client", "remote-authority");
-  return { options, stream, local, remote, localBroker, remoteBroker, ordinary, sockets };
+  const brokerStream = async (broker: BrokerConnectTarget) => {
+    const socket = connect(broker); sockets.push(socket); await once(socket, "connect"); return socket;
+  };
+  const pairOptions = async (): Promise<AttachPeerStreamsOptions> => ({
+    local: { stream: await brokerStream(localBroker), origin: localOrigin, scopeBindings: options(local.socket).localScopeBindings, ...auth(localBroker) },
+    remote: { stream: await stream(), origin: remoteOrigin, scopeBindings: options(remote.socket).remoteScopeBindings, ...auth(remoteBroker) },
+  });
+  const addBroker = async (name: string) => {
+    const dir = path.join(root, name);
+    children.push(await startBroker(dir, tcp));
+    const broker = target(dir);
+    return { broker, origin: await origin(broker), client: await ordinary(broker, `${name}-client`, `${name}-authority`) };
+  };
+  return { options, pairOptions, brokerStream, addBroker, stream, local, remote, localBroker, remoteBroker, ordinary, sockets };
 }
 
 async function roster(inbox: Inbox, present: boolean): Promise<SessionInfo | undefined> {
@@ -630,4 +643,308 @@ test("readiness waits for broker handshake acceptance, not preparation or opaque
   await send(f.local, f.remote, remote, "after true readiness");
   await link.close();
   await roster(f.local, false); await roster(f.remote, false);
+});
+
+test("supplied broker pairs form a direct full mesh without relaying imported sessions", { timeout: 20_000 }, async (t) => {
+  const f = await fixture(t, true);
+  const c = await f.addBroker("c");
+  const abOptions = await f.pairOptions();
+  const ab = await attachPeerStreams(abOptions);
+  const duplicate = await f.pairOptions();
+  await assert.rejects(attachPeerStreams(duplicate), { code: "E_ALREADY_CONNECTED" });
+  assert.equal(duplicate.local.stream.closed, true); assert.equal(duplicate.remote.stream.closed, true);
+  assert.equal(abOptions.local.stream.destroyed, false, "rejected duplicate leaves the established link alive");
+  const ac = await attachPeerStreams({
+    local: { ...abOptions.local, stream: await f.brokerStream(f.localBroker) },
+    remote: { stream: await f.brokerStream(c.broker), origin: c.origin, ...auth(c.broker),
+      scopeBindings: [{ localScopeId: "c-authority", localScopeAlias: "remote", remoteScopeAlias: "local" }] },
+  });
+  await roster(f.local, true); await roster(f.remote, true); await roster(c.client, true);
+  assert.equal((await f.remote.sessions()).some((s) => s.federation?.originId === c.origin.id), false,
+    "a desktop attached to both hosts is not a federation transit");
+  assert.equal((await c.client.sessions()).some((s) => s.federation?.originId === ab.remoteOrigin.id), false);
+  const bc = await attachPeerStreams({
+    local: { ...abOptions.remote, stream: await f.brokerStream(f.remoteBroker) },
+    remote: { stream: await f.brokerStream(c.broker), origin: c.origin, ...auth(c.broker),
+      scopeBindings: [{ localScopeId: "c-authority", localScopeAlias: "local", remoteScopeAlias: "remote" }] },
+  });
+  const fromOrigin = async (inbox: Inbox, originId: string) => {
+    for (let attempt = 0; attempt < 150; attempt++) {
+      const session = (await inbox.sessions()).find((s) => s.federation?.originId === originId);
+      if (session) return session;
+      await delay(10);
+    }
+    throw new Error("Direct peer roster did not arrive");
+  };
+  await send(f.remote, c.client, await fromOrigin(f.remote, c.origin.id), "host B → host C 🛰️");
+  await send(c.client, f.remote, await fromOrigin(c.client, ab.remoteOrigin.id), "host C → host B");
+  await send(f.local, c.client, await fromOrigin(f.local, c.origin.id), "desktop → host C");
+  const privateClient = await f.ordinary(c.broker, "private-client", "unmapped-scope");
+  assert.equal((await privateClient.sessions()).some((s) => s.federation), false);
+  await bc.close();
+  assert.equal((await fromOrigin(f.remote, ab.localOrigin.id)).federation?.originId, ab.localOrigin.id);
+  for (let attempt = 0; attempt < 150; attempt++) {
+    if (!(await f.remote.sessions()).some((s) => s.federation?.originId === c.origin.id)) break;
+    await delay(10);
+  }
+  assert.equal((await f.remote.sessions()).some((s) => s.federation?.originId === c.origin.id), false);
+  assert.equal(abOptions.local.stream.destroyed, false, "closing B–C does not close A–B");
+  await Promise.all([ab.close(), ac.close()]);
+  for (const stream of [abOptions.local.stream, abOptions.remote.stream]) assert.equal(stream.closed, true);
+  await roster(f.local, false); await roster(f.remote, false); await roster(c.client, false);
+});
+
+/** Observe only the two startup frames, then keep the remaining stream opaque.
+ * Hold local readiness with all coalesced roster bytes; optionally perturb the
+ * actual remote ack to test the outbound broker's validation (not the adapter). */
+class PairHandshakeDuplex extends ObservedDuplex {
+  readonly received: { value: Record<string, unknown>; bytes: Buffer }[] = [];
+  readonly written: Buffer[] = [];
+  readonly secondFrame = deferred<void>();
+  private incoming = Buffer.alloc(0);
+  private held: Buffer[] = [];
+  private released = false;
+  constructor(socket: net.Socket, readonly holdReady = false,
+    readonly change?: (value: Record<string, unknown>) => Record<string, unknown>) {
+    super(socket);
+    socket.removeAllListeners("data");
+    const deliver = (bytes: Buffer) => {
+      if (!bytes.length) return;
+      if (holdReady && this.received.length >= 2 && !this.released) this.held.push(bytes);
+      else if (!this.push(bytes)) socket.pause();
+    };
+    socket.on("data", (bytes: Buffer) => {
+      if (this.received.length >= 2) { deliver(bytes); return; }
+      this.incoming = Buffer.concat([this.incoming, bytes]);
+      while (this.received.length < 2 && this.incoming.length >= 4) {
+        const end = 4 + this.incoming.readUInt32BE(0);
+        if (this.incoming.length < end) return;
+        let value = JSON.parse(this.incoming.subarray(4, end).toString()) as Record<string, unknown>;
+        if (value.type === "peer_hello_ack" && this.change) value = this.change(value);
+        // Whitespace makes byte-for-byte forwarding distinguishable from JSON
+        // reconstruction. Authority and features remain the brokers' values.
+        const payload = Buffer.from(JSON.stringify(value, null, 2));
+        const framed = Buffer.allocUnsafe(4 + payload.length);
+        framed.writeUInt32BE(payload.length, 0); payload.copy(framed, 4);
+        this.received.push({ value, bytes: framed });
+        deliver(framed);
+        this.incoming = this.incoming.subarray(end);
+        if (this.received.length === 2) this.secondFrame.resolve();
+      }
+      if (this.received.length >= 2) { deliver(this.incoming); this.incoming = Buffer.alloc(0); }
+    });
+  }
+  release() {
+    this.released = true;
+    const bytes = Buffer.concat(this.held); this.held = [];
+    // Fragment the held readiness prefix; its tail remains coalesced with roster.
+    this.push(bytes.subarray(0, 1));
+    queueMicrotask(() => { if (!this.push(bytes.subarray(1))) this.socket.pause(); });
+  }
+  override _write(bytes: Buffer, encoding: BufferEncoding, callback: (error?: Error | null) => void) {
+    this.written.push(Buffer.from(bytes));
+    super._write(bytes, encoding, callback);
+  }
+}
+
+test("pair readiness consumes start success before copying; actual hello/ack bytes and coalesced rosters survive", { timeout: 20_000 }, async (t) => {
+  const f = await fixture(t);
+  const options = await f.pairOptions();
+  const local = new PairHandshakeDuplex(options.local.stream as net.Socket, true);
+  const remote = new PairHandshakeDuplex(options.remote.stream as net.Socket);
+  f.sockets.push(local, remote);
+  let ready = false;
+  const startup = attachPeerStreams({ ...options, local: { ...options.local, stream: local }, remote: { ...options.remote, stream: remote } });
+  void startup.then(() => { ready = true; }, () => undefined);
+  await local.secondFrame.promise;
+  await delay(20);
+  assert.equal(ready, false, "accepted hello/ack is insufficient without correlated outbound start success");
+  assert.equal(local.received[0]!.value.type, "peer_hello");
+  assert.equal(local.received[1]!.value.type, "broker_start_peer_result", "result must precede activated roster frames");
+  assert.equal(local.written.length, 2, "no opaque B roster copied before outbound readiness");
+  assert.equal(remote.written.length, 2, "no opaque A roster copied before outbound readiness");
+  assert.deepEqual(remote.written[1], local.received[0]!.bytes, "real hello relayed unchanged");
+  assert.deepEqual(local.written[1], remote.received[1]!.bytes, "real ack relayed unchanged");
+  local.release();
+  const link = await startup;
+  local.opaque = remote.opaque = true;
+  const importedRemote = (await roster(f.local, true))!;
+  const importedLocal = (await roster(f.remote, true))!;
+  await send(f.local, f.remote, importedRemote, "\u0000🛰️漢字" + "漢".repeat(30_000));
+  await send(f.remote, f.local, importedLocal, "reverse\r\n" + "漢".repeat(30_000));
+  assert.ok(local.sizes.every((size) => size <= PEER_STREAM_COPY_BYTES));
+  assert.ok(remote.sizes.every((size) => size <= PEER_STREAM_COPY_BYTES));
+  assert.equal(local.maximumActiveWrites, 1); assert.equal(remote.maximumActiveWrites, 1);
+  assert.strictEqual(link.close(), link.close());
+  await link.completion;
+  assert.equal(local.closed, true); assert.equal(remote.closed, true);
+  await roster(f.local, false); await roster(f.remote, false);
+});
+
+test("the outbound broker rejects mismatched, malformed and unoffered real acknowledgements", { timeout: 20_000 }, async (t) => {
+  const f = await fixture(t);
+  const changes: [string, (v: Record<string, unknown>) => Record<string, unknown>][] = [
+    ["E_ORIGIN_MISMATCH", (v) => ({ ...v, origin: { id: "host:impostor" } })],
+    ["E_ORIGIN_MISMATCH", (v) => ({ ...v, acceptedPeerOriginId: "host:impostor" })],
+    ["E_ORIGIN_MISMATCH", (v) => ({ ...v, linkId: randomUUID() })],
+    ["E_SCOPE_MISMATCH", (v) => ({ ...v, scopeMappings: [{ localScopeAlias: "wrong", remoteScopeAlias: "remote" }] })],
+    ["E_FEATURE_UNSUPPORTED", (v) => ({ ...v, features: [...FEDERATION_SUPPORTED_FEATURES, "not-offered-v1"] })],
+    ["E_HANDSHAKE_FAILED", (v) => ({ ...v, version: 99 })],
+    ["E_HANDSHAKE_FAILED", (v) => ({ ...v, features: [] })],
+  ];
+  for (const [code, change] of changes) {
+    const options = await f.pairOptions();
+    const local = new PairHandshakeDuplex(options.local.stream as net.Socket);
+    const remote = new PairHandshakeDuplex(options.remote.stream as net.Socket, false, change);
+    f.sockets.push(local, remote);
+    await assert.rejects(attachPeerStreams({ ...options,
+      local: { ...options.local, stream: local }, remote: { ...options.remote, stream: remote },
+    }), { code });
+    assert.equal(local.received[1]!.value.type, "broker_start_peer_result");
+    assert.equal(local.received[1]!.value.ok, false, "outbound broker must reject, not consumer-side validation alone");
+    assert.equal(local.received[1]!.value.code, code);
+    assert.equal(local.closed, true); assert.equal(remote.closed, true);
+    await roster(f.local, false); await roster(f.remote, false);
+  }
+});
+
+test("pair attachment honors each broker's persisted origin, scope authority and TCP credentials", { timeout: 20_000 }, async (t) => {
+  const f = await fixture(t, true);
+  for (const which of ["local", "remote"] as const) {
+    const options = await f.pairOptions();
+    options[which].origin = { id: `host:wrong-${which}` };
+    await assert.rejects(attachPeerStreams(options), { code: "E_ORIGIN_MISMATCH" });
+    assert.equal(options.local.stream.closed, true); assert.equal(options.remote.stream.closed, true);
+  }
+  const scopeOptions = await f.pairOptions();
+  scopeOptions.remote.scopeBindings[0]!.localScopeAlias = "unauthorized";
+  await assert.rejects(attachPeerStreams(scopeOptions), { code: "E_SCOPE_MISMATCH" });
+  assert.equal(scopeOptions.local.stream.closed, true); assert.equal(scopeOptions.remote.stream.closed, true);
+  for (const which of ["local", "remote"] as const) {
+    const options = await f.pairOptions();
+    options[which].stateId = randomUUID();
+    await assert.rejects(attachPeerStreams(options), (error: unknown) => {
+      assert.ok(error instanceof PeerStreamAttachmentError);
+      assert.ok(["E_CLOSED", "E_HANDSHAKE_FAILED"].includes(error.code), error.code);
+      return true;
+    });
+    assert.equal(options.local.stream.closed, true); assert.equal(options.remote.stream.closed, true);
+  }
+  await roster(f.local, false); await roster(f.remote, false);
+});
+
+function inertPair(): AttachPeerStreamsOptions {
+  const stream = () => new Duplex({ read() {}, write(_bytes, _encoding, callback) { callback(); } });
+  return {
+    local: { stream: stream(), origin: { id: "host:local" },
+      scopeBindings: [{ localScopeId: "a", localScopeAlias: "local", remoteScopeAlias: "remote" }] },
+    remote: { stream: stream(), origin: { id: "host:remote" },
+      scopeBindings: [{ localScopeId: "b", localScopeAlias: "remote", remoteScopeAlias: "local" }] },
+  };
+}
+
+test("both streams transfer even on invalid options, immediate cancellation and deadline; rejection joins destruction", { timeout: 5_000 }, async () => {
+  for (const [code, change] of [
+    ["E_INVALID_OPTIONS", (o: AttachPeerStreamsOptions) => { o.handshakeTimeoutMs = 0; }],
+    ["E_INVALID_OPTIONS", (o: AttachPeerStreamsOptions) => { o.remote.scopeBindings = []; }],
+    ["E_INVALID_OPTIONS", (o: AttachPeerStreamsOptions) => { o.signal = {} as AbortSignal; }],
+    ["E_INVALID_OPTIONS", (o: AttachPeerStreamsOptions) => { o.local.stream.setEncoding("utf8"); }],
+    ["E_ABORTED", (o: AttachPeerStreamsOptions) => { o.signal = AbortSignal.abort(new Error("private reason")); }],
+    ["E_TIMEOUT", (o: AttachPeerStreamsOptions) => { o.handshakeTimeoutMs = 20; }],
+  ] satisfies [string, (o: AttachPeerStreamsOptions) => void][]) {
+    const options = inertPair(); change(options);
+    await assert.rejects(attachPeerStreams(options), { code });
+    assert.equal(options.local.stream.closed, true); assert.equal(options.remote.stream.closed, true);
+  }
+  const invalidStream = inertPair();
+  const transferred = invalidStream.local.stream;
+  invalidStream.remote.stream.destroy();
+  invalidStream.remote.stream = {} as Duplex;
+  await assert.rejects(attachPeerStreams(invalidStream), { code: "E_INVALID_OPTIONS" });
+  assert.equal(transferred.closed, true, "invalid counterpart does not leave the supplied valid stream with caller");
+  const sameStream = inertPair();
+  sameStream.remote.stream.destroy(); sameStream.remote.stream = sameStream.local.stream;
+  await assert.rejects(attachPeerStreams(sameStream), { code: "E_INVALID_OPTIONS" });
+  assert.equal(sameStream.local.stream.closed, true);
+  const asyncDestroy = inertPair();
+  const destroyed: string[] = [];
+  for (const which of ["local", "remote"] as const) {
+    asyncDestroy[which].stream.destroy();
+    asyncDestroy[which].stream = new Duplex({ emitClose: false, read() {},
+      write(_bytes, _encoding, callback) { callback(); },
+      destroy(error, callback) { setTimeout(() => { destroyed.push(which); callback(error); }, which === "local" ? 20 : 40); },
+    });
+  }
+  asyncDestroy.signal = AbortSignal.abort();
+  await assert.rejects(attachPeerStreams(asyncDestroy), { code: "E_ABORTED" });
+  assert.deepEqual(destroyed.sort(), ["local", "remote"]);
+});
+
+test("pair cancellation joins startup and active admitted writes, with no further admissions", { timeout: 20_000 }, async (t) => {
+  const f = await fixture(t);
+  for (const phase of ["startup", "to-local", "to-remote"] as const) {
+    const options = await f.pairOptions();
+    const local = new ObservedDuplex(options.local.stream as net.Socket);
+    const remote = new ObservedDuplex(options.remote.stream as net.Socket);
+    f.sockets.push(local, remote);
+    const cancellation = new AbortController();
+    const blocked = phase === "to-local" ? local : remote;
+    if (phase === "startup") { blocked.opaque = true; blocked.hold = deferred<void>(); }
+    const startup = attachPeerStreams({ ...options, signal: cancellation.signal,
+      local: { ...options.local, stream: local }, remote: { ...options.remote, stream: remote } });
+    let joined: Promise<unknown>;
+    if (phase === "startup") joined = assert.rejects(startup, { code: "E_ABORTED" });
+    else {
+      const link = await startup;
+      const importedRemote = (await roster(f.local, true))!;
+      const importedLocal = (await roster(f.remote, true))!;
+      blocked.opaque = true; blocked.hold = deferred<void>();
+      const from = phase === "to-local" ? f.remote : f.local;
+      const recipient = phase === "to-local" ? importedLocal : importedRemote;
+      writeMessage(from.socket, { type: "send", to: recipient.id,
+        message: { id: randomUUID(), timestamp: Date.now(), content: { text: "漢".repeat(30_000) } } });
+      joined = link.completion;
+    }
+    let settled = false; void joined.then(() => { settled = true; });
+    await blocked.admitted.promise;
+    cancellation.abort();
+    await delay(20);
+    assert.equal(local.destroyed, true); assert.equal(remote.destroyed, true);
+    assert.equal(settled, false, "cancellation joins the admitted callback, even after stream destruction");
+    assert.equal(blocked.sizes.length, 1, "no next chunk admitted after cancellation");
+    blocked.hold!.resolve();
+    await joined;
+    assert.equal(local.closed, true); assert.equal(remote.closed, true);
+    assert.equal(blocked.activeWrites, 0);
+    await roster(f.local, false); await roster(f.remote, false);
+  }
+});
+
+test("pair completion half-closes EOF and observes active stream failures on either side", { timeout: 20_000 }, async (t) => {
+  const f = await fixture(t);
+  for (const mode of ["end", "local-error", "remote-error"] as const) {
+    const options = await f.pairOptions();
+    const local = new ReceiveEOFProvider(options.local.stream as net.Socket);
+    const remote = new ReceiveEOFProvider(options.remote.stream as net.Socket);
+    f.sockets.push(local, remote);
+    const link = await attachPeerStreams({ ...options,
+      local: { ...options.local, stream: local }, remote: { ...options.remote, stream: remote } });
+    await roster(f.local, true); await roster(f.remote, true);
+    if (mode === "end") { local.receiveEOF(); remote.receiveEOF(); }
+    else (mode === "local-error" ? local : remote).destroy(new Error("private credentials must not escape"));
+    const outcome = await link.completion;
+    if (mode === "end") {
+      assert.deepEqual(outcome, { status: "end" });
+      assert.equal(local.finalCalls, 1); assert.equal(remote.finalCalls, 1);
+    } else {
+      assert.equal(outcome.status, "failure");
+      if (outcome.status === "failure") {
+        assert.equal(outcome.error.code, "E_STREAM_FAILED");
+        assert.equal(outcome.error.message.includes("private"), false);
+      }
+    }
+    assert.deepEqual(await link.close(), outcome);
+    assert.equal(local.closed, true); assert.equal(remote.closed, true);
+    await roster(f.local, false); await roster(f.remote, false);
+  }
 });

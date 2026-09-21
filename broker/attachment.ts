@@ -8,11 +8,15 @@ import {
   isBrokerAcceptPeerResult,
   isBrokerDialPeerRequest,
   isBrokerDialPeerResult,
+  isBrokerStartPeerRequest,
+  isBrokerStartPeerResult,
+  isPeerHello,
   isFederationBridgeAttach,
 } from "./federation-protocol.ts";
 import type {
   BrokerAcceptPeerRequest,
   BrokerDialPeerRequest,
+  BrokerStartPeerRequest,
   FederationFailureCode,
   FederationOrigin,
   FederationScopeBinding,
@@ -40,6 +44,28 @@ export interface AttachPeerStreamOptions {
   /** Cancels startup or closes the active attachment. */
   signal?: AbortSignal;
   /** Entire broker-handshake deadline, not a forwarding-setup deadline. Default 10s. */
+  handshakeTimeoutMs?: number;
+}
+
+/** An already authenticated connection to one exact broker. No endpoint
+ * discovery, acquisition, dialing or provider knowledge is needed here. */
+export interface PeerStreamEndpoint {
+  /** Binary Node Duplex with normal write-callback/destruction semantics.
+   * Ownership transfers immediately when attachPeerStreams is called. */
+  stream: Duplex;
+  origin: FederationOrigin;
+  /** Independently authorized local scope authority for this broker. */
+  scopeBindings: FederationScopeBinding[];
+  /** Required when this broker uses opt-in loopback TCP authentication. */
+  stateId?: string;
+}
+
+export interface AttachPeerStreamsOptions {
+  local: PeerStreamEndpoint;
+  remote: PeerStreamEndpoint;
+  /** Cancels startup or closes the active attachment. */
+  signal?: AbortSignal;
+  /** Entire handshake deadline; default 10s. */
   handshakeTimeoutMs?: number;
 }
 
@@ -122,8 +148,8 @@ class OwnedAttachment {
   private resolveCompletion!: (outcome: PeerStreamCompletion) => void;
   readonly completion = new Promise<PeerStreamCompletion>((resolve) => { this.resolveCompletion = resolve; });
 
-  constructor(stream: Duplex) {
-    this.own(stream);
+  constructor(...streams: Duplex[]) {
+    for (const stream of streams) this.own(stream);
   }
 
   bindSignal(signal?: AbortSignal): void {
@@ -231,14 +257,18 @@ class OwnedAttachment {
     return bytes;
   }
 
-  async readFrame(stream: Duplex): Promise<unknown> {
+  async readRawFrame(stream: Duplex): Promise<{ bytes: Buffer; value: unknown }> {
     const header = await this.readExact(stream, 4);
     const length = header.readUInt32BE(0);
     if (length > MAX_FRAME_BYTES) throw failure("E_HANDSHAKE_FAILED");
     const payload = await this.readExact(stream, length);
     // Exact reads leave coalesced peer bytes in the stream's own readable queue.
-    try { return JSON.parse(payload.toString("utf8")); }
+    try { return { bytes: Buffer.concat([header, payload]), value: JSON.parse(payload.toString("utf8")) }; }
     catch { throw failure("E_HANDSHAKE_FAILED"); }
+  }
+
+  async readFrame(stream: Duplex): Promise<unknown> {
+    return (await this.readRawFrame(stream)).value;
   }
 
   private admit(start: (callback: (error?: Error | null) => void) => void): Promise<void> {
@@ -428,6 +458,81 @@ export async function attachPeerStream(options: AttachPeerStreamOptions): Promis
     return Object.freeze({
       linkId: ready.linkId,
       localOrigin: Object.freeze(localOrigin), remoteOrigin: Object.freeze(remoteOrigin),
+      completion: owned.completion,
+      close: () => { owned.stop({ status: "closed", reason: "close" }); return owned.completion; },
+    });
+  } catch (error) {
+    const safeError = error instanceof PeerStreamAttachmentError ? error : failure("E_INVALID_OPTIONS");
+    owned.stop({ status: "failure", error: safeError });
+    await owned.completion;
+    throw safeError;
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+/** Join two exact broker streams as a direct, single-hop peer link. Both
+ * streams transfer immediately, even on invalid arguments, cancellation or
+ * startup rejection. No stream is reopened, retried or replayed. The remote
+ * broker is prepared first; the local broker emits its actual outbound hello
+ * and validates the actual remote ack. Readiness requires its start success.
+ * Thereafter bytes are copied opaquely, in order, with bounded backpressure.
+ * Rejection joins both streams' destruction and admitted write callbacks. */
+export async function attachPeerStreams(options: AttachPeerStreamsOptions): Promise<PeerStreamAttachment> {
+  const local = options?.local?.stream;
+  const remote = options?.remote?.stream;
+  const owned = new OwnedAttachment(...[...new Set([local, remote])].filter((stream): stream is Duplex => stream instanceof Duplex));
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    owned.bindSignal(options?.signal);
+    owned.check();
+    const timeoutMs = options?.handshakeTimeoutMs ?? 10_000;
+    if (!Number.isSafeInteger(timeoutMs) || timeoutMs <= 0 || timeoutMs > 2_147_483_647
+      || local === remote || ![local, remote].every((stream) => stream instanceof Duplex
+        && !stream.readableObjectMode && !stream.writableObjectMode && !stream.readableEncoding
+        && !stream.destroyed && stream.readable && stream.writable)) throw failure("E_INVALID_OPTIONS");
+    const localOrigin = { ...options.local.origin };
+    const remoteOrigin = { ...options.remote.origin };
+    const linkId = randomUUID();
+    const start: BrokerStartPeerRequest = {
+      type: "broker_start_peer", requestId: randomUUID(), linkId,
+      localOrigin, remoteOrigin,
+      scopeBindings: options.local.scopeBindings?.map((binding) => ({ ...binding })),
+      ...(options.local.stateId !== undefined ? { stateId: options.local.stateId } : {}),
+    };
+    const prepare: BrokerAcceptPeerRequest = {
+      type: "broker_accept_peer", requestId: randomUUID(), linkId,
+      localOrigin: remoteOrigin, remoteOrigin: localOrigin,
+      scopeBindings: options.remote.scopeBindings?.map((binding) => ({ ...binding })),
+      ...(options.remote.stateId !== undefined ? { stateId: options.remote.stateId } : {}),
+    };
+    if (!isBrokerStartPeerRequest(start) || !isBrokerAcceptPeerRequest(prepare)) throw failure("E_INVALID_OPTIONS");
+    timer = setTimeout(() => owned.stop({ status: "failure", error: failure("E_TIMEOUT") }), timeoutMs);
+    await owned.write(remote, frame(prepare));
+    const prepared = await owned.readFrame(remote);
+    if (!isBrokerAcceptPeerResult(prepared) || prepared.requestId !== prepare.requestId) throw failure("E_HANDSHAKE_FAILED");
+    if (!prepared.ok) throw failure(prepared.code);
+    if (prepared.linkId !== linkId) throw failure("E_HANDSHAKE_FAILED");
+    await owned.write(local, frame(start));
+    const hello = await owned.readRawFrame(local);
+    if (isBrokerStartPeerResult(hello.value) && hello.value.requestId === start.requestId && !hello.value.ok) {
+      throw failure(hello.value.code);
+    }
+    if (!isPeerHello(hello.value) || hello.value.linkId !== linkId) throw failure("E_HANDSHAKE_FAILED");
+    await owned.write(remote, hello.bytes);
+    const ack = await owned.readRawFrame(remote);
+    // The outbound broker, not this consumer, validates the real ack. Keep its
+    // exact bytes; do not manufacture authority or negotiated peer features.
+    await owned.write(local, ack.bytes);
+    const ready = await owned.readFrame(local);
+    if (!isBrokerStartPeerResult(ready) || ready.requestId !== start.requestId) throw failure("E_HANDSHAKE_FAILED");
+    if (!ready.ok) throw failure(ready.code);
+    if (ready.linkId !== linkId) throw failure("E_HANDSHAKE_FAILED");
+    owned.check();
+    clearTimeout(timer);
+    owned.startCopy(local, remote);
+    return Object.freeze({
+      linkId, localOrigin: Object.freeze(localOrigin), remoteOrigin: Object.freeze(remoteOrigin),
       completion: owned.completion,
       close: () => { owned.stop({ status: "closed", reason: "close" }); return owned.completion; },
     });

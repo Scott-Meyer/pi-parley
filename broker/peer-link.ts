@@ -19,6 +19,7 @@ import {
   bindingsMatchPeerMappings,
   isBrokerAcceptPeerRequest,
   isBrokerDialPeerRequest,
+  isBrokerStartPeerRequest,
   isPeerHello,
   isPeerHelloAck,
   scopeMappingsFromBindings,
@@ -47,6 +48,9 @@ export interface PreparedInboundPeer {
   remoteOrigin: FederationOrigin;
   scopeBindings: FederationScopeBinding[];
 }
+
+/** Broker-owned outbound authority, shared by dial and supplied streams. */
+export interface PreparedOutboundPeer extends PreparedInboundPeer {}
 
 export class FederationPeerError extends Error {
   constructor(readonly code: FederationFailureCode, message: string, options?: ErrorOptions) {
@@ -187,6 +191,68 @@ export class PeerLinkManager {
     };
   }
 
+  prepareOutbound(value: unknown): PreparedOutboundPeer {
+    if (!isBrokerStartPeerRequest(value)) {
+      throw new FederationPeerError("E_INVALID_REQUEST", "Invalid broker start peer request");
+    }
+    if (this.localOrigin && this.localOrigin.id !== value.localOrigin.id) {
+      throw new FederationPeerError("E_ORIGIN_MISMATCH", "Local federation origin is already fixed for this broker");
+    }
+    if (this.linksById.has(value.linkId)) {
+      throw new FederationPeerError("E_ALREADY_CONNECTED", "Peer link ID is already connected");
+    }
+    const existing = this.getLinkForRemoteOrigin(value.remoteOrigin.id);
+    if (existing && (existing.direction === "outbound"
+      || !this.isPreferredDirection("outbound", value.localOrigin.id, value.remoteOrigin.id))) {
+      throw new FederationPeerError("E_ALREADY_CONNECTED", "The existing peer link has the deterministic preferred direction");
+    }
+    if (!existing && this.linksById.size >= MAX_PEER_LINKS) {
+      throw new FederationPeerError("E_ALREADY_CONNECTED", "Peer link limit reached");
+    }
+    return {
+      linkId: value.linkId, localOrigin: this.localOrigin ?? value.localOrigin,
+      remoteOrigin: value.remoteOrigin, scopeBindings: value.scopeBindings,
+    };
+  }
+
+  outboundHello(prepared: PreparedOutboundPeer): PeerHello {
+    return {
+      type: "peer_hello", protocol: FEDERATION_PROTOCOL_NAME, version: FEDERATION_PROTOCOL_VERSION,
+      linkId: prepared.linkId, origin: prepared.localOrigin, expectedPeerOrigin: prepared.remoteOrigin,
+      scopeMappings: scopeMappingsFromBindings(prepared.scopeBindings), features: [...FEDERATION_SUPPORTED_FEATURES],
+    };
+  }
+
+  /** Validates the real peer ack and registers, but does not activate. The caller
+   * must first queue any trusted-local readiness result on a supplied stream. */
+  acceptOutbound(socket: net.Socket, value: unknown, prepared: PreparedOutboundPeer): FederationPeerLink {
+    if (!isPeerHelloAck(value)) {
+      throw new FederationPeerError("E_HANDSHAKE_FAILED", "Invalid peer hello acknowledgement");
+    }
+    if (value.linkId !== prepared.linkId) {
+      throw new FederationPeerError("E_ORIGIN_MISMATCH", "Peer acknowledgement did not match the requested link");
+    }
+    if (!value.accepted) throw new FederationPeerError(value.code, value.error);
+    if (value.origin.id !== prepared.remoteOrigin.id || value.acceptedPeerOriginId !== prepared.localOrigin.id) {
+      throw new FederationPeerError("E_ORIGIN_MISMATCH", "Peer acknowledgement did not match the requested origins");
+    }
+    if (!sameMappings(value.scopeMappings, scopeMappingsFromBindings(prepared.scopeBindings))) {
+      throw new FederationPeerError("E_SCOPE_MISMATCH", "Peer acknowledgement did not match the requested scopes");
+    }
+    if (!isValidNegotiatedFeatures(value.features, FEDERATION_SUPPORTED_FEATURES)) {
+      throw new FederationPeerError("E_FEATURE_UNSUPPORTED", "Peer acknowledged invalid or unoffered features");
+    }
+    const existing = this.getLinkForRemoteOrigin(prepared.remoteOrigin.id);
+    if (!existing && this.linksById.size >= MAX_PEER_LINKS) {
+      throw new FederationPeerError("E_ALREADY_CONNECTED", "Peer link limit reached");
+    }
+    const link: FederationPeerLink = {
+      ...prepared, direction: "outbound", socket, features: value.features, connectedAt: Date.now(),
+    };
+    this.registerLink(link);
+    return link;
+  }
+
   async dial(request: BrokerDialPeerRequest, signal?: AbortSignal): Promise<FederationPeerLink> {
     if (!isBrokerDialPeerRequest(request)) {
       throw new FederationPeerError("E_INVALID_REQUEST", "Invalid broker dial peer request");
@@ -196,31 +262,16 @@ export class PeerLinkManager {
     const requestedLocalOrigin = request.localOrigin;
     const remoteOrigin = request.remoteOrigin;
     const scopeBindings = request.scopeBindings;
-    const scopeMappings = scopeMappingsFromBindings(scopeBindings);
     let capability = request.capability;
     // Ensure the long-lived socket reader's function environment cannot retain
     // the authority-bearing request object after the attachment write.
     request = { ...request, capability: "" };
 
-    if (this.localOrigin && this.localOrigin.id !== requestedLocalOrigin.id) {
-      capability = "";
-      throw new FederationPeerError("E_ORIGIN_MISMATCH", "Local federation origin is already fixed for this broker");
-    }
-    const localOrigin = this.localOrigin ?? requestedLocalOrigin;
-    const existing = this.getLinkForRemoteOrigin(remoteOrigin.id);
-    if (existing && (
-      existing.direction === "outbound"
-      || !this.isPreferredDirection("outbound", localOrigin.id, remoteOrigin.id)
-    )) {
-      capability = "";
-      throw new FederationPeerError("E_ALREADY_CONNECTED", "The existing peer link has the deterministic preferred direction");
-    }
-    if (!existing && this.linksById.size >= MAX_PEER_LINKS) {
-      capability = "";
-      throw new FederationPeerError("E_ALREADY_CONNECTED", "Peer link limit reached");
-    }
-
-    const linkId = randomUUID();
+    const prepared = this.prepareOutbound({
+      type: "broker_start_peer", requestId: request.requestId, linkId: randomUUID(),
+      localOrigin: requestedLocalOrigin, remoteOrigin, scopeBindings,
+    });
+    const { linkId } = prepared;
     const socket = net.connect({ host: endpoint.host, port: endpoint.port });
     this.options.onSocketOpened?.(socket);
 
@@ -264,38 +315,9 @@ export class PeerLinkManager {
           }
           return;
         }
-        if (!isPeerHelloAck(value)) {
-          finishFailure(new FederationPeerError("E_HANDSHAKE_FAILED", "Invalid peer hello acknowledgement"));
-          return;
-        }
-        if (!value.accepted) {
-          finishFailure(new FederationPeerError(value.code, value.error));
-          return;
-        }
-        if (value.linkId !== linkId || value.origin.id !== remoteOrigin.id || value.acceptedPeerOriginId !== localOrigin.id) {
-          finishFailure(new FederationPeerError("E_ORIGIN_MISMATCH", "Peer acknowledgement did not match the requested origins"));
-          return;
-        }
-        if (!sameMappings(value.scopeMappings, scopeMappings)) {
-          finishFailure(new FederationPeerError("E_SCOPE_MISMATCH", "Peer acknowledgement did not match the requested scopes"));
-          return;
-        }
-        if (!isValidNegotiatedFeatures(value.features, FEDERATION_SUPPORTED_FEATURES)) {
-          finishFailure(new FederationPeerError("E_FEATURE_UNSUPPORTED", "Peer acknowledged invalid or unoffered features"));
-          return;
-        }
-        const link: FederationPeerLink = {
-          linkId,
-          direction: "outbound",
-          socket,
-          localOrigin,
-          remoteOrigin,
-          scopeBindings,
-          features: value.features,
-          connectedAt: Date.now(),
-        };
+        let link: FederationPeerLink;
         try {
-          this.registerLink(link);
+          link = this.acceptOutbound(socket, value, prepared);
         } catch (error) {
           finishFailure(error instanceof FederationPeerError
             ? error
@@ -332,23 +354,14 @@ export class PeerLinkManager {
             capability,
           });
           capability = "";
-          writeMessage(socket, {
-            type: "peer_hello",
-            protocol: FEDERATION_PROTOCOL_NAME,
-            version: FEDERATION_PROTOCOL_VERSION,
-            linkId,
-            origin: localOrigin,
-            expectedPeerOrigin: remoteOrigin,
-            scopeMappings,
-            features: [...FEDERATION_SUPPORTED_FEATURES],
-          });
+          writeMessage(socket, this.outboundHello(prepared));
         } catch (error) {
           capability = "";
           finishFailure(new FederationPeerError("E_DIAL_FAILED", "Failed to write peer handshake", { cause: error }));
         }
       });
       socket.once("error", (error) => {
-        if (!active) finishFailure(new FederationPeerError("E_DIAL_FAILED", "Failed to connect to FlightDeck peer endpoint", { cause: error }));
+        if (!active) finishFailure(new FederationPeerError("E_DIAL_FAILED", "Failed to connect to peer attachment endpoint", { cause: error }));
       });
       socket.once("close", () => {
         clearTimeout(timeout);

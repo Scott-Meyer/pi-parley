@@ -1,9 +1,9 @@
 /**
  * Broker-federation v1 wire contracts.
  *
- * FlightDeck owns the authenticated SSH transport. It consumes bridge_attach,
- * prepares the destination broker with broker_accept_peer, then forwards the
- * remaining peer stream opaquely. Brokers own identity, scope authorization,
+ * A trusted local controller owns authenticated transport. It prepares the
+ * destination with broker_accept_peer and starts outbound authority through
+ * broker_dial_peer or broker_start_peer, then copies the peer stream opaquely. Brokers own identity, scope authorization,
  * peer roles, and all later federation state.
  */
 
@@ -68,12 +68,12 @@ export interface FederationLoopbackEndpoint {
   port: number;
 }
 
-/** Trusted-local request from FlightDeck to the dialing broker. */
+/** Trusted-local request from an authenticated transport controller to the dialing broker. */
 export interface BrokerDialPeerRequest {
   type: "broker_dial_peer";
   requestId: string;
   endpoint: FederationLoopbackEndpoint;
-  /** Single-use, high-entropy authority consumed by FlightDeck. */
+  /** Single-use, high-entropy authority consumed by the attachment controller. */
   capability: string;
   localOrigin: FederationOrigin;
   remoteOrigin: FederationOrigin;
@@ -83,7 +83,7 @@ export interface BrokerDialPeerRequest {
 }
 
 /**
- * Trusted-local destination preparation written by FlightDeck before it
+ * Trusted-local destination preparation written by the controller before it
  * starts opaque cross-piping. The prepared broker connection itself must
  * become the destination half of that pipe; preparation is not transferable
  * to a second socket. This is authority, not a peer assertion.
@@ -96,6 +96,14 @@ export interface BrokerAcceptPeerRequest {
   remoteOrigin: FederationOrigin;
   scopeBindings: FederationScopeBinding[];
   stateId?: string;
+}
+
+/** Trusted-local outbound preparation on this exact supplied connection.
+ * The broker writes its hello here, validates the returned peer acknowledgement,
+ * then writes broker_start_peer_result before any activated peer traffic.
+ * No dialing, bridge capability or additional endpoint is involved. */
+export interface BrokerStartPeerRequest extends Omit<BrokerAcceptPeerRequest, "type"> {
+  type: "broker_start_peer";
 }
 
 export type FederationFailureCode =
@@ -124,7 +132,11 @@ export type BrokerDialPeerResult =
       error: string;
     };
 
-/** First frame on the broker -> FlightDeck attachment socket. */
+export type BrokerStartPeerResult =
+  | { type: "broker_start_peer_result"; requestId: string; ok: true; linkId: string }
+  | { type: "broker_start_peer_result"; requestId: string; ok: false; code: FederationFailureCode; error: string };
+
+/** First frame on a dialed broker -> controller attachment socket. */
 export interface FederationBridgeAttach {
   type: "bridge_attach";
   protocol: typeof FEDERATION_PROTOCOL_NAME;

@@ -43,14 +43,18 @@ export function getParleyDirPath(agentDir: string = getAgentDirPath()): string {
 
 export function shouldUseTcpTransport(
   env: NodeJS.ProcessEnv = process.env,
+  platform: NodeJS.Platform = process.platform,
 ): boolean {
+  // One Windows installation uses one default endpoint for every client.
+  // Authenticated loopback can also be carried by FlightDeck; named pipes cannot.
+  // Choosing by terminal context would split clients sharing the same broker.
   const transport = env.PI_PARLEY_TRANSPORT?.trim().toLowerCase();
-  if (transport === "tcp") {
-    return true;
-  }
-
+  if (transport === "tcp") return true;
+  if (transport === "socket") return false;
   const tcpOptIn = env.PI_PARLEY_TCP?.trim().toLowerCase();
-  return tcpOptIn === "1" || tcpOptIn === "true";
+  if (tcpOptIn === "1" || tcpOptIn === "true") return true;
+  if (tcpOptIn === "0" || tcpOptIn === "false") return false;
+  return platform === "win32";
 }
 
 export function getBrokerPortFilePath(parleyDir: string = getParleyDirPath()): string {
@@ -98,7 +102,7 @@ export function getBrokerConnectTarget(
   env: NodeJS.ProcessEnv = process.env,
   parleyDir: string = getParleyDirPath(getAgentDirPath(env)),
 ): BrokerConnectTarget {
-  return shouldUseTcpTransport(env)
+  return shouldUseTcpTransport(env, platform)
     ? readBrokerTcpEndpoint(parleyDir)
     : getBrokerSocketPath(platform, getAgentDirPath(env));
 }
@@ -107,7 +111,7 @@ export function getBrokerListenTarget(
   platform: NodeJS.Platform = process.platform,
   env: NodeJS.ProcessEnv = process.env,
 ): BrokerConnectTarget {
-  if (shouldUseTcpTransport(env)) {
+  if (shouldUseTcpTransport(env, platform)) {
     return { transport: "tcp", host: PARLEY_TCP_HOST, port: 0 };
   }
 

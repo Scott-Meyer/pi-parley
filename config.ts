@@ -1,6 +1,7 @@
 import { readFileSync } from "fs";
 import { join } from "path";
 import { getParleyDirPath } from "./broker/paths.ts";
+import { isFlightDeckTerminal } from "./flightdeck-context.ts";
 
 const DEFAULT_ASK_TIMEOUT_MS = 10 * 60 * 1000;
 const PARLEY_SCOPE_ID_ENV = "PI_PARLEY_SCOPE_ID";
@@ -18,7 +19,16 @@ export function getAskTimeoutMs(): number {
   return value;
 }
 
+/** FlightDeck terminal sessions share one scope across workspaces and machines,
+ * taking precedence over PI_PARLEY_SCOPE_ID. Require inherited tab routing and
+ * a status endpoint, not just ambient workspace metadata. Workspace ID is
+ * optional because system-terminal tabs have none; TCP endpoints include a token.
+ * No live-GUI probe is needed, including for retained terminals. Outside that
+ * context, explicit scope behavior is unchanged. Set enabled:false in config.json
+ * to opt out of Parley entirely. */
 export function getParleyScopeId(env: NodeJS.ProcessEnv = process.env): string | undefined {
+  if (isFlightDeckTerminal(env)) return "flightdeck";
+
   const scopeId = env[PARLEY_SCOPE_ID_ENV]?.trim();
   return scopeId ? scopeId : undefined;
 }

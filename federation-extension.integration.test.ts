@@ -8,11 +8,14 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { PeerStreamController } from "./broker/attachment.ts";
-import { getBrokerSocketPath } from "./broker/paths.ts";
+import { attachPeerStreams, PeerStreamController, type PeerStreamAttachment } from "./broker/attachment.ts";
+import { getBrokerSocketPath, getParleyDirPath, readBrokerTcpEndpoint, type BrokerConnectTarget } from "./broker/paths.ts";
+import { encodeOriginQualifiedSessionIdentity } from "./broker/federation-protocol.ts";
+import { writeMessage } from "./broker/framing.ts";
+import type { FederationOrigin } from "./broker/federation-types.ts";
 import { getTsxCliPath } from "./broker/spawn.ts";
 import { createExtensionHarness, type CapturedToolResult } from "./test/extension-harness.ts";
-import type { Message } from "./types.ts";
+import type { Message, SessionInfo } from "./types.ts";
 import { restoreConversationHistory } from "./conversation-history.ts";
 
 // This test process owns its fixture brokers, never the invoking agent's runtime.
@@ -22,9 +25,10 @@ for (const key of Object.keys(process.env)) {
 const repo = process.cwd();
 const text = (result: CapturedToolResult) => result.content.map((part) => part.text).join("\n");
 
-async function startBroker(agentDir: string): Promise<ChildProcess> {
+async function startBroker(agentDir: string, tcp?: boolean): Promise<ChildProcess> {
   const child = spawn(process.execPath, [getTsxCliPath(), path.join(repo, "broker/broker.ts")], {
-    cwd: repo, env: { ...process.env, PI_CODING_AGENT_DIR: agentDir }, stdio: ["ignore", "pipe", "pipe"],
+    cwd: repo, env: { ...process.env, PI_CODING_AGENT_DIR: agentDir,
+      ...(tcp === undefined ? {} : { PI_PARLEY_TRANSPORT: tcp ? "tcp" : "socket" }) }, stdio: ["ignore", "pipe", "pipe"],
   });
   let stderr = "";
   child.stderr!.on("data", (data: Buffer) => { stderr = (stderr + data.toString()).slice(-4000); });
@@ -279,3 +283,185 @@ test("neutral registered provider delivers bidirectional extension asks, fast an
     for (const dir of dirs) rmSync(dir, { recursive: true, force: true });
   }
 });
+
+// A host-boundary fixture: real brokers and registered AgentTools, with the
+// existing in-process extension host standing in for Pi (not installed SDK proof).
+async function connectFixtureBroker(target: BrokerConnectTarget): Promise<net.Socket> {
+  const stream = typeof target === "string" ? net.connect(target) : net.connect(target.port, target.host);
+  stream.on("error", () => undefined);
+  try { await once(stream, "connect"); return stream; }
+  catch (error) { stream.destroy(); throw error; }
+}
+async function fixtureOrigin(target: BrokerConnectTarget): Promise<FederationOrigin> {
+  const stream = await connectFixtureBroker(target);
+  try {
+    return await new Promise((resolve, reject) => {
+      const requestId = "late-qualified-origin";
+      const timer = setTimeout(() => reject(new Error("Fixture origin query timed out")), 5000);
+      stream.on("data", createMessageReader(raw => {
+        const frame = raw as { type?: string; requestId?: string; ok?: boolean; localOrigin?: FederationOrigin };
+        if (frame.type !== "broker_list_scopes_result" || frame.requestId !== requestId) return;
+        clearTimeout(timer);
+        if (frame.ok === true && frame.localOrigin) resolve(frame.localOrigin);
+        else reject(new Error("Fixture origin query refused"));
+      }, error => { clearTimeout(timer); reject(error); }));
+      writeMessage(stream, { type: "broker_list_scopes", requestId,
+        ...(typeof target === "string" ? {} : { stateId: target.stateId }) });
+    });
+  } finally { stream.destroy(); }
+}
+
+for (const tcp of [false, true]) test(`late ${tcp ? "authenticated TCP" : "socket"} mesh supports qualified AgentTool replies and fails closed on sender withdrawal`,
+  { timeout: 45_000 }, async () => {
+    const { default: extension } = await import("./index.ts");
+    const dirs = [0, 1, 2].map(() => mkdtempSync(path.join(process.platform === "win32" ? tmpdir() : "/tmp", "pl-lqr-")));
+    const brokers: ChildProcess[] = [];
+    const links: PeerStreamAttachment[] = [];
+    const harnesses: ReturnType<typeof createExtensionHarness>[] = [];
+    const streams: net.Socket[] = [];
+    type FixtureBroker = { dir: string; target: BrokerConnectTarget; origin: FederationOrigin; alias: string };
+    type Consumer = { broker: FixtureBroker; id: string; harness: ReturnType<typeof createExtensionHarness>; call: ReturnType<typeof caller> };
+    const qualified = (actor: Consumer) => encodeOriginQualifiedSessionIdentity({ originId: actor.broker.origin.id,
+      remoteScopeAlias: actor.broker.alias, remoteStableSessionId: actor.id });
+    const history = (actor: Consumer) => restoreConversationHistory(actor.harness.ctx.sessionManager.getEntries());
+    const inbound = (actor: Consumer, id: string) => actor.harness.entries.filter(entry => entry.type === "parley_inbound_received"
+      && (entry.data as { message: Message }).message.id === id);
+    const settled = (actor: Consumer, id: string) => actor.harness.entries.some(entry => entry.type === "parley_inbound_settled"
+      && (entry.data as { messageId: string }).messageId === id);
+    const outstanding = async (actor: Consumer) => {
+      const result = await actor.call({ action: "status" });
+      assert.notEqual(result.details?.error, true, text(result));
+      return result.details?.outstandingAsks as Array<{ messageId: string }>;
+    };
+    const list = async (actor: Consumer) => {
+      const result = await actor.call({ action: "list" });
+      assert.notEqual(result.details?.error, true, text(result));
+      return text(result);
+    };
+    const admit = async (broker: FixtureBroker, id: string, name: string): Promise<Consumer> => {
+      const harness = createExtensionHarness(name, { sessionId: id }); harnesses.push(harness);
+      const call = caller(harness);
+      const previous = process.env.PI_PARLEY_TRANSPORT;
+      try {
+        process.env.PI_PARLEY_TRANSPORT = tcp ? "tcp" : "socket";
+        await inAgentDir(broker.dir, async () => {
+          extension(harness.pi as never);
+          await harness.emitLifecycle("session_start");
+          const result = await call({ action: "list" });
+          assert.notEqual(result.details?.error, true, text(result));
+        });
+      } finally {
+        if (previous === undefined) delete process.env.PI_PARLEY_TRANSPORT;
+        else process.env.PI_PARLEY_TRANSPORT = previous;
+      }
+      return { broker, id, harness, call };
+    };
+    const attach = async (a: FixtureBroker, b: FixtureBroker) => {
+      const endpoint = async (local: FixtureBroker, remote: FixtureBroker) => {
+        const stream = await connectFixtureBroker(local.target); streams.push(stream);
+        return { stream, origin: local.origin,
+          scopeBindings: [{ localScopeId: null, localScopeAlias: local.alias, remoteScopeAlias: remote.alias }],
+          ...(typeof local.target === "string" ? {} : { stateId: local.target.stateId }) };
+      };
+      const link = await attachPeerStreams({ local: await endpoint(a, b), remote: await endpoint(b, a) });
+      links.push(link); return link;
+    };
+    try {
+      const machines: FixtureBroker[] = [];
+      for (const [index, dir] of dirs.entries()) {
+        brokers.push(await startBroker(dir, tcp));
+        const target = tcp ? readBrokerTcpEndpoint(getParleyDirPath(dir)) : getBrokerSocketPath(process.platform, dir);
+        machines.push({ dir, target, origin: await fixtureOrigin(target), alias: `export-${index}` });
+      }
+      const [ma, mb, mc] = machines as [FixtureBroker, FixtureBroker, FixtureBroker];
+      // Admit two edges before any actor exists; the third arrives after C.
+      const ab = await attach(ma, mb); await attach(ma, mc);
+      const a = await admit(ma, "late-qualified-a", "late-a");
+      const b = await admit(mb, "late-qualified-b", "late-b");
+      const c = await admit(mc, "late-qualified-c", "late-c");
+      await waitUntil(async () => (await list(a)).includes(qualified(b)) && (await list(a)).includes(qualified(c)), "late A roster converges");
+      assert.ok(!(await list(b)).includes(qualified(c)), "B cannot import C through broker A");
+      await attach(mb, mc);
+      const actors = [a, b, c];
+      for (const actor of actors) await waitUntil(async () => {
+        const rows = await list(actor);
+        return actors.filter(other => other !== actor).every(other => rows.includes(qualified(other)));
+      }, "third-edge qualified roster converges");
+
+      for (const asker of actors) for (const responder of actors) if (asker !== responder) {
+        // Both selectors come from fresh registered-tool lists, not raw foreign UUIDs.
+        assert.ok((await list(asker)).includes(qualified(responder)));
+        const question = await asker.call({ action: "ask", to: qualified(responder), blocking: false,
+          message: `late-qualified:${asker.id}:${responder.id}` });
+        assert.equal(question.details?.delivered, true, text(question));
+        const questionId = question.details?.messageId as string;
+        assert.match(questionId, /^oqm1\./);
+        await waitUntil(() => inbound(responder, questionId).length > 0, "ask reaches actual receiver history");
+        assert.equal(inbound(responder, questionId).length, 1);
+        const received = history(responder).incoming.get(questionId)!;
+        assert.deepEqual(received.from, (inbound(responder, questionId)[0]!.data as { from: SessionInfo }).from,
+          "actual inbound record and restored host-persisted context preserve identical sender identity");
+        assert.equal(history(responder).persistedIncoming.has(questionId), true, "host persisted actual incoming ask");
+        const freshRows = await list(responder);
+        assert.ok(freshRows.includes(qualified(asker)));
+        assert.equal(received.from.id, qualified(asker), "retained sender equals fresh qualified roster contact");
+        const routing = received.from.federation!;
+        assert.deepEqual([routing.originId, routing.remoteScopeAlias, routing.remoteStableSessionId],
+          [asker.broker.origin.id, asker.broker.alias, asker.id]);
+        assert.ok(received.from.endpointEpoch);
+        assert.equal(received.message.expectsReply, true);
+        assert.equal((await outstanding(asker)).some(ask => ask.messageId === questionId), true);
+        const answer = await responder.call({ action: "reply", to: qualified(asker), replyTo: questionId,
+          message: `answer:${questionId}` });
+        assert.equal(answer.details?.delivered, true, text(answer));
+        const answerId = answer.details?.messageId as string;
+        await waitUntil(() => inbound(asker, answerId).length > 0, "actual correlated answer reaches requester");
+        assert.equal(inbound(asker, answerId).length, 1);
+        const deliveredAnswer = history(asker).incoming.get(answerId)!;
+        assert.equal(deliveredAnswer.message.replyTo, questionId);
+        assert.equal(deliveredAnswer.message.completesAsk, true);
+        assert.equal(deliveredAnswer.from.id, qualified(responder));
+        await waitUntil(async () => !(await outstanding(asker)).some(ask => ask.messageId === questionId), "specific completing reply settles ask");
+        assert.equal(history(asker).outgoing.has(questionId), false);
+        assert.equal(settled(responder, questionId), true);
+      }
+
+      const question = await a.call({ action: "ask", to: qualified(b), blocking: false, message: "withdrawal must not retarget" });
+      assert.equal(question.details?.delivered, true, text(question));
+      const questionId = question.details?.messageId as string;
+      await waitUntil(() => inbound(b, questionId).length > 0, "withdrawal-control ask is received first");
+      const original = history(b).incoming.get(questionId)!;
+      await ab.close();
+      await waitUntil(async () => !(await list(b)).includes(qualified(a)), "original sender is actually withdrawn");
+      const replacement = await admit(mc, "different-qualified-a", "late-a");
+      await waitUntil(async () => (await list(b)).includes(qualified(replacement)), "same-name different-identity actor is visible");
+      assert.ok((await list(b)).includes(`• late-a (${qualified(replacement)})`), "replacement truly has the original profile name");
+      assert.notEqual(qualified(replacement), original.from.id);
+      const failed = await b.call({ action: "reply", to: original.from.id, replyTo: questionId, message: "must not reach replacement" });
+      assert.equal(failed.details?.error, true, text(failed));
+      assert.match(text(failed), /Conversation recipient is not visible or is ambiguous/);
+      assert.equal((await outstanding(a)).some(ask => ask.messageId === questionId), true);
+      assert.equal(history(a).outgoing.has(questionId), true);
+      assert.equal(history(b).incoming.get(questionId)?.from.id, original.from.id);
+      assert.equal(settled(b, questionId), false);
+      assert.match(text(await b.call({ action: "pending" })), /withdrawal must not retarget/);
+      // Observe a subsequent delivery through the same B–C transport. `pending`
+      // only reads local state and cannot establish receiver progress.
+      const marker = await b.call({ action: "send", to: qualified(replacement), message: "withdrawal-observation-marker" });
+      assert.equal(marker.details?.delivered, true, text(marker));
+      const markerId = marker.details?.messageId as string;
+      await waitUntil(() => inbound(replacement, markerId).length > 0, "subsequent marker reaches actual replacement history");
+      assert.equal(inbound(replacement, markerId).length, 1);
+      assert.equal(history(replacement).incoming.get(markerId)?.from.id, qualified(b));
+      assert.equal(replacement.harness.entries.some(entry => entry.type === "parley_inbound_received"
+        && (entry.data as { message: Message }).message.content.text === "must not reach replacement"), false,
+      "the failed reply was not misdelivered before the subsequent ordered marker");
+      assert.equal(inbound(b, questionId).length, 1);
+    } finally {
+      await Promise.all(links.map(link => link.close()));
+      for (const stream of streams) stream.destroy();
+      for (const harness of harnesses) await harness.emitLifecycle("session_shutdown");
+      for (const broker of brokers) await stopBroker(broker);
+      for (const dir of dirs) rmSync(dir, { recursive: true, force: true });
+    }
+  });

@@ -16,10 +16,67 @@ async function withAgentDir<T>(agentDir: string, fn: () => T | Promise<T>): Prom
   }
 }
 
-test("routing scope comes only from a non-empty current-name value", () => {
+test("outside FlightDeck, explicit routing scope behavior is unchanged", () => {
   assert.equal(getParleyScopeId({}), undefined);
   assert.equal(getParleyScopeId({ PI_PARLEY_SCOPE_ID: "  " }), undefined);
   assert.equal(getParleyScopeId({ PI_PARLEY_SCOPE_ID: "  team-alpha  " }), "team-alpha");
+});
+
+test("FlightDeck tabs share one scope across workspaces, machines, and explicit project scopes", () => {
+  const sessions: NodeJS.ProcessEnv[] = [
+    {
+      FLIGHTDECK_TAB_ID: "t1",
+      FLIGHTDECK_WORKSPACE_ID: "project-alpha",
+      FLIGHTDECK_STATUS_SOCK: "/home/alice/.flightdeck/status.sock",
+      PI_PARLEY_SCOPE_ID: "project-alpha",
+    },
+    {
+      FLIGHTDECK_TAB_ID: "t8",
+      FLIGHTDECK_WORKSPACE_ID: "project-beta",
+      FLIGHTDECK_STATUS_SOCK: "/run/flightdeck-host/status.sock",
+      PI_PARLEY_SCOPE_ID: "project-beta",
+    },
+    {
+      FLIGHTDECK_TAB_ID: "t1",
+      FLIGHTDECK_WORKSPACE_ID: "project-gamma",
+      FLIGHTDECK_STATUS_PORT: "51234",
+      FLIGHTDECK_STATUS_TOKEN: "host-status-token",
+    },
+  ];
+  for (const session of sessions) {
+    assert.equal(getParleyScopeId(session), "flightdeck");
+  }
+});
+
+test("system-terminal and legacy FlightDeck tabs join without workspace metadata or a live GUI", () => {
+  assert.equal(getParleyScopeId({
+    FLIGHTDECK_TAB_ID: "t0",
+    FLIGHTDECK_STATUS_SOCK: "/retained-terminal/gui-no-longer-running.sock",
+  }), "flightdeck");
+  assert.equal(getParleyScopeId({
+    FLIGHTDECK_TAB_ID: "  ",
+    FLIGHTDECK_PANE_ID: "t7",
+    FLIGHTDECK_STATUS_SOCK: "/legacy-flightdeck/status.sock",
+  }), "flightdeck");
+});
+
+test("partial FlightDeck context and leftover workspace metadata do not enroll unrelated sessions", () => {
+  const partialContexts: NodeJS.ProcessEnv[] = [
+    { FLIGHTDECK_TAB_ID: "t1", FLIGHTDECK_WORKSPACE_ID: "project-alpha" },
+    { FLIGHTDECK_PANE_ID: "t1" },
+    { FLIGHTDECK_WORKSPACE_ID: "project-alpha", FLIGHTDECK_STATUS_SOCK: "/tmp/status.sock" },
+    { FLIGHTDECK_TAB_ID: "  ", FLIGHTDECK_STATUS_SOCK: "/tmp/status.sock" },
+    { FLIGHTDECK_TAB_ID: "t1", FLIGHTDECK_STATUS_SOCK: "  " },
+    { FLIGHTDECK_TAB_ID: "t1", FLIGHTDECK_STATUS_PORT: "51234" },
+    { FLIGHTDECK_TAB_ID: "t1", FLIGHTDECK_STATUS_PORT: "51234", FLIGHTDECK_STATUS_TOKEN: "  " },
+    { FLIGHTDECK_TAB_ID: "t1", FLIGHTDECK_STATUS_PORT: "0", FLIGHTDECK_STATUS_TOKEN: "token" },
+    { FLIGHTDECK_TAB_ID: "t1", FLIGHTDECK_STATUS_PORT: "65536", FLIGHTDECK_STATUS_TOKEN: "token" },
+    { FLIGHTDECK_TAB_ID: "t1", FLIGHTDECK_STATUS_PORT: "invalid", FLIGHTDECK_STATUS_TOKEN: "token" },
+  ];
+  for (const context of partialContexts) {
+    assert.equal(getParleyScopeId(context), undefined);
+    assert.equal(getParleyScopeId({ ...context, PI_PARLEY_SCOPE_ID: "  team-alpha  " }), "team-alpha");
+  }
 });
 
 test("getConfigPath uses the centralized parley runtime directory", () => {

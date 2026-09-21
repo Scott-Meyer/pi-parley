@@ -49,15 +49,19 @@ test("getBrokerSocketPath uses broker.sock under PI_CODING_AGENT_DIR on non-Wind
   assert.equal(socketPath, join("/tmp/pi-agent", "parley", "broker.sock"));
 });
 
-test("TCP transport is an explicit runtime choice, independent of platform", () => {
-  assert.equal(shouldUseTcpTransport({}), false);
+test("Windows shares a loopback default and explicit transport overrides remain platform-independent", () => {
+  assert.equal(shouldUseTcpTransport({}, "linux"), false);
+  assert.equal(shouldUseTcpTransport({}, "win32"), true);
   assert.equal(shouldUseTcpTransport({ PI_PARLEY_TRANSPORT: "tcp" }), true);
   assert.equal(shouldUseTcpTransport({ PI_PARLEY_TCP: "1" }), true);
   for (const platform of ["win32", "darwin", "linux"] as const) {
     assert.deepEqual(getBrokerListenTarget(platform, { PI_PARLEY_TRANSPORT: "tcp" }), {
       transport: "tcp", host: PARLEY_TCP_HOST, port: 0,
     });
-    assert.equal(getBrokerListenTarget(platform, {}), getBrokerSocketPath(platform, getAgentDirPath({})));
+    assert.equal(getBrokerListenTarget(platform, { PI_PARLEY_TRANSPORT: "socket" }), getBrokerSocketPath(platform, getAgentDirPath({})));
+    if (platform === "win32") {
+      assert.deepEqual(getBrokerListenTarget(platform, {}), { transport: "tcp", host: PARLEY_TCP_HOST, port: 0 });
+    } else assert.equal(getBrokerListenTarget(platform, {}), getBrokerSocketPath(platform, getAgentDirPath({})));
   }
 });
 
