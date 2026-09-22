@@ -116,7 +116,7 @@ test("neutral registered provider delivers bidirectional extension asks, fast an
   const controller = new PeerStreamController();
   const automaticReplies: Promise<CapturedToolResult>[] = [];
   try {
-    for (const dir of dirs) brokers.push(await startBroker(dir));
+    for (const dir of dirs) brokers.push(await startBroker(dir, false));
     for (const [index, harness] of [a, b].entries()) {
       await inAgentDir(dirs[index]!, async () => {
         const childMetadata: Record<string, string> = index === 0 ? {
