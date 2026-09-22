@@ -28,7 +28,7 @@ jobs:
       - run: npm ci
       - run: npm run build:federation
       - run: npm run test:package:federation
-      - run: npx tsx --test broker/build.test.ts broker/process-lock.test.ts broker/runtime-claim.test.ts broker/runtime-lifecycle.test.ts broker/federation-conversation.test.ts broker/federation-conversation.integration.test.ts broker/attachment.test.ts federation.test.ts extension-entry.test.ts federation-extension.integration.test.ts
+      - run: npx tsx --test broker/build.test.ts broker/process-lock.test.ts broker/runtime-claim.test.ts broker/runtime-lifecycle.test.ts broker/federation-conversation.test.ts broker/federation-conversation.integration.test.ts broker/attachment.test.ts broker/client.test.ts broker/delivery-feedback.test.ts federation.test.ts extension-entry.test.ts federation-extension.integration.test.ts references.test.ts references.integration.test.ts
 
   package:
     name: Package and supported Pi hosts

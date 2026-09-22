@@ -4,6 +4,16 @@ import type { Theme } from "@mariozechner/pi-coding-agent";
 import type { SessionInfo, Message } from "../types.ts";
 import { formatPeerCompactionNotice } from "../compaction-awareness.ts";
 
+/** Human-readable names for sessions and messages; defaults keep raw identities. */
+export interface InlineMessageReferences {
+  session(from: SessionInfo): string;
+  message(id: string): string;
+  /** Replace canonical identities inside generated text. */
+  present?(text: string): string;
+  /** Typed naming for a session identity, as the compaction notice needs it. */
+  sessionName?(id: string, name?: string): string;
+}
+
 export class InlineMessageComponent implements Component {
   private from: SessionInfo;
   private message: Message;
@@ -23,6 +33,7 @@ export class InlineMessageComponent implements Component {
     replyCommand?: string,
     bodyText?: string,
     collapsed = false,
+    private readonly references?: InlineMessageReferences,
   ) {
     this.from = from;
     this.message = message;
@@ -37,13 +48,17 @@ export class InlineMessageComponent implements Component {
   render(width: number): string[] {
     const lines: string[] = [];
     const borderChar = "─";
-    const senderName = this.from.name || this.from.id.slice(0, 8);
+    const senderName = this.references?.session(this.from) ?? (this.from.name || this.from.id.slice(0, 8));
+    const replyToLabel = this.message.replyTo
+      ? this.references?.message(this.message.replyTo) ?? this.message.replyTo.slice(0, 8)
+      : undefined;
+    const messageLabel = this.references ? ` · ${this.references.message(this.message.id)}` : "";
     if (width < 3) {
       return [truncateToWidth(`From ${senderName}`, width)];
     }
     const bodyWidth = Math.max(1, width - 2);
 
-    const header = ` From: ${senderName} (${this.from.cwd}) `;
+    const header = ` From: ${senderName} (${this.from.cwd})${messageLabel} `;
     const headerText = truncateToWidth(this.collapsed ? `${header} Ctrl+O expands ` : header, bodyWidth, "");
     const headerPadding = Math.max(0, bodyWidth - visibleWidth(headerText));
     lines.push(
@@ -69,7 +84,7 @@ export class InlineMessageComponent implements Component {
         meta.push(`${count} attachment${count === 1 ? "" : "s"}`);
       }
       if (this.message.provenance?.type === "extension_outbox") meta.push(`Via ${this.message.provenance.extensionName}`);
-      if (this.message.replyTo && !this.message.expectsReply) meta.push(`Reply to ${this.message.replyTo.slice(0, 8)}`);
+      if (this.message.replyTo && !this.message.expectsReply) meta.push(`Reply to ${replyToLabel}`);
       if (this.message.peerCompaction) meta.push("Sender compacted since prior direct contact");
       meta.push("Ctrl+O to expand");
 
@@ -79,7 +94,9 @@ export class InlineMessageComponent implements Component {
     }
 
     if (this.message.peerCompaction) {
-      const notice = formatPeerCompactionNotice(senderName, this.message.peerCompaction, this.from.id);
+      const sessionName = this.references?.sessionName?.bind(this.references);
+      const rawNotice = formatPeerCompactionNotice(senderName, this.message.peerCompaction, this.from.id, sessionName);
+      const notice = sessionName ? rawNotice : this.references?.present?.(rawNotice) ?? rawNotice;
       for (const line of wrapTextWithAnsi(this.theme.fg("warning", ` ${notice}`), bodyWidth)) {
         lines.push(frameLine(line));
       }
@@ -113,7 +130,7 @@ export class InlineMessageComponent implements Component {
 
     if (this.message.replyTo && !this.message.expectsReply) {
       lines.push(frameLine(""));
-      lines.push(frameLine(this.theme.fg("dim", ` Reply to ${this.message.replyTo.slice(0, 8)}`)));
+      lines.push(frameLine(this.theme.fg("dim", ` Reply to ${replyToLabel}`)));
     }
 
     if (this.message.provenance?.type === "extension_outbox") {

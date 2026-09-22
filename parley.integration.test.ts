@@ -141,7 +141,7 @@ async function withChildOrchestratorEnv<T>(metadata: {
   }
 }
 
-import { createExtensionHarness, type CapturedToolResult, type CapturedTool, type RenderToolResult, type RenderedComponent, type RenderTheme } from "./test/extension-harness.ts";
+import { createExtensionHarness, mentions, type CapturedToolResult, type CapturedTool, type RenderToolResult, type RenderedComponent, type RenderTheme } from "./test/extension-harness.ts";
 
 const renderTheme: RenderTheme = {
   fg: (_name, text) => text,
@@ -1414,9 +1414,9 @@ test("send accepts multiple explicit targets, reports partial failure, and deliv
     assert.match(receipt, /Sent as multicast-worker/);
     const plannerLine = receipt.split("\n").find((line) => line.includes("planner:"))!;
     const plannerId = plannerLine.match(/\(([^()]+)\)$/)?.[1];
-    assert.ok(plannerId, "each recipient's full message ID must be visible to the caller");
-    assert.equal(plannerId, plannerMessages[0]?.id);
-    assert.ok(receipt.includes(orchestratorMessages[0]!.id));
+    assert.ok(plannerId, "each recipient's message reference must be visible to the caller");
+    assert.equal(plannerId, harness.referenceFor(plannerMessages[0]!.id));
+    assert.ok(mentions(receipt, harness.referenceFor(orchestratorMessages[0]!.id)));
     const cancellation = await parleyTool.execute("cancel-one-multicast", { action: "cancel", messageId: plannerId }, new AbortController().signal, undefined, harness.ctx);
     assert.match(modelText(cancellation), new RegExp(plannerId));
     assert.doesNotMatch(modelText(cancellation), /not accepted|not found/i);
@@ -1582,8 +1582,8 @@ test("multi-target send keeps case-sensitive disconnected IDs distinct", { concu
     assert.equal(upperMessage.content.text, "Separate offline identities");
     assert.equal(lowerMessage.content.text, "Separate offline identities");
     assert.notEqual(upperMessage.id, lowerMessage.id);
-    assert.ok(receipt.includes(upperMessage.id));
-    assert.ok(receipt.includes(lowerMessage.id));
+    assert.ok(mentions(receipt, harness.referenceFor(upperMessage.id)));
+    assert.ok(mentions(receipt, harness.referenceFor(lowerMessage.id)));
   } finally {
     await harness.emitLifecycle("session_shutdown").catch(() => undefined);
     await upper.disconnect().catch(() => undefined);
@@ -1915,8 +1915,8 @@ test("ask retains contact-time compaction awareness in its eventual reply result
     assert.match(result.content[0]?.text ?? "", /compacted context since your last direct contact/i);
     assert.match(modelText(result), /\*\*Reply from planner\*\* \(asked as awareness-ask-worker\)/);
     assert.match(modelText(result), /Current answer/);
-    assert.match(modelText(result), /Question message ID: \S+/);
-    assert.match(modelText(result), /Reply message ID: \S+/);
+    assert.match(modelText(result), /Question: #\d+/);
+    assert.match(modelText(result), /Reply: #\d+/);
     assert.equal((result.details?.peerCompaction as { generation?: number })?.generation, plannerGeneration);
   } finally {
     planner.off("message", replyToAsk);
@@ -2064,7 +2064,7 @@ test("multi-target and broadcast sends reject ambiguous targeting and conversati
     }, new AbortController().signal, undefined, harness.ctx);
     assert.equal(callerSuppliedMessageId.details?.error, true);
     assert.match(modelText(callerSuppliedMessageId), /retained message for read or cancel/i);
-    assert.match(modelText(callerSuppliedMessageId), /sends and asks create a new message ID/i);
+    assert.match(modelText(callerSuppliedMessageId), /sends and asks create a new message/i);
 
     const oversizedTargets = await parleyTool.execute("too-many-targets", {
       action: "send",
@@ -2136,7 +2136,7 @@ test("extension can pin a restart-stable parley session id", { concurrency: fals
   }
 });
 
-test("parley-id inserts a stable handoff snippet into the editor", { concurrency: false }, async () => {
+test("parley-id inserts a readable contact by default and the stable target with --id", { concurrency: false }, async () => {
   const { cleanup } = await setupClients();
   const { default: piParleyExtension } = await import("./index.ts");
   let editorText = "Existing note";
@@ -2154,8 +2154,13 @@ test("parley-id inserts a stable handoff snippet into the editor", { concurrency
     piParleyExtension(harness.pi as never);
     await harness.emitLifecycle("session_start");
     await harness.commands.get("parley-id")!("", harness.ctx);
-    assert.match(editorText, /Existing note\n\nPi parley target: session-child-test/);
+    assert.match(editorText, /Existing note\n\nPi parley contact: handoff-worker \(in /, "the default handoff is a readable contact");
+    assert.doesNotMatch(editorText, /session-child-test/);
     assert.doesNotMatch(editorText, /action:/, "the handoff supplies an address without choosing a communication action");
+    assert.match(notifications.at(-1) ?? "", /Inserted parley contact: handoff-worker/);
+    editorText = "Existing note";
+    await harness.commands.get("parley-id")!("--id", harness.ctx);
+    assert.match(editorText, /Existing note\n\nPi parley target: session-child-test/, "--id keeps the stable canonical target for programmatic handoff");
     assert.match(notifications.at(-1) ?? "", /Inserted parley contact target: session-child-test/);
   } finally {
     // Shutdown must run even when an assertion fails: otherwise the extension's
@@ -2297,15 +2302,15 @@ test("parley tool auto-suffixes colliding names so by-name targets stay unambigu
     const listed = await parleyTool.execute("list-twin", { action: "list" }, new AbortController().signal, undefined, harness.ctx);
     const listText = listed.content.map((part) => (part as { text?: string }).text ?? "").join("");
     // Fork: a colliding registration name is auto-suffixed instead of left
-    // ambiguous until send time. Roster rows still carry ID prefixes.
-    assert.match(listText, /019fc92c-066f/);
-    assert.match(listText, /019fc92c-b5f7/);
-    assert.match(listText, /twin-2/);
+    // ambiguous until send time. Roster rows name sessions only by reference.
+    assert.match(listText, /• twin — /);
+    assert.match(listText, /• twin-2 — /);
+    assert.doesNotMatch(listText, /019fc92c/, "session IDs stay out of model-facing rows");
 
     const listedCwd = await parleyTool.execute("list-cwd-twin", { action: "list-cwd" }, new AbortController().signal, undefined, harness.ctx);
     const listCwdText = listedCwd.content.map((part) => (part as { text?: string }).text ?? "").join("");
-    assert.match(listCwdText, /019fc92c-066f/);
-    assert.doesNotMatch(listCwdText, /019fc92c-b5f7/);
+    assert.match(listCwdText, /• twin — /);
+    assert.doesNotMatch(listCwdText, /twin-2/);
 
     // By-name sends resolve unambiguously to each twin.
     const toFirst = await parleyTool.execute("send-twin", { action: "send", to: "twin", message: "the original" }, new AbortController().signal, undefined, harness.ctx);
@@ -2597,7 +2602,7 @@ test("parley tool renders compact call and result rows", async () => {
     content: [{ type: "text", text: "Message sent to planner" }],
     details: { delivered: true, messageId: "abcdef123456" },
   }, { isPartial: false, expanded: false }, renderTheme, { isError: false, expanded: false }));
-  assert.match(resultText, /✓ Message sent to planner \(abcdef12\)/);
+  assert.match(resultText, /✓ Message sent to planner \(#\d+\)/, "collapsed rows name the message by reference");
 
   const errorText = renderToText(parleyTool.renderResult({
     content: [{ type: "text", text: "Missing 'to' or 'message' parameter" }],
@@ -3544,7 +3549,7 @@ test("busy interactive sessions steer top-level asks without aborting", { concur
     assert.equal(harness.sentMessages[0]?.message.customType, "parley_message");
     assert.equal(harness.sentMessages[0]?.options?.deliverAs, "steer");
     assert.match(harness.sentMessages[0]?.message.content ?? "", /Can you respond after your current turn/);
-    assert.ok((harness.sentMessages[0]?.message.content ?? "").includes('Message: interactive-busy-"ask'));
+    assert.ok((harness.sentMessages[0]?.message.content ?? "").includes(`Message: ${harness.referenceFor('interactive-busy-"ask')}`));
 
     await harness.emitLifecycle("turn_end");
     assert.equal(harness.sentMessages.length, 1, "turn end must not inject the steered message again");
@@ -3618,7 +3623,7 @@ test("broker rejects changed duplicate message IDs and replays identical sends w
     assert.ok(receipts.includes("acknowledged:accepted by receiver"));
     assert.ok(receipts.some((receipt) => receipt.startsWith("injected:")));
     const sent = harness.sentMessages[0]!;
-    assert.match(sent.message.content ?? "", /Message: duplicate-inbound/);
+    assert.ok((sent.message.content ?? "").includes(`Message: ${harness.referenceFor("duplicate-inbound")}`));
     assert.doesNotMatch(sent.message.content ?? "", /seq 1|broker delivered|receiver received|injected/);
     const details = sent.message.details as { message?: Message };
     assert.equal(details.message?.id, "duplicate-inbound");
@@ -3709,7 +3714,7 @@ test("explicit cancel acknowledges that a steered inbound message may already be
     await new Promise((resolve) => setTimeout(resolve, 20));
 
     assert.equal(harness.sentMessages.length, 2);
-    assert.match(harness.sentMessages[1]?.message.content ?? "", /cancel-steered.*withdrawn by its sender/);
+    assert.match(harness.sentMessages[1]?.message.content ?? "", new RegExp(`Message ${harness.referenceFor("cancel-steered")} was withdrawn by its sender`));
     assert.deepEqual(receipts, ["receiver_received", "acknowledged", "injected", "cancellation_requested"]);
     unsubscribeReceipts();
   } finally {
@@ -3753,7 +3758,7 @@ test("parley cancel action requests cancellation for a sent message", { concurre
     await receiverHarness.emitLifecycle("agent_end");
     await new Promise((resolve) => setTimeout(resolve, 20));
     assert.equal(receiverHarness.sentMessages.length, 2);
-    assert.ok(receiverHarness.sentMessages[1]?.message.content?.includes(messageId));
+    assert.ok(mentions(receiverHarness.sentMessages[1]?.message.content ?? "", receiverHarness.referenceFor(messageId)));
     assert.match(receiverHarness.sentMessages[1]?.message.content ?? "", /withdrawn by its sender/);
   } finally {
     await senderHarness.emitLifecycle("session_shutdown");
@@ -3790,7 +3795,7 @@ test("same-sender supersede reports an already-steered inbound message", { concu
 
     assert.equal(harness.sentMessages.length, 3);
     assert.match(harness.sentMessages[0]?.message.content ?? "", /Old steered message/);
-    assert.match(harness.sentMessages[1]?.message.content ?? "", /superseded by replacement-message/);
+    assert.match(harness.sentMessages[1]?.message.content ?? "", new RegExp(`superseded by ${harness.referenceFor("replacement-message")}`));
     assert.match(harness.sentMessages[2]?.message.content ?? "", /Replacement message/);
     assert.equal(harness.sentMessages[0]?.options?.deliverAs, "steer");
     assert.equal(harness.sentMessages[1]?.options?.deliverAs, "steer");
@@ -4553,7 +4558,7 @@ test("regular parley ask timeout reports message id and delivery state", { concu
 
     assert.equal(result.details?.error, true);
     assert.equal(result.details?.deliveryState, "injected");
-    assert.match(result.content[0]?.text ?? "", new RegExp(String(result.details?.messageId)));
+    assert.ok(mentions(result.content[0]?.text ?? "", senderHarness.referenceFor(String(result.details?.messageId))));
     assert.match(result.content[0]?.text ?? "", /Last known delivery state: injected/);
     assert.match(result.content[0]?.text ?? "", /not cancellation/);
     assert.equal(receiverHarness.sentMessages.length, 1);
@@ -4671,14 +4676,14 @@ test("non-blocking asks return immediately, surface outstanding state, and resol
 
     const [, askMessage] = await askDelivered;
     assert.equal(askMessage.expectsReply, true, "the wire ask keeps full ask semantics");
-    assert.equal(askMessage.id, askId);
+    assert.equal(harness.referenceFor(askMessage.id), askId, "the visible reference names the wire ask");
 
     const statusResult = await parleyTool.execute("nonblocking-status-1", {
       action: "status",
     }, new AbortController().signal, undefined, harness.ctx);
     assert.match(modelText(statusResult), /Outstanding asks/);
-    assert.match(modelText(statusResult), /planner.*messageId /);
-    assert.match(statusResult.content[0]?.text ?? "", new RegExp(askId), "status shows the full messageId for chaining");
+    assert.match(modelText(statusResult), new RegExp(`${askId} to planner`));
+    assert.ok(mentions(statusResult.content[0]?.text ?? "", askId), "status shows the reference for chaining");
     assert.match(statusResult.content[0]?.text ?? "", /What ships next\?/);
     assert.ok(modelText(statusResult).includes(askId));
 
@@ -4697,9 +4702,9 @@ test("non-blocking asks return immediately, surface outstanding state, and resol
     // The reply arrives as an ordinary injected message and resolves tracking.
     const sentCount = harness.sentMessages.length;
     const replySent = await planner.send("session-child-test", {
-      messageId: `reply-${askId}`,
+      messageId: `reply-${askMessage.id}`,
       text: "Ship the router first.",
-      replyTo: askId,
+      replyTo: askMessage.id,
     });
     assert.equal(replySent.delivered, true);
     await new Promise((resolve) => setTimeout(resolve, 30));
@@ -4715,8 +4720,8 @@ test("non-blocking asks return immediately, surface outstanding state, and resol
     const afterReplyStatus = await parleyTool.execute("nonblocking-status-2", {
       action: "status",
     }, new AbortController().signal, undefined, harness.ctx);
-    assert.doesNotMatch(modelText(afterReplyStatus), new RegExp(askId));
-    assert.ok(modelText(afterReplyStatus).includes(secondId), "the unanswered question remains actionable");
+    assert.ok(!mentions(modelText(afterReplyStatus), askId));
+    assert.ok(mentions(modelText(afterReplyStatus), secondId), "the unanswered question remains actionable");
 
     // Cancelling the outstanding ask clears tracking.
     const cancelResult = await parleyTool.execute("nonblocking-cancel-1", {
@@ -4753,18 +4758,19 @@ test("an independent non-blocking ask failure cannot terminate a blocking reques
     const asyncReceived = once(orchestrator, "message") as Promise<[SessionInfo, Message]>;
     const asyncReceipt = modelText(await call({ action: "ask", to: "orchestrator", message: "Are the docs ready?", blocking: false }));
     const asyncId = visibleMessageId(asyncReceipt);
-    assert.equal((await asyncReceived)[1].id, asyncId);
+    const asyncWireId = (await asyncReceived)[1].id;
+    assert.equal(harness.referenceFor(asyncWireId), asyncId);
     const failed = modelText(await call({ action: "ask", cwd: repoDir, message: "Any last concerns?", blocking: false }));
     assert.match(failed, /multiple|ambiguous/i);
-    assert.ok(failed.includes(asyncId), "failure still shows the separate accepted async question");
+    assert.ok(mentions(failed, asyncId), "failure still shows the separate accepted async question");
     assert.equal(blockingSettled, false, "a failed target lookup belongs to its invocation, not the existing waiter");
 
-    assert.equal((await orchestrator.send(asker.id, { text: "Docs are published.", replyTo: asyncId })).delivered, true);
+    assert.equal((await orchestrator.send(asker.id, { text: "Docs are published.", replyTo: asyncWireId })).delivered, true);
     await waitForVisibleText(harness, "Docs are published.");
     const remainingStatus = modelText(await call({ action: "status" }));
-    assert.doesNotMatch(remainingStatus, new RegExp(asyncId));
+    assert.ok(!mentions(remainingStatus, asyncId));
     assert.match(remainingStatus, /Approve the rollout/);
-    assert.ok(remainingStatus.includes(approval.id), "the unanswered blocking question is still visible");
+    assert.ok(mentions(remainingStatus, harness.referenceFor(approval.id)), "the unanswered blocking question is still visible");
     assert.equal(blockingSettled, false, "answering another question must not release the blocking approval request");
 
     assert.equal((await planner.send(asker.id, { text: "Rollout approved.", replyTo: approval.id })).delivered, true);
@@ -4920,7 +4926,7 @@ test("pending and read recover complete questions, and reply receipts keep anoth
     assert.match(retained, /rollback.md/);
     assert.match(retained, /Keep the old index until rollout completes/);
 
-    const docsAnswer = waitForReply(orchestrator, docsId);
+    const docsAnswer = waitForReply(orchestrator, harness.identityFor(docsId)!);
     const firstReceipt = modelText(await call({ action: "reply", replyTo: docsId, message: "The docs are ready." }));
     assert.equal((await docsAnswer).message.content.text, "The docs are ready.");
     assert.match(firstReceipt, /Reply sent as reply-target-worker to orchestrator/);
@@ -4928,7 +4934,7 @@ test("pending and read recover complete questions, and reply receipts keep anoth
       "the receipt itself supports deciding which colleague still needs an answer");
     assert.doesNotMatch(firstReceipt, /Are the docs ready/);
 
-    const releaseAnswer = waitForReply(planner, releaseId);
+    const releaseAnswer = waitForReply(planner, harness.identityFor(releaseId)!);
     await call({ action: "reply", replyTo: pendingMessageId(firstReceipt, "Is release safe?"), message: "Safe with rollback to build 41; keep the old index." });
     assert.equal((await releaseAnswer).message.content.text, "Safe with rollback to build 41; keep the old index.");
     assert.match(modelText(await call({ action: "pending" })), /No unresolved inbound asks/);
@@ -5002,7 +5008,7 @@ test("an active inbound ask still allows consulting and notifying other colleagu
     const advice = modelText(await consultation);
     assert.match(advice, /Yes, with CONCURRENTLY/);
     assert.match(advice, /Is the migration safe/);
-    assert.ok(advice.includes(originalId), "the consulting receipt keeps the original colleague's question actionable");
+    assert.ok(mentions(advice, originalId), "the consulting receipt keeps the original colleague's question actionable");
 
     const notice = once(orchestrator, "message") as Promise<[SessionInfo, Message]>;
     const notification = await call({ action: "send", to: "orchestrator", message: "Thanks; I am preparing the release recommendation." });
@@ -5010,12 +5016,12 @@ test("an active inbound ask still allows consulting and notifying other colleagu
     assert.match(modelText(notification), /sent as release-reviewer to orchestrator/);
     const sharedNotice = await call({ action: "send", targets: ["planner", "orchestrator"], message: "Review is still in progress." });
     assert.match(modelText(sharedNotice), /accepted for 2 of 2 targets/i);
-    assert.ok(modelText(sharedNotice).includes(originalId));
+    assert.ok(mentions(modelText(sharedNotice), originalId));
     const broadcast = await call({ action: "broadcast", message: "Release freeze remains in effect." });
     assert.match(modelText(broadcast), /accepted for 2 of 2 visible sessions/i);
-    assert.ok(modelText(broadcast).includes(originalId));
+    assert.ok(mentions(modelText(broadcast), originalId));
 
-    const answerReceived = waitForReply(planner, originalId);
+    const answerReceived = waitForReply(planner, harness.identityFor(originalId)!);
     const answered = await call({ action: "reply", replyTo: pendingMessageId(modelText(broadcast), "Is the migration safe?"), message: "Safe if we build the index with CONCURRENTLY." });
     assert.match(modelText(answered), /Reply sent as release-reviewer to planner/);
     assert.equal((await answerReceived).message.content.text, "Safe if we build the index with CONCURRENTLY.");
@@ -5051,8 +5057,8 @@ test("parley reply targets one of multiple pending asks by short session ID", { 
     assert.equal((await replyReceived).message.content.text, "First answer.");
 
     const pending = await parleyTool.execute("pending-after-short-id", { action: "pending" }, new AbortController().signal, undefined, harness.ctx);
-    assert.doesNotMatch(pending.content[0]?.text ?? "", /reply-short-id-1/);
-    assert.match(pending.content[0]?.text ?? "", /reply-short-id-2/);
+    assert.ok(!mentions(pending.content[0]?.text ?? "", harness.referenceFor("reply-short-id-1")));
+    assert.ok(mentions(pending.content[0]?.text ?? "", harness.referenceFor("reply-short-id-2")));
   } finally {
     await harness.emitLifecycle("session_shutdown");
     await cleanup();
@@ -5100,7 +5106,7 @@ test("a short-ID reply unblocks the original ask when another ask is pending", {
     assert.match(result.content[0]?.text ?? "", /No work is pending/);
 
     const pending = await replierTool.execute("remaining-pending", { action: "pending" }, new AbortController().signal, undefined, replierHarness.ctx);
-    assert.match(pending.content[0]?.text ?? "", /another-pending-ask/);
+    assert.ok(mentions(pending.content[0]?.text ?? "", replierHarness.referenceFor("another-pending-ask")));
   } finally {
     await askerHarness.emitLifecycle("session_shutdown");
     await replierHarness.emitLifecycle("session_shutdown");
@@ -5776,7 +5782,8 @@ test("an ordinary notification can be replied to using only its visible conversa
     assert.match(modelText(sent), /Message sent as docs-author to docs-reviewer/);
     const noticeId = visibleMessageId(modelText(sent));
     const incoming = await waitForVisibleText(recipient, "The migration docs are published.");
-    assert.equal(visibleMessageId(incoming), noticeId);
+    // Each session numbers messages itself; both references name the same canonical notice.
+    assert.equal(recipient.identityFor(visibleMessageId(incoming)), sender.identityFor(noticeId));
     const pending = await recipientTool.execute("docs-pending", { action: "pending" }, new AbortController().signal, undefined, recipient.ctx);
     assert.match(modelText(pending), /No unresolved inbound asks/);
 
@@ -5785,11 +5792,11 @@ test("an ordinary notification can be replied to using only its visible conversa
     }, new AbortController().signal, undefined, recipient.ctx);
     assert.match(modelText(reply), /Reply sent as docs-reviewer to docs-author/);
     const answer = await waitForVisibleText(sender, "Thanks; I linked them in the release notes.");
-    assert.equal(visibleMessageId(answer), visibleMessageId(modelText(reply)));
+    assert.equal(sender.identityFor(visibleMessageId(answer)), recipient.identityFor(visibleMessageId(modelText(reply))));
     assert.ok(answer.includes(`Reply to: ${noticeId}`));
     const retained = await senderTool.execute("read-docs-reply", { action: "read", messageId: visibleMessageId(answer) }, new AbortController().signal, undefined, sender.ctx);
     assert.match(modelText(retained), /Thanks; I linked them in the release notes/);
-    assert.ok(modelText(retained).includes(noticeId));
+    assert.ok(mentions(modelText(retained), noticeId));
   } finally {
     await sender.emitLifecycle("session_shutdown");
     await recipient.emitLifecycle("session_shutdown");
@@ -5830,20 +5837,21 @@ test("notifications, threaded progress, and clarification questions do not compl
 
     const progress = await call({ action: "send", to: "release-planner", replyTo: pendingId, message: "Still checking the migration." });
     const progressText = await waitForVisibleText(asker, "Still checking the migration.");
-    assert.ok(progressText.includes(`Reply to: ${approvalId}`));
+    // Each session numbers messages itself; the thread is the same canonical approval request.
+    assert.ok(progressText.includes(`Reply to: ${asker.referenceFor(reviewer.identityFor(approvalId)!)}`));
     assert.equal(completed, false, "send(replyTo) provides threaded progress without completing the waiter");
-    assert.ok(modelText(progress).includes(approvalId), "progress preserves the unanswered question in its receipt");
+    assert.ok(mentions(modelText(progress), approvalId), "progress preserves the unanswered question in its receipt");
 
     const clarification = await call({ action: "ask", to: "release-planner", replyTo: pendingId, message: "Which region is build 42 for?", blocking: false });
     const clarificationId = visibleMessageId(modelText(clarification));
     const clarifyText = await waitForVisibleText(asker, "Which region is build 42 for?");
-    assert.equal(visibleMessageId(clarifyText), clarificationId);
+    assert.equal(asker.identityFor(visibleMessageId(clarifyText)), reviewer.identityFor(clarificationId));
     assert.equal(completed, false, "a reverse clarification question is not a final answer");
     const clarified = await askerTool.execute("clarify", { action: "reply", replyTo: visibleMessageId(clarifyText), message: "EU only." }, controller.signal, undefined, asker.ctx);
     assert.match(modelText(clarified), /Reply sent as release-planner to release-reviewer/);
     await waitForVisibleText(reviewer, "EU only.");
     const remaining = modelText(await call({ action: "pending" }));
-    assert.ok(remaining.includes(approvalId));
+    assert.ok(mentions(remaining, approvalId));
     assert.equal(completed, false);
 
     const answer = await call({ action: "reply", replyTo: pendingMessageId(remaining, "May I release build 42?"), message: "Approved for EU only." });
@@ -5899,7 +5907,7 @@ test("confirmSend gates an ordinary notification; declining preserves the pendin
       assert.equal(result.details?.delivered, undefined);
 
       const pending = await parleyTool.execute("pending-after-cancel", { action: "pending" }, new AbortController().signal, undefined, harness.ctx);
-      assert.match(pending.content[0]?.text ?? "", /confirm-reply-ask-1/);
+      assert.ok(mentions(pending.content[0]?.text ?? "", harness.referenceFor(askId)));
     } finally {
       await harness.emitLifecycle("session_shutdown");
       await cleanup();
@@ -5937,7 +5945,7 @@ test("contact_supervisor progress_update leaves a pending ask open for an explic
 
       const parleyTool = harness.tools.find((tool) => tool.name === "parley")!;
       const pendingAfterUpdate = await parleyTool.execute("pending-after-update", { action: "pending" }, new AbortController().signal, undefined, harness.ctx);
-      assert.match(pendingAfterUpdate.content[0]?.text ?? "", /boundary-ask-1/);
+      assert.ok(mentions(pendingAfterUpdate.content[0]?.text ?? "", harness.referenceFor(askId)));
 
       const replyReceived = waitForReply(orchestrator, askId);
       const replyId = pendingMessageId(modelText(pendingAfterUpdate), "Any blockers?");
@@ -6010,10 +6018,10 @@ test("offline send receipts allow cancellation by full ID and queued notificatio
     const prefixMessageId = visibleMessageId(modelText(prefixResult));
     const retracted = await parleyTool.execute("cancel-offline-notification", { action: "cancel", messageId: prefixMessageId }, new AbortController().signal, undefined, harness.ctx);
     assert.match(modelText(retracted), /removed from the offline mailbox/);
-    assert.ok(modelText(retracted).includes(prefixMessageId));
+    assert.ok(mentions(modelText(retracted), prefixMessageId));
 
     const pendingAfterPrefix = await parleyTool.execute("pending-after-prefix", { action: "pending" }, new AbortController().signal, undefined, harness.ctx);
-    assert.match(pendingAfterPrefix.content[0]?.text ?? "", /disconnected-ask-1/);
+    assert.ok(mentions(pendingAfterPrefix.content[0]?.text ?? "", harness.referenceFor(askId)));
 
     const replacement = new ParleyClient();
     const queuedReply = once(replacement, "message") as Promise<[SessionInfo, Message]>;
@@ -6029,12 +6037,12 @@ test("offline send receipts allow cancellation by full ID and queued notificatio
 
     await replacement.connect({ name: "planner", cwd: repoDir, model: "test-model", pid: process.pid, startedAt: Date.now(), lastActivity: Date.now() });
     const [, queuedMessage] = await queuedReply;
-    assert.equal(queuedMessage.id, queuedId);
+    assert.equal(harness.referenceFor(queuedMessage.id), queuedId);
     assert.equal(queuedMessage.replyTo, undefined);
     assert.equal(queuedMessage.content.text, "Reconnect and see this.");
 
     const pendingAfterExact = await parleyTool.execute("pending-after-exact-id", { action: "pending" }, new AbortController().signal, undefined, harness.ctx);
-    assert.ok(modelText(pendingAfterExact).includes(askId), "offline notification does not answer the pending question");
+    assert.ok(mentions(modelText(pendingAfterExact), harness.referenceFor(askId)), "offline notification does not answer the pending question");
 
     await replacement.disconnect().catch(() => undefined);
   } finally {
@@ -6059,13 +6067,17 @@ test("known failed notification delivery preserves the pending ask", { concurren
     await new Promise((resolve) => setTimeout(resolve, 50));
     await planner.disconnect();
 
-    await impostor.connect({ name: "planner", cwd: repoDir, model: "test-model", pid: process.pid, startedAt: Date.now(), lastActivity: Date.now() });
-    await impostor.disconnect();
+    // "planner" is now a reference pinned to the asker; ambiguity needs a name the model never saw.
+    const twin = new ParleyClient();
+    for (const client of [impostor, twin]) {
+      await client.connect({ name: "reviewer", cwd: repoDir, model: "test-model", pid: process.pid, startedAt: Date.now(), lastActivity: Date.now() });
+      await client.disconnect();
+    }
 
     const parleyTool = harness.tools.find((tool) => tool.name === "parley")!;
     const result = await parleyTool.execute("send-ambiguous-disconnected", {
       action: "send",
-      to: "planner",
+      to: "reviewer",
       message: "Should not deliver.",
     }, new AbortController().signal, undefined, harness.ctx);
 
@@ -6080,7 +6092,8 @@ test("known failed notification delivery preserves the pending ask", { concurren
     visibleMessageId(modelText(result));
 
     const pending = await parleyTool.execute("pending-after-failure", { action: "pending" }, new AbortController().signal, undefined, harness.ctx);
-    assert.match(pending.content[0]?.text ?? "", /delivery-failure-ask-1/);
+    assert.match(pending.content[0]?.text ?? "", /Ping before disconnect/);
+    assert.ok(mentions(pending.content[0]?.text ?? "", harness.referenceFor(askId)), "the pending ask keeps its reference");
   } finally {
     await harness.emitLifecycle("session_shutdown");
     await cleanup();
@@ -6183,13 +6196,14 @@ test("never policy wakes only for outstanding completing answers, not ordinary o
       const tool = harness.tools.find((tool) => tool.name === "parley")!;
       const call = (params: Record<string, unknown>) => tool.execute("quiet-call", params, new AbortController().signal, undefined, harness.ctx);
       const notify = await call({ action: "send", to: "planner", message: "Ordinary notice." });
-      const noticeId = visibleMessageId(modelText(notify));
+      // The planner is a wire peer: it threads by canonical identity, not by this session's references.
+      const noticeId = harness.identityFor(visibleMessageId(modelText(notify)))!;
       const self = await waitForSessionByName(planner, "quiet-asker");
       await planner.send(self.id, { text: "Ordinary threaded reply.", replyTo: noticeId });
       await waitForVisibleText(harness, "Ordinary threaded reply.");
       assert.equal(harness.sentMessages.at(-1)?.options?.deliverAs, "steer");
       const ask = await call({ action: "ask", to: "planner", message: "Can I release?", blocking: false });
-      const askId = visibleMessageId(modelText(ask));
+      const askId = harness.identityFor(visibleMessageId(modelText(ask)))!;
       await planner.send(self.id, { text: "Still investigating.", replyTo: askId, completesAsk: false });
       await waitForVisibleText(harness, "Still investigating.");
       assert.equal(harness.sentMessages.at(-1)?.options?.deliverAs, "steer");
@@ -6241,7 +6255,7 @@ test("invalid configuration logs and preserves answers and control delivery with
         assert.equal(results[0]?.code, "confirmation_unavailable");
         const tool = harness.tools.find((tool) => tool.name === "parley")!;
         const ask = await tool.execute("fallback-ask", { action: "ask", to: "planner", message: "Requested answer?", blocking: false }, new AbortController().signal, undefined, harness.ctx);
-        const askId = visibleMessageId(modelText(ask));
+        const askId = harness.identityFor(visibleMessageId(modelText(ask)))!;
         await planner.send(self.id, { text: "Requested answer.", replyTo: askId });
         await waitForVisibleText(harness, "Requested answer.");
         assert.equal(harness.sentMessages.at(-1)?.options?.triggerTurn, true);

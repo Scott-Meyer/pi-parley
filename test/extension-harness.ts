@@ -133,6 +133,18 @@ export function createExtensionHarness(sessionName: string | (() => string) = "c
     persistedMessages,
     toolResults,
     getActiveTools: () => pi.getActiveTools(),
+    /** The reference this session persisted for a canonical session or message identity, as models see it. */
+    referenceFor(id: string): string | undefined {
+      return entries.filter((entry) => entry.type === "parley_reference")
+        .map((entry) => entry.data as { id?: string; ref?: string })
+        .findLast((record) => record.id === id)?.ref;
+    },
+    /** The canonical identity behind a reference this session showed, for tests that play the wire peer. */
+    identityFor(reference: string): string | undefined {
+      return entries.filter((entry) => entry.type === "parley_reference")
+        .map((entry) => entry.data as { id?: string; ref?: string })
+        .findLast((record) => record.ref?.toLowerCase() === reference.trim().toLowerCase())?.id;
+    },
     async emitLifecycle(event: string, payload: unknown = {}, eventContext: unknown = ctx) {
       for (const handler of lifecycleHandlers.get(event) ?? []) {
         await handler(payload, eventContext);
@@ -146,4 +158,10 @@ export function createExtensionHarness(sessionName: string | (() => string) = "c
       return results;
     },
   };
+}
+
+/** Whether model text mentions a reference, without mistaking #1 for #12. */
+export function mentions(text: string, reference: string | undefined): boolean {
+  if (!reference) return false;
+  return new RegExp(`${reference.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?![\\w~])`).test(text);
 }

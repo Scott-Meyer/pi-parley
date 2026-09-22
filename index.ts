@@ -27,8 +27,14 @@ import {
   type ParleyOutboxResultV1,
 } from "./extension-api.ts";
 import { ReplyTracker, type ParleyContext } from "./reply-tracker.ts";
+import { ReferenceBook, REFERENCE_ENTRY_TYPE, isCanonicalIdentity, type DeclaredIdentities } from "./references.ts";
+/** Peer-authored text reaches the model exactly as written; presentation skips it. */
+const verbatim = (text: string): string => ReferenceBook.verbatim(text);
+/** Details key marking content this runtime already presented for the model. */
+const PRESENTED_MARK = "referencesPresented";
 import { restoreConversationHistory, messageControlKey, matchesAskCounterpart, type OutstandingAsk } from "./conversation-history.ts";
 import { resolve as resolvePath } from "node:path";
+import { AsyncLocalStorage } from "node:async_hooks";
 import { sameCwd } from "./cwd.ts";
 import { formatContextUsage } from "./format-context.ts";
 import { formatPeerCompactionNotice } from "./compaction-awareness.ts";
@@ -129,6 +135,8 @@ interface BatchDeliveryTarget {
 
 interface BatchDeliveryOutcome {
   to: string;
+  /** What this recipient was requested as, before routing. */
+  requested?: string;
   targetId?: string;
   messageId?: string;
   delivered: boolean;
@@ -172,11 +180,27 @@ interface SupervisorInterviewReply {
   responses: Array<{ id: string; value: unknown }>;
 }
 
-function getErrorMessage(error: unknown): string {
+/** Identities a failure explains, declared so its text can be presented without guessing shapes. */
+function failureIdentities(error: unknown): Record<string, unknown> {
+  if (!(error instanceof ProjectLaunchError)) return {};
+  return {
+    ...(error.launch ? { projectLaunch: error.launch } : {}),
+    ...(error.session ? { session: error.session } : {}),
+  };
+}
+/** How model-facing text names identities; programmatic defaults keep them raw. */
+interface IdentityNames {
+  session(session: SessionInfo): string;
+  message(id: string): string;
+}
+function getErrorMessage(error: unknown, names?: IdentityNames): string {
   if (error instanceof ProjectLaunchError) {
     const launch = error.launch;
-    const receipt = launch ? `\nLaunch in ${launch.projectRoot}: ${launch.outcome}${launch.requestMessageId ? ` (request ${launch.requestMessageId})` : ""}.` : "";
-    const observed = error.session ? `\nObserved session: ${error.session.name || error.session.id} (${error.session.id}).` : "";
+    const request = launch?.requestMessageId ? ` (request ${names ? names.message(launch.requestMessageId) : launch.requestMessageId})` : "";
+    const receipt = launch ? `\nLaunch in ${launch.projectRoot}: ${launch.outcome}${request}.` : "";
+    const observed = error.session
+      ? `\nObserved session: ${names ? names.session(error.session) : `${error.session.name || error.session.id} (${error.session.id})`}.`
+      : "";
     return `${error.message}\nStopped at ${error.stage}.${receipt}${observed}`;
   }
   return error instanceof Error ? error.message : String(error);
@@ -229,7 +253,12 @@ function batchSendToolResult(options: {
   broadcast: boolean;
   sender: string;
   excludedRemoteCount?: number;
+  /** Typed naming for model-facing lines; raw identities by default. */
+  message?: (id: string) => string;
+  compaction?: (display: string, notice: PeerCompactionNotice, expectedPeerSessionId?: string) => string;
 }) {
+  const messageName = options.message ?? ((id: string) => id);
+  const compactionNotice = options.compaction ?? formatPeerCompactionNotice;
   const acceptedCount = options.outcomes.filter((outcome) => outcome.delivered).length;
   const unknownCount = options.outcomes.filter((outcome) => !outcome.outcomeKnown || outcome.delivery === "unknown").length;
   const failedCount = options.outcomes.length - acceptedCount - unknownCount;
@@ -242,13 +271,13 @@ function batchSendToolResult(options: {
   const lines = options.outcomes.map((outcome) => {
     if (outcome.delivered) {
       const state = outcome.delivery === "queued" ? "queued for offline delivery (up to 24h while this broker remains running)" : "sent";
-      const deliveryLine = `- ✓ ${outcome.to}: ${state}${outcome.messageId ? ` (${outcome.messageId})` : ""}`;
+      const deliveryLine = `- ✓ ${outcome.to}: ${state}${outcome.messageId ? ` (${messageName(outcome.messageId)})` : ""}`;
       return outcome.peerCompaction
-        ? `${deliveryLine}\n  ${formatPeerCompactionNotice(outcome.to, outcome.peerCompaction, outcome.targetId)}`
+        ? `${deliveryLine}\n  ${compactionNotice(outcome.to, outcome.peerCompaction, outcome.targetId)}`
         : deliveryLine;
     }
     const unknown = !outcome.outcomeKnown || outcome.delivery === "unknown";
-    return `- ${unknown ? "?" : "✗"} ${outcome.to}: ${unknown ? "outcome unknown; repeating may duplicate delivery — " : ""}${outcome.reason ?? "delivery failed"}${outcome.messageId ? ` (messageId ${outcome.messageId})` : " (no message created)"}`;
+    return `- ${unknown ? "?" : "✗"} ${outcome.to}: ${unknown ? "outcome unknown; repeating may duplicate delivery — " : ""}${outcome.reason ?? "delivery failed"}${outcome.messageId ? ` (message ${messageName(outcome.messageId)})` : " (no message created)"}`;
   });
   if (options.duplicateCount > 0) {
     lines.push(`- Skipped ${options.duplicateCount} duplicate target${options.duplicateCount === 1 ? "" : "s"}.`);
@@ -566,14 +595,10 @@ function parseStructuredSupervisorReply(text: string, interview: SupervisorInter
     return { error: getErrorMessage(error) };
   }
 }
-function duplicateSessionNames(sessions: SessionInfo[]): Set<string> {
-  return new Set(
-    sessions
-      .map(s => s.name?.toLowerCase())
-      .filter((name): name is string => Boolean(name))
-      .filter((name, index, names) => names.indexOf(name) !== index)
-  );
-}
+/**
+ * @deprecated Retained for programmatic callers. Model-facing text names sessions by reference
+ * (see references.ts), never by ID prefix.
+ */
 export function sessionIdPrefixes(sessions: SessionInfo[]): Map<string, string> {
   const prefixes = new Map<string, string>();
   for (const session of sessions) {
@@ -604,6 +629,7 @@ export function sessionIdPrefixes(sessions: SessionInfo[]): Map<string, string> 
   }
   return prefixes;
 }
+
 function parseSubagentParleyPayload(payload: unknown): { to: string; message: string; requestId?: string } | null {
   if (typeof payload !== "object" || payload === null) {
     return null;
@@ -704,25 +730,16 @@ function currentTmuxPane(): string | undefined {
 function formatParleyContactSnippet(sessionId: string): string {
   return `Pi parley target: ${sessionId}`;
 }
-function formatSessionLabel(session: SessionInfo, duplicates: Set<string>): string {
-  if (!session.name) {
-    return session.id;
-  }
-  return duplicates.has(session.name.toLowerCase())
-    ? `${session.name} (${session.id.slice(0, 8)})`
-    : session.name;
-}
-function formatSessionListRow(session: SessionInfo, currentCwd: string, isSelf: boolean, idPrefix: string): string {
-  const name = session.name || "Unnamed session";
+function formatSessionListRow(session: SessionInfo, currentCwd: string, isSelf: boolean, reference: string, origin?: string): string {
   const remote = session.federation
-    ? `remote:${session.federation.originLabel ?? session.federation.originId}; ${session.federation.conversation ? "text conversations (ask/reply)" : "text sends when supported, no asks/replies"}; no attachments`
+    ? `remote:${origin ?? session.federation.originLabel ?? "unlabelled host"}; ${session.federation.conversation ? "text conversations (ask/reply)" : "text sends when supported, no asks/replies"}; no attachments`
     : undefined;
   const tags = [isSelf ? "self" : session.cwd === currentCwd ? "same cwd" : undefined, remote, session.status]
     .filter((tag): tag is string => Boolean(tag));
   const suffix = tags.length ? ` [${tags.join(", ")}]` : "";
   const pane = session.tmuxPane ? ` · tmux ${session.tmuxPane}` : "";
   const description = session.description ? ` — ${session.description}` : "";
-  return `• ${name} (${idPrefix})${description} — ${session.cwd} (${session.model}${formatContextUsage(session)}${pane})${suffix}`;
+  return `• ${reference}${description} — ${session.cwd} (${session.model}${formatContextUsage(session)}${pane})${suffix}`;
 }
 function previewText(value: unknown, maxLength = 72): string | undefined {
   if (typeof value !== "string") {
@@ -740,11 +757,11 @@ function firstTextContent(result: { content?: Array<{ type: string; text?: strin
 function formatMessageTimestamp(timestamp: number | undefined): string | undefined {
   return typeof timestamp === "number" && Number.isFinite(timestamp) ? new Date(timestamp).toISOString() : undefined;
 }
-function formatInboundDeliveryMetadata(message: Message): string {
-  const parts = [`Message: ${message.id}`];
-  if (message.replyTo) parts.push(`Reply to: ${message.replyTo}`);
-  if (message.supersedes) parts.push(`Supersedes: ${message.supersedes}`);
-  if (message.retryOf) parts.push(`Retry of: ${message.retryOf}`);
+function formatInboundDeliveryMetadata(message: Message, messageRef: (id: string) => string): string {
+  const parts = [`Message: ${messageRef(message.id)}`];
+  if (message.replyTo) parts.push(`Reply to: ${messageRef(message.replyTo)}`);
+  if (message.supersedes) parts.push(`Supersedes: ${messageRef(message.supersedes)}`);
+  if (message.retryOf) parts.push(`Retry of: ${messageRef(message.retryOf)}`);
   if (message.provenance) {
     parts.push(`Via extension ${message.provenance.extensionName} (${message.provenance.extensionId}); request ${message.provenance.requestId}`);
   }
@@ -900,15 +917,187 @@ function installParleyExtension(
   let compactionReportRetryTimer: NodeJS.Timeout | null = null;
   let receiverBaselineRetryTimer: NodeJS.Timeout | null = null;
   const activeTools = new Map<string, string>();
-  const replyTracker = new ReplyTracker();
+  // Models see and type human-readable references; canonical IDs stay on the wire and in details.
+  // Each runtime generation owns its own book: a late result from a replaced session allocates
+  // and persists nothing in the new one.
+  function createReferenceBook(): ReferenceBook {
+    const generation = runtimeGeneration;
+    return new ReferenceBook((record) => {
+      if (generation === runtimeGeneration) recordConversationEntry(REFERENCE_ENTRY_TYPE, record);
+    });
+  }
+  let sessionBook = createReferenceBook();
+  // A tool call keeps the book of the session that started it through every await and helper,
+  // so a result that outlives its session never allocates in the session that replaced it.
+  const callBook = new AsyncLocalStorage<ReferenceBook>();
+  const references = {
+    get current(): ReferenceBook { return callBook.getStore() ?? sessionBook; },
+  };
+  const replyTracker = new ReplyTracker(undefined, {
+    session: (from) => references.current.sessionRef(from),
+    message: (id) => references.current.messageRef(id),
+    isReachable: (from) => references.current.isReachable(from.id),
+    verbatim,
+  });
   let conversationPersistenceWarning: string | undefined;
+  const messageRef = (id: string): string => references.current.messageRef(id);
+  // Every structured model-facing rendering names identities through these typed formatters.
+  const sessionName = (id: string, name?: string): string => references.current.sessionRef(name ? { id, name } : id);
+  const identityNames: IdentityNames = {
+    session: (session) => references.current.sessionRef(session),
+    message: (id) => references.current.messageRef(id),
+  };
+  const failureText = (error: unknown): string => getErrorMessage(error, identityNames);
+  const describeDelivery = (result: SendResult, context: Parameters<typeof formatDeliveryResult>[1]): string =>
+    formatDeliveryResult(result, { ...context, sessionRef: (recipient) => references.current.sessionRef(recipient), messageRef, sessionName });
+  const describeCancellation = (result: SendResult): string => formatCancellationResult(result, messageRef);
+  const describeCompaction = (display: string, notice: PeerCompactionNotice, expectedPeerSessionId?: string): string =>
+    formatPeerCompactionNotice(display, notice, expectedPeerSessionId, sessionName);
+  /** Present model-facing text after learning the identities a structured value declares. */
+  function presentForModel(text: string, declared?: unknown): string {
+    return references.current.present(text, declared === undefined ? undefined : references.current.learnFrom(declared));
+  }
+  /** Content this runtime already presented is final; only older, unmarked content gets a conservative pass. */
+  function projectForModel<T extends string | Array<{ type: string; text?: string }>>(content: T, details: unknown, declared?: DeclaredIdentities): T {
+    if (typeof details === "object" && details !== null && (details as Record<string, unknown>)[PRESENTED_MARK] === true) return content;
+    const peerText = legacyPeerText(details);
+    const project = (text: string): string => references.current.present(protectLegacyPeerText(text, peerText), declared);
+    if (typeof content === "string") return project(content) as T;
+    return content.map((part) => part.type === "text" && typeof part.text === "string"
+      ? { ...part, text: project(part.text) }
+      : part) as T;
+  }
+  /**
+   * Peer-authored strings a legacy record's details declare: message and reply bodies,
+   * attachment snapshots, and retained messages named by ID. Their occurrences stay verbatim.
+   */
+  function legacyPeerText(details: unknown): string[] {
+    const found = new Set<string>();
+    const addMessage = (message: unknown): void => {
+      if (!message || typeof message !== "object") return;
+      const content = (message as { content?: { text?: unknown; attachments?: unknown } }).content;
+      if (typeof content?.text === "string") found.add(content.text);
+      if (Array.isArray(content?.attachments)) {
+        for (const attachment of content.attachments) {
+          if (typeof (attachment as { content?: unknown }).content === "string") found.add((attachment as { content: string }).content);
+        }
+      }
+    };
+    const visit = (value: unknown, depth: number): void => {
+      if (!value || typeof value !== "object" || depth > 4) return;
+      if (Array.isArray(value)) { value.forEach((item) => visit(item, depth + 1)); return; }
+      for (const [key, field] of Object.entries(value as Record<string, unknown>)) {
+        if (key === "bodyText" && typeof field === "string") found.add(field);
+        else if ((key === "message" || key === "reply" || key === "original") && field && typeof field === "object") addMessage(field);
+        else if (["messageId", "replyMessageId", "replyTo", "questionId"].includes(key) && typeof field === "string") {
+          addMessage(replyTracker.getMessage(field)?.message);
+        }
+        if (field && typeof field === "object") visit(field, depth + 1);
+      }
+    };
+    visit(details, 0);
+    return [...found].filter((text) => text.length > 0).sort((left, right) => right.length - left.length);
+  }
+  /** Mark declared peer strings and quoted preview lines verbatim, without nesting markers. */
+  function protectLegacyPeerText(text: string, peerText: readonly string[]): string {
+    let parts: Array<{ text: string; verbatim: boolean }> = [{ text, verbatim: false }];
+    const protect = (find: (segment: string) => Array<[number, number]>): void => {
+      parts = parts.flatMap((part) => {
+        if (part.verbatim) return [part];
+        const out: Array<{ text: string; verbatim: boolean }> = [];
+        let cursor = 0;
+        for (const [start, end] of find(part.text)) {
+          if (start < cursor) continue;
+          if (start > cursor) out.push({ text: part.text.slice(cursor, start), verbatim: false });
+          out.push({ text: part.text.slice(start, end), verbatim: true });
+          cursor = end;
+        }
+        if (cursor < part.text.length) out.push({ text: part.text.slice(cursor), verbatim: false });
+        return out;
+      });
+    };
+    for (const peer of peerText) {
+      protect((segment) => {
+        const ranges: Array<[number, number]> = [];
+        for (let index = segment.indexOf(peer); index !== -1; index = segment.indexOf(peer, index + peer.length)) ranges.push([index, index + peer.length]);
+        return ranges;
+      });
+    }
+    protect((segment) => [...segment.matchAll(/^(?:Original message|Reply to your message): .*$/gm)]
+      .map((match) => [match.index!, match.index! + match[0].length] as [number, number]));
+    return parts.map((part) => part.verbatim ? verbatim(part.text) : part.text).join("");
+  }
+  /**
+   * The identities a parley call's arguments declare by field. Session fields declare values the
+   * book knows or that are canonical identities, but never an already-reserved human reference;
+   * message fields declare anything that is not already a message reference.
+   */
+  function declareToolArguments(args: Record<string, unknown>, declared: DeclaredIdentities): void {
+    const book = references.current;
+    const session = (value: unknown): void => {
+      if (typeof value !== "string" || !value.trim()) return;
+      if (book.isIssuedSessionReference(value)) return;
+      if (book.isKnownSession(value) || isCanonicalIdentity(value)) declared.sessions.add(value);
+    };
+    const message = (value: unknown): void => {
+      if (typeof value !== "string" || !value.trim() || book.isIssuedMessageReference(value) || /^#\d+$/.test(value.trim())) return;
+      declared.messages.add(value);
+    };
+    session(args.to);
+    if (Array.isArray(args.targets)) args.targets.forEach(session);
+    for (const key of ["replyTo", "messageId", "supersedes", "retryOf"]) message(args[key]);
+  }
+  /**
+   * Present reference-bearing parley arguments. Each field is a typed slot: a value already
+   * issued as a reference of that field's kind is final; a declared identity of that kind is
+   * formatted directly by kind. Nothing is decided by matching spellings across kinds.
+   */
+  function presentToolArgumentsForModel(args: Record<string, unknown>, declared: DeclaredIdentities): Record<string, unknown> {
+    const book = references.current;
+    const asSession = (value: unknown): unknown => {
+      if (typeof value !== "string" || book.isIssuedSessionReference(value)) return value;
+      return declared.sessions.has(value) ? book.sessionRef(value) : value;
+    };
+    const asMessage = (value: unknown): unknown => {
+      if (typeof value !== "string" || book.isIssuedMessageReference(value)) return value;
+      return declared.messages.has(value) ? book.messageRef(value) : value;
+    };
+    const next: Record<string, unknown> = { ...args };
+    if ("to" in next) next.to = asSession(next.to);
+    if (Array.isArray(next.targets)) next.targets = next.targets.map(asSession);
+    for (const key of ["replyTo", "messageId", "supersedes", "retryOf"]) if (key in next) next[key] = asMessage(next[key]);
+    return next;
+  }
+  /** Wrap a tool so every result it returns reaches the model with references, not canonical IDs. */
+  function presentingTool<T extends { execute: (...args: never[]) => Promise<{ content: Array<{ type: string; text?: string }>; details?: unknown }> }>(tool: T): T {
+    const execute = tool.execute;
+    return { ...tool, execute: async (...args: Parameters<T["execute"]>) => {
+      // Present with the book of the session that started the call, even if it finished later.
+      const book = references.current;
+      return callBook.run(book, async () => presentToolResult(await execute(...args), { book }));
+    } } as T;
+  }
+  function presentToolResult<T extends { content: Array<{ type: string; text?: string }>; details?: unknown }>(
+    result: T,
+    options: { book?: ReferenceBook; sessions?: Iterable<string> } = {},
+  ): T {
+    const book = options.book ?? references.current;
+    const identities = book.learnFrom(result.details);
+    // Marked so the model boundary never presents it again (a second pass could touch peer text).
+    result.details = { ...(typeof result.details === "object" && result.details !== null ? result.details : {}), [PRESENTED_MARK]: true };
+    for (const id of options.sessions ?? []) identities.sessions.add(id);
+    for (const part of result.content) {
+      if (part.type === "text" && typeof part.text === "string") part.text = book.present(part.text, identities);
+    }
+    return result;
+  }
 
   function recordConversationEntry(type: string, data: unknown): void {
     try {
       pi.appendEntry(type, data);
     } catch (error) {
       // History is recovery support, not the acceptance boundary for live conversation.
-      conversationPersistenceWarning = `Parley history was not fully persisted (${type}: ${previewText(getErrorMessage(error), 160) ?? "history write failed"}). Messages and conversation updates remain available in this running session, but recovery after restart may be incomplete.`;
+      conversationPersistenceWarning = `Parley history was not fully persisted (${type}: ${previewText(failureText(error), 160) ?? "history write failed"}). Messages and conversation updates remain available in this running session, but recovery after restart may be incomplete.`;
     }
   }
 
@@ -965,10 +1154,11 @@ function installParleyExtension(
     // Already surfaced snapshots remain history, now with their current disposition.
     freshModelContexts.delete(control.messageId);
     const original = replyTracker.getMessage(control.messageId);
-    const topic = original ? `\nOriginal message: ${JSON.stringify(previewText(original.message.content.text, 180))}` : "";
-    const content = control.action === "cancel"
-      ? `**Parley withdrawal from ${from.name || from.id}** (${from.id})\n\nMessage ${control.messageId} was withdrawn by its sender.${topic}\nThe sender no longer requests this work. Earlier delivery or work may already have happened; withdrawal does not undo it.`
-      : `**Parley update from ${from.name || from.id}** (${from.id})\n\nMessage ${control.messageId} was superseded${control.supersededBy ? ` by ${control.supersededBy}` : ""}.${topic}\nThe earlier message is no longer the current request; prior work is not undone.`;
+    const topic = original ? `\nOriginal message: ${verbatim(JSON.stringify(previewText(original.message.content.text, 180)))}` : "";
+    const sender = references.current.sessionRef(from);
+    const content = presentForModel(control.action === "cancel"
+      ? `**Parley withdrawal from ${sender}**\n\nMessage ${references.current.messageRef(control.messageId)} was withdrawn by its sender.${topic}\nThe sender no longer requests this work. Earlier delivery or work may already have happened; withdrawal does not undo it.`
+      : `**Parley update from ${sender}**\n\nMessage ${references.current.messageRef(control.messageId)} was superseded${control.supersededBy ? ` by ${references.current.messageRef(control.supersededBy)}` : ""}.${topic}\nThe earlier message is no longer the current request; prior work is not undone.`);
     const key = messageControlKey(control);
     deferredInboundControls.set(key, { from, control, content, receivedAt: Date.now() });
     flushInboundControl(key);
@@ -977,7 +1167,7 @@ function installParleyExtension(
     const entry = deferredInboundControls.get(key);
     const ctx = getLiveContext();
     if (!entry || !ctx) return;
-    const envelope = { customType: "parley_message_control", content: entry.content, display: true, details: { from: entry.from, control: entry.control, receivedAt: entry.receivedAt }, timestamp: entry.receivedAt };
+    const envelope = { customType: "parley_message_control", content: entry.content, display: true, details: { from: entry.from, control: entry.control, receivedAt: entry.receivedAt, [PRESENTED_MARK]: true }, timestamp: entry.receivedAt };
     pendingHostEnvelopes.set(`control:${key}`, envelope);
     try {
       pi.sendMessage(envelope, ctx.isIdle() ? { triggerTurn: true } : { deliverAs: "steer" });
@@ -1093,10 +1283,14 @@ function installParleyExtension(
       const details = envelope.details as { control: MessageControl };
       const disposition = inboundMessageDispositions.get(details.control.messageId);
       const status = disposition
-        ? `${disposition.state}${disposition.replacementId ? ` by message ${disposition.replacementId}` : ""}`
+        ? `${disposition.state}${disposition.replacementId ? ` by message ${references.current.messageRef(disposition.replacementId)}` : ""}`
         : details.control.action === "cancel" ? "withdrawn" : "superseded";
-      const content = typeof envelope.content === "string" ? envelope.content : envelope.content.map((part) => part.text ?? "").join("\n");
-      return `**Parley history — withdrawal/update**\nReceived: ${formatMessageTimestamp(envelope.timestamp)}\nStatus: ${status}\nPreviously received context, not a new delivery.\n\n${content}`;
+      const raw = typeof envelope.content === "string" ? envelope.content : envelope.content.map((part) => part.text ?? "").join("\n");
+      // Already-presented notice text is final; an older one keeps its quoted previews verbatim.
+      const content = (envelope.details as Record<string, unknown> | undefined)?.[PRESENTED_MARK] === true
+        ? verbatim(raw)
+        : protectLegacyPeerText(raw, legacyPeerText(envelope.details));
+      return presentForModel(`**Parley history — withdrawal/update**\nReceived: ${formatMessageTimestamp(envelope.timestamp)}\nStatus: ${status}\nPreviously received context, not a new delivery.\n\n${content}`, details);
     }
     const entry = envelope.details as InboundMessageEntry;
     const { from, message } = entry;
@@ -1104,18 +1298,18 @@ function installParleyExtension(
     const disposition = inboundMessageDispositions.get(message.id);
     const answered = settledInboundMessages.has(message.id);
     const status = disposition
-      ? `${disposition.state}${disposition.replacementId ? ` by message ${disposition.replacementId}` : ""}`
+      ? `${disposition.state}${disposition.replacementId ? ` by message ${references.current.messageRef(disposition.replacementId)}` : ""}`
       : answered ? "answered"
       : message.expectsReply
         ? `unanswered request${replyTracker.replyWindowElapsed(retained ?? { from, message, receivedAt: envelope.timestamp }) ? "; reply window elapsed, not withdrawn" : ""}`
         : message.replyTo ? message.completesAsk === false ? "received threaded progress" : "received reply"
         : "received notification; no reply requested";
     const origin = from.federation
-      ? `\nRemote origin: ${from.federation.originLabel || from.federation.originId}; scope ${from.federation.remoteScopeAlias}` : "";
+      ? `\nRemote origin: ${references.current.originRef(from.federation)}; scope ${from.federation.remoteScopeAlias}` : "";
     const compaction = message.peerCompaction
-      ? `\n\n${formatPeerCompactionNotice(from.name || from.id, message.peerCompaction, from.id)}` : "";
+      ? `\n\n${describeCompaction(references.current.sessionRef(from), message.peerCompaction, from.id)}` : "";
     const body = entry.bodyText ?? message.content.text + (message.content.attachments?.length ? formatAttachments(message.content.attachments) : "");
-    return `**Parley history — from ${from.name || from.id}**${from.description ? ` — ${from.description}` : ""}\nReceived: ${formatMessageTimestamp(envelope.timestamp)}\nStatus: ${status}\nPreviously received context, not a new delivery or active conversation.${entry.replyTopic ?? ""}\n\n${body}\n\n${formatInboundDeliveryMetadata(message)}\nSession: ${from.id} · ${from.cwd}${origin}${compaction}`;
+    return presentForModel(`**Parley history — from ${references.current.sessionRef(from)}**${from.description ? ` — ${from.description}` : ""}\nReceived: ${formatMessageTimestamp(envelope.timestamp)}\nStatus: ${status}\nPreviously received context, not a new delivery or active conversation.${verbatim(entry.replyTopic ?? "")}\n\n${verbatim(body)}\n\n${formatInboundDeliveryMetadata(message, messageRef)}\nSession: ${from.cwd}${origin}${compaction}`, { from, message });
   }
 
   function settleOutgoingReply(from: SessionInfo, message: Message): void {
@@ -1142,7 +1336,7 @@ function installParleyExtension(
     return new Promise((resolve, reject) => {
       const timeout = setTimeout(() => {
         const timeoutDescription = askTimeoutMs % 60000 === 0 ? `${askTimeoutMs / 60000} minutes` : `${askTimeoutMs}ms`;
-        rejectReplyWaiter(new Error(`No reply from "${from}" for message ${replyTo} within ${timeoutDescription}. Last known delivery state: ${getDeliveryState()}. This waiter timeout is not cancellation; the delivered message may still be queued or actionable in the recipient session.`));
+        rejectReplyWaiter(new Error(`No reply from ${sessionName(from)} for message ${messageRef(replyTo)} within ${timeoutDescription}. Last known delivery state: ${getDeliveryState()}. This waiter timeout is not cancellation; the delivered message may still be queued or actionable in the recipient session.`));
       }, askTimeoutMs);
       const cleanup = () => {
         clearTimeout(timeout);
@@ -1223,7 +1417,7 @@ function installParleyExtension(
         // Older hosts expose no name-change event to extensions. Never fall
         // back to publishing the unqualified candidate when embedding policy
         // rejects the compatibility-polled value.
-        console.error(`Parley presence name update failed: ${getErrorMessage(error)}`);
+        console.error(`Parley presence name update failed: ${failureText(error)}`);
       }
     }, 1_000);
     sessionNameCompatibilityTimer.unref?.();
@@ -1803,7 +1997,7 @@ function installParleyExtension(
       try {
         activeClient = await ensureConnected("background");
       } catch (error) {
-        settleOutboxRequest(request.requestId, "failed", { code: "session_unavailable", detail: getErrorMessage(error) });
+        settleOutboxRequest(request.requestId, "failed", { code: "session_unavailable", detail: failureText(error) });
         return;
       }
       if (!getLiveContext(liveContext, outboxGeneration)) {
@@ -1826,7 +2020,7 @@ function installParleyExtension(
         }
         target = resolved.target;
       } catch (error) {
-        settleOutboxRequest(request.requestId, "failed", { code: "session_unavailable", detail: getErrorMessage(error) });
+        settleOutboxRequest(request.requestId, "failed", { code: "session_unavailable", detail: failureText(error) });
         return;
       }
       if (!getLiveContext(liveContext, outboxGeneration)) {
@@ -1842,7 +2036,7 @@ function installParleyExtension(
             `Allow ${request.extensionName} (${request.extensionId}) to send to "${target.label}":\n\n${request.message}`,
           );
         } catch (error) {
-          settleOutboxRequest(request.requestId, "blocked", { code: "confirmation_unavailable", detail: getErrorMessage(error) });
+          settleOutboxRequest(request.requestId, "blocked", { code: "confirmation_unavailable", detail: failureText(error) });
           return;
         }
         if (!getLiveContext(liveContext, outboxGeneration)) {
@@ -1891,7 +2085,7 @@ function installParleyExtension(
         const live = getLiveContext(liveContext, outboxGeneration);
         settleOutboxRequest(request.requestId, "failed", {
           code: live ? "session_unavailable" : "session_ended",
-          detail: getErrorMessage(error),
+          detail: failureText(error),
         });
       }
     })();
@@ -1916,9 +2110,9 @@ function installParleyExtension(
     if (!runtimeStarted || !getLiveContext()) {
       return;
     }
-    const targetDisplay = from.name || from.id.slice(0, 8);
+    const targetDisplay = references.current.sessionRef(from);
     const original = findOutgoingTopic(receipt.messageId);
-    const topic = original ? `\nOriginal message: ${JSON.stringify(previewText(original.message?.text ?? original.preview, 240))}` : "";
+    const topic = original ? `\nOriginal message: ${verbatim(JSON.stringify(previewText(original.message?.text ?? original.preview, 240)))}` : "";
     pi.appendEntry("parley_delivery_failed", {
       to: targetDisplay,
       messageId: receipt.messageId,
@@ -1928,9 +2122,9 @@ function installParleyExtension(
     pi.sendMessage(
       {
         customType: "parley_delivery_notice",
-        content: `**Parley delivery failed:** queued message to ${targetDisplay} (${from.cwd}) expired before delivery.\nMessage ID: ${receipt.messageId}${topic}\nReason: ${receipt.detail ?? "mailbox entry expired"}.`,
+        content: presentForModel(`**Parley delivery failed:** queued message to ${targetDisplay} (${from.cwd}) expired before delivery.\nMessage: ${references.current.messageRef(receipt.messageId)}${topic}\nReason: ${receipt.detail ?? "mailbox entry expired"}.`),
         display: true,
-        details: { to: targetDisplay, messageId: receipt.messageId, expired: true, ...(receipt.detail ? { detail: receipt.detail } : {}) },
+        details: { to: targetDisplay, messageId: receipt.messageId, expired: true, ...(receipt.detail ? { detail: receipt.detail } : {}), [PRESENTED_MARK]: true },
       },
       { triggerTurn: true },
     );
@@ -1944,13 +2138,13 @@ function installParleyExtension(
     expectedPeerSessionId?: string,
   ): void {
     if (!result.peerCompaction || (runtimeStarted && !getLiveContext(runtimeContext, generation))) return;
-    const notice = formatPeerCompactionNotice(peerDisplay, result.peerCompaction, expectedPeerSessionId);
+    const notice = describeCompaction(peerDisplay, result.peerCompaction, expectedPeerSessionId);
     pi.sendMessage(
       {
         customType: "parley_compaction_awareness",
-        content: `**Parley compaction awareness**\n\n${notice}`,
+        content: presentForModel(`**Parley compaction awareness**\n\n${notice}`, { messageId: result.id }),
         display: true,
-        details: { messageId: result.id, peerCompaction: result.peerCompaction },
+        details: { messageId: result.id, peerCompaction: result.peerCompaction, [PRESENTED_MARK]: true },
       },
       { triggerTurn: false },
     );
@@ -2000,13 +2194,16 @@ function installParleyExtension(
     }
     return undefined;
   }
-  function sendIncomingMessage(entry: InboundMessageEntry, delivery: "trigger" | "steer", generation = runtimeGeneration, forceTrigger = false): void {
-    if (runtimeStarted && !getLiveContext(runtimeContext, generation)) return;
-    const injectedMessage = { ...entry.message, injectedAt: Date.now() };
-    const senderDisplay = entry.from.name || entry.from.id;
+  /**
+   * The model-facing text of an incoming message, built from its typed record: readable metadata
+   * around the colleague's words, which stay verbatim. Live delivery and legacy replay share it.
+   */
+  function formatInboundEnvelope(entry: InboundMessageEntry, injectedMessage: Message): { content: string; topic: string; isRequestedAnswer: boolean } {
+    references.current.learnFrom({ from: entry.from, message: injectedMessage });
+    const senderDisplay = references.current.sessionRef(entry.from);
     const focus = entry.from.description ? ` — ${entry.from.description}` : "";
     const origin = entry.from.federation
-      ? `\nRemote origin: ${entry.from.federation.originLabel || entry.from.federation.originId}; scope ${entry.from.federation.remoteScopeAlias}`
+      ? `\nRemote origin: ${references.current.originRef(entry.from.federation)}; scope ${entry.from.federation.remoteScopeAlias}`
       : "";
     const requestedAsk = injectedMessage.replyTo ? outstandingAsks.get(injectedMessage.replyTo) : undefined;
     const isRequestedAnswer = requestedAsk !== undefined && matchesAskCounterpart(requestedAsk, entry.from)
@@ -2022,13 +2219,24 @@ function installParleyExtension(
       ? `\nReply requested${waiting}.${elapsed ? " The original wait window has elapsed." : ""}`
       : "";
     const compactionNotice = injectedMessage.peerCompaction
-      ? `\n\n${formatPeerCompactionNotice(senderDisplay, injectedMessage.peerCompaction, entry.from.id)}`
+      ? `\n\n${describeCompaction(senderDisplay, injectedMessage.peerCompaction, entry.from.id)}`
       : "";
+    const body = entry.bodyText ?? injectedMessage.content.text + (injectedMessage.content.attachments?.length ? formatAttachments(injectedMessage.content.attachments) : "");
+    return {
+      content: presentForModel(`**From ${senderDisplay}**${focus}${request}${verbatim(topic)}\n\n${verbatim(body)}\n\n${formatInboundDeliveryMetadata(injectedMessage, messageRef)}\nSession: ${entry.from.cwd}${origin}${compactionNotice}`),
+      topic,
+      isRequestedAnswer,
+    };
+  }
+  function sendIncomingMessage(entry: InboundMessageEntry, delivery: "trigger" | "steer", generation = runtimeGeneration, forceTrigger = false): void {
+    if (runtimeStarted && !getLiveContext(runtimeContext, generation)) return;
+    const injectedMessage = { ...entry.message, injectedAt: Date.now() };
+    const { content, topic, isRequestedAnswer } = formatInboundEnvelope(entry, injectedMessage);
     const envelope = {
       customType: "parley_message",
-      content: `**From ${senderDisplay}**${focus}${request}${topic}\n\n${entry.bodyText}\n\n${formatInboundDeliveryMetadata(injectedMessage)}\nSession: ${entry.from.id} · ${entry.from.cwd}${origin}${compactionNotice}`,
+      content,
       display: true,
-      details: { ...entry, message: injectedMessage, replyTopic: topic },
+      details: { ...entry, message: injectedMessage, replyTopic: topic, [PRESENTED_MARK]: true },
       timestamp: entry.message.receiverReceivedAt ?? entry.message.timestamp,
     };
     deferredInboundMessages.set(entry.message.id, entry);
@@ -2046,13 +2254,13 @@ function installParleyExtension(
   }
   function surfaceInboundCompactionOnly(from: SessionInfo, message: Message, generation: number): void {
     if (!message.peerCompaction || !getLiveContext(runtimeContext, generation)) return;
-    const senderDisplay = from.name || from.id.slice(0, 8);
+    const senderDisplay = references.current.sessionRef(from);
     pi.sendMessage(
       {
         customType: "parley_compaction_awareness",
-        content: `**Parley compaction awareness**\n\n${formatPeerCompactionNotice(senderDisplay, message.peerCompaction, from.id)}`,
+        content: presentForModel(`**Parley compaction awareness**\n\n${describeCompaction(senderDisplay, message.peerCompaction, from.id)}`, { from, messageId: message.id }),
         display: true,
-        details: { messageId: message.id, peerCompaction: message.peerCompaction },
+        details: { messageId: message.id, peerCompaction: message.peerCompaction, [PRESENTED_MARK]: true },
       },
       { triggerTurn: false },
     );
@@ -2202,21 +2410,27 @@ function installParleyExtension(
           handleMessageControl(message.from, message.control);
           break;
         case "session_joined":
+          references.current.observeLive([message.session]);
           for (const namespace of localExtensions.keys()) {
             emitLocalExtensionEvent(namespace, { type: "session_joined", session: message.session });
           }
           break;
         case "session_left":
+          references.current.observeSessionLeft(message.sessionId);
           for (const namespace of localExtensions.keys()) {
             emitLocalExtensionEvent(namespace, { type: "session_left", sessionId: message.sessionId });
           }
           break;
         case "presence_update":
+          references.current.observeLive([message.session]);
           for (const namespace of localExtensions.keys()) {
             emitLocalExtensionEvent(namespace, { type: "presence_update", session: message.session });
           }
           break;
       }
+    });
+    nextClient.on("roster", (sessions: SessionInfo[]) => {
+      if (client === nextClient) references.current.observeLive(sessions, { complete: true });
     });
     nextClient.on("message", (from, message) => {
       const liveContext = getLiveContext();
@@ -2229,6 +2443,7 @@ function installParleyExtension(
       if (client !== nextClient) {
         return;
       }
+      references.current.forgetReachability();
       rejectReplyWaiter(new Error(`Disconnected while waiting for reply: ${error.message}`, { cause: error }));
       for (const [namespace, extension] of localExtensions) {
         extension.owner = undefined;
@@ -2329,17 +2544,40 @@ function installParleyExtension(
     reconnectPromiseGeneration = generationAtStart;
     return nextReconnectPromise;
   }
-  function resolveSessionFromRoster(sessions: SessionInfo[], nameOrId: string): SessionInfo | null {
+  function originOf(session: SessionInfo): string | undefined {
+    return session.federation ? references.current.originRef(session.federation) : undefined;
+  }
+  /** Allocate roster references deterministically: the self and local sessions keep plain names first. */
+  function rosterReferences(sessions: SessionInfo[]): Map<string, string> {
+    const selfId = client?.sessionId;
+    const ordered = [...sessions].sort((left, right) =>
+      Number(right.id === selfId) - Number(left.id === selfId)
+      || Number(Boolean(left.federation)) - Number(Boolean(right.federation))
+      || left.startedAt - right.startedAt);
+    return new Map(ordered.map((session) => [session.id, references.current.sessionRef(session)]));
+  }
+  /**
+   * `exact` means nameOrId is a pinned identity. It resolves only to that session; if absent,
+   * callers route it with exactIdentity so neither the client nor the broker falls through to a
+   * live session whose name or ID merely overlaps it.
+   */
+  function resolveSessionFromRoster(sessions: SessionInfo[], nameOrId: string, exact = false): SessionInfo | null {
     const byId = sessions.find(s => s.id === nameOrId);
     if (byId) {
       return byId;
     }
+    if (exact) {
+      // Absent: the broker's exact-identity mode routes it, never a name or prefix match.
+      return null;
+    }
     const lowerName = nameOrId.toLowerCase();
     const byName = sessions.filter(s => s.name?.toLowerCase() === lowerName);
     if (byName.length > 1) {
-      const prefixes = sessionIdPrefixes(sessions);
-      const ids = byName.map((session) => prefixes.get(session.id)!).join(", ");
-      throw new Error(`Multiple sessions named "${nameOrId}" are connected. Address one by the id shown in parentheses by "list" (${ids}).`);
+      const candidates = [...byName]
+        .sort((left, right) => Number(Boolean(left.federation)) - Number(Boolean(right.federation)))
+        .map((session) => `${references.current.sessionRef(session)} (${session.federation ? `remote:${references.current.originRef(session.federation)}` : session.cwd})`)
+        .join(", ");
+      throw new Error(`Multiple sessions named "${nameOrId}" are connected: ${candidates}. Address one by its reference.`);
     }
     if (byName.length === 1) {
       return byName[0]!;
@@ -2354,8 +2592,8 @@ function installParleyExtension(
     }
     return null;
   }
-  async function resolveSessionTarget(activeClient: ParleyClient, nameOrId: string): Promise<string | null> {
-    return resolveSessionFromRoster(await activeClient.listSessions(), nameOrId)?.id ?? null;
+  async function resolveSessionTarget(activeClient: ParleyClient, nameOrId: string, exact = false): Promise<string | null> {
+    return resolveSessionFromRoster(await activeClient.listSessions(), nameOrId, exact)?.id ?? null;
   }
   async function resolveSupervisorTarget(activeClient: ParleyClient, metadata: ChildOrchestratorMetadata): Promise<SessionInfo | null> {
     const sessions = await activeClient.listSessions();
@@ -2367,6 +2605,8 @@ function installParleyExtension(
   }
   async function resolveCwdDeliveryTarget(activeClient: ParleyClient, options: {
     to?: string;
+    /** `to` is a pinned identity: only that exact session in the directory qualifies. */
+    exactTo?: boolean;
     cwd: string;
     openProjectPaneIfMissing?: boolean;
     focus?: boolean;
@@ -2385,12 +2625,20 @@ function installParleyExtension(
     const targetCwd = options.cwd && options.cwd !== "."
       ? resolvePath(currentSession.cwd, options.cwd)
       : currentSession.cwd;
-    const existing = resolveTargetInCwd({
-      sessions,
-      currentSessionId,
-      targetCwd,
-      ...(options.to ? { to: options.to } : {}),
-    });
+    const exactSession = options.exactTo && options.to
+      ? sessions.find((session) => session.id === options.to && !session.federation && sameCwd(session.cwd, targetCwd))
+      : undefined;
+    const existing = options.exactTo && options.to
+      ? exactSession
+        ? { kind: "found" as const, session: exactSession, targetCwd }
+        : { kind: "missing" as const, targetCwd, reason: `${sessionName(options.to)} is not connected in ${targetCwd}.` }
+      : resolveTargetInCwd({
+        sessions,
+        currentSessionId,
+        targetCwd,
+        ...(options.to ? { to: options.to } : {}),
+        sessionRef: (session) => references.current.sessionRef(session),
+      });
     if (existing.kind === "found" && existing.session) {
       return { id: existing.session.id, label: options.to || existing.session.name || existing.session.id, session: existing.session };
     }
@@ -2412,6 +2660,7 @@ function installParleyExtension(
       signal: options.signal,
     });
     const session = await waitForProjectSession(activeClient, {
+      sessionRef: (candidate) => references.current.sessionRef(candidate),
       projectRoot: projectPane.projectRoot,
       currentSessionId,
       beforeSessionIds,
@@ -2423,7 +2672,7 @@ function installParleyExtension(
   function projectObservation(target: DeliveryTarget): string {
     if (!target.projectPane) return "";
     const launch = target.projectPane;
-    return `\nProject launch: ${launch.outcome} in ${launch.projectRoot}${launch.requestMessageId ? ` (request ${launch.requestMessageId})` : ""}.\nObserved local session: ${target.label} (${target.id}). Registration does not prove which launch created it.`;
+    return `\nProject launch: ${launch.outcome} in ${launch.projectRoot}${launch.requestMessageId ? ` (request ${messageRef(launch.requestMessageId)})` : ""}.\nObserved local session: ${target.session ? references.current.sessionRef(target.session) : sessionName(target.id)}. Registration does not prove which launch created it.`;
   }
 
   async function sendBatchMessages(
@@ -2436,8 +2685,13 @@ function installParleyExtension(
       broadcast: boolean;
       signal?: AbortSignal;
       allowRosterMailboxFallback?: boolean;
+      /** The calling session's history writer; it drops writes once that session is replaced. */
+      record?: (type: string, data: unknown) => void;
+      /** Requested targets that are pinned identities and must be routed exactly, never by name or prefix. */
+      isExactIdentity?: (requested: string) => boolean;
     },
   ): Promise<BatchDeliveryOutcome[]> {
+    const record = options.record ?? recordConversationEntry;
     return mapWithConcurrency(targets, SEND_FANOUT_CONCURRENCY, async (target) => {
       if (options.signal?.aborted) {
         return {
@@ -2471,7 +2725,7 @@ function installParleyExtension(
         };
         let result = target.session
           ? await activeClient.sendToSession(target.session, sendOptions)
-          : await activeClient.send(target.requested, sendOptions);
+          : await activeClient.send(target.requested, { ...sendOptions, exactIdentity: options.isExactIdentity?.(target.requested) === true });
         // Exact delivery to a roster peer can lose a disconnect race before the
         // frame reaches the broker. For an unconfirmed explicit group, retry
         // that known not-delivered outcome through ordinary ID routing so the
@@ -2497,10 +2751,12 @@ function installParleyExtension(
               reason: "Send cancelled before offline delivery was attempted",
             };
           }
-          result = await activeClient.send(target.session.id, sendOptions);
+          // The departed roster entry is a known identity: route to exactly it.
+          result = await activeClient.send(target.session.id, { ...sendOptions, exactIdentity: true });
         }
         const outcome: BatchDeliveryOutcome = {
-          to: result.recipient?.name || target.label,
+          to: result.recipient ? references.current.sessionRef(result.recipient) : target.label,
+          requested: target.requested,
           ...(result.recipient ? { targetId: result.recipient.id } : target.session ? { targetId: target.session.id } : {}),
           messageId: result.id,
           delivered: result.delivered,
@@ -2512,7 +2768,7 @@ function installParleyExtension(
           ...(result.peerCompaction ? { peerCompaction: result.peerCompaction } : {}),
         };
         if (result.delivered) {
-          recordConversationEntry("parley_sent", {
+          record("parley_sent", {
             to: target.label,
             targetId: result.recipient?.id ?? target.session?.id,
             message: { text: options.message, attachments: options.attachments },
@@ -2533,7 +2789,7 @@ function installParleyExtension(
           delivery: "unknown",
           retryable: true,
           outcomeKnown: false,
-          reason: getErrorMessage(error),
+          reason: failureText(error),
         };
       }
     });
@@ -2564,7 +2820,7 @@ function installParleyExtension(
     pi.appendEntry(entryType, {
       to,
       message,
-      error: getErrorMessage(error),
+      error: failureText(error),
       timestamp: Date.now(),
     });
   }
@@ -2583,7 +2839,13 @@ function installParleyExtension(
     seenInboundMessages.clear();
     latestOutboundReceipts.clear();
     conversationPersistenceWarning = undefined;
-    const history = restoreConversationHistory(ctx.sessionManager.getEntries());
+    const restoredEntries = ctx.sessionManager.getEntries();
+    sessionBook = createReferenceBook();
+    references.current.restore(restoredEntries.flatMap((entry) => {
+      const custom = entry as { type?: string; customType?: string; data?: unknown };
+      return custom.type === "custom" && custom.customType === REFERENCE_ENTRY_TYPE ? [custom.data] : [];
+    }));
+    const history = restoreConversationHistory(restoredEntries);
     for (const id of history.persistedIncoming) presentedInboundEnvelopes.add(`message:${id}`);
     for (const key of history.persistedControls) presentedInboundEnvelopes.add(`control:${key}`);
     for (const id of history.settledIncoming) settledInboundMessages.add(id);
@@ -2671,7 +2933,7 @@ function installParleyExtension(
     pi.events.emit(SUBAGENT_RESULT_PARLEY_DELIVERY_EVENT, {
       requestId,
       delivered,
-      ...(error ? { error: getErrorMessage(error) } : {}),
+      ...(error ? { error: failureText(error) } : {}),
     });
   }
   function relaySubagentParleyPayload(payload: unknown, options: {
@@ -2867,7 +3129,43 @@ function installParleyExtension(
     // Duplicate host retries are collapsed by message ID, not by identical body text.
     const seen = new Set<string>();
     const messages: typeof event.messages = [];
+    // Learn what every parley call and result in this projection declares before presenting any
+    // of it, so a summary that precedes the call it mentions is still readable.
+    const projectionIdentities: DeclaredIdentities = { messages: new Set(), sessions: new Set() };
     for (const message of event.messages) {
+      if (message.role === "assistant" && Array.isArray(message.content)) {
+        for (const part of message.content) {
+          if (part.type === "toolCall" && part.name === PARLEY_TOOL_NAME) declareToolArguments(part.arguments, projectionIdentities);
+        }
+      } else if ((message.role === "toolResult" && (message.toolName === PARLEY_TOOL_NAME || message.toolName === "contact_supervisor"))
+        || (message.role === "custom" && message.customType?.startsWith("parley_"))) {
+        references.current.learnFrom(message.details, projectionIdentities);
+      }
+    }
+    // Older, unmarked text gets typed canonical identities only; exact replacement of arbitrary
+    // declared strings could touch authored words that are not marked verbatim.
+    const canonicalIdentities: DeclaredIdentities = {
+      messages: new Set([...projectionIdentities.messages].filter(isCanonicalIdentity)),
+      sessions: new Set([...projectionIdentities.sessions].filter(isCanonicalIdentity)),
+    };
+    for (const message of event.messages) {
+      if (message.role === "assistant" && Array.isArray(message.content)) {
+        // The model's own earlier parley calls may carry canonical identities (older versions,
+        // programmatic arguments). Present them in this projection only; history is untouched.
+        messages.push({ ...message, content: message.content.map((part) => part.type === "toolCall" && part.name === PARLEY_TOOL_NAME
+          ? { ...part, arguments: presentToolArgumentsForModel(part.arguments, projectionIdentities) }
+          : part) });
+        continue;
+      }
+      if (message.role === "compactionSummary" || message.role === "branchSummary") {
+        messages.push({ ...message, summary: references.current.present(message.summary, canonicalIdentities) });
+        continue;
+      }
+      if (message.role === "toolResult" && (message.toolName === PARLEY_TOOL_NAME || message.toolName === "contact_supervisor")) {
+        // Results recorded before references existed (or by other versions) still reach the model readable.
+        messages.push({ ...message, content: projectForModel(message.content, message.details, canonicalIdentities) });
+        continue;
+      }
       if (message.role !== "custom") {
         messages.push(message);
         continue;
@@ -2875,7 +3173,9 @@ function installParleyExtension(
       if (message.customType === "parley_persistence_notice" && conversationPersistenceWarning) continue;
       const key = inboundEnvelopeKey(message);
       if (!key) {
-        messages.push(message);
+        messages.push(message.customType?.startsWith("parley_")
+          ? { ...message, content: projectForModel(message.content, message.details, canonicalIdentities) }
+          : message);
         continue;
       }
       if (seen.has(key)) continue;
@@ -2883,7 +3183,17 @@ function installParleyExtension(
       const details = message.details as { message?: Message; control?: MessageControl; receivedAt?: number };
       const timestamp = details.message?.receiverReceivedAt ?? details.receivedAt ?? details.message?.timestamp ?? details.control?.timestamp ?? message.timestamp;
       if (!isHistoricalInboundEnvelope(key)) {
-        messages.push({ ...message, timestamp });
+        const presented = (message.details as Record<string, unknown> | undefined)?.[PRESENTED_MARK] === true;
+        const stored = typeof message.content === "string" ? message.content
+          : message.content.map((part) => part.type === "text" ? part.text : "").join("\n");
+        // An older incoming message that still carries identities is rebuilt from its typed record,
+        // so metadata and the colleague's words are told apart by structure rather than by matching
+        // text. One with nothing to present stays exactly as stored.
+        const content = !presented && message.customType === "parley_message" && details.message
+          && references.current.present(stored, canonicalIdentities) !== stored
+          ? formatInboundEnvelope(message.details as InboundMessageEntry, details.message).content
+          : projectForModel(message.content, message.details, canonicalIdentities);
+        messages.push({ ...message, content, timestamp });
         continue;
       }
       messages.push({ ...message, content: historicalInboundEnvelope({ ...message, timestamp }), timestamp });
@@ -2976,7 +3286,12 @@ function installParleyExtension(
   pi.registerMessageRenderer("parley_message", (message, options, theme) => {
     const details = message.details as { from: SessionInfo; message: Message; replyCommand?: string; bodyText?: string } | undefined;
     if (!details) return undefined;
-    return new InlineMessageComponent(details.from, details.message, theme, details.replyCommand, details.bodyText, !options.expanded);
+    return new InlineMessageComponent(details.from, details.message, theme, details.replyCommand, details.bodyText, !options.expanded, {
+      session: (from) => references.current.sessionRef(from),
+      message: (id) => references.current.messageRef(id),
+      present: (text) => references.current.present(text),
+      sessionName,
+    });
   });
 
   pi.on("tool_result", (event) => {
@@ -2999,7 +3314,7 @@ function installParleyExtension(
   const childOrchestratorMetadata = readChildOrchestratorMetadata();
   const nativeSupervisorChannelAvailable = Boolean(process.env[SUBAGENT_SUPERVISOR_CHANNEL_DIR_ENV]?.trim());
   if (childOrchestratorMetadata && !nativeSupervisorChannelAvailable) {
-    pi.registerTool(defineTool({
+    pi.registerTool(presentingTool(defineTool({
       name: "contact_supervisor",
       label: "Contact Supervisor",
       description: "Conversation with the supervisor who delegated this task. need_decision waits for a reply; interview_request waits for structured answers; progress_update returns a delivery receipt without waiting. Task completion has its own return channel.",
@@ -3028,11 +3343,14 @@ function installParleyExtension(
       async execute(_toolCallId, params, signal, _onUpdate, ctx) {
         const actionGeneration = runtimeGeneration;
         const historyWarnings: string[] = [];
+        let lateHistorySkipped = false;
         const recordActionEntry = (type: string, data: unknown): void => {
+          // A result that outlives its session never writes into the session that replaced it.
+          if (runtimeGeneration !== actionGeneration) { lateHistorySkipped = true; return; }
           try { pi.appendEntry(type, data); }
-          catch (error) { historyWarnings.push(getErrorMessage(error)); }
+          catch (error) { historyWarnings.push(failureText(error)); }
         };
-        const historyNote = () => historyWarnings.length ? `\nLocal history was not fully persisted; recovery may be incomplete. ${historyWarnings.join("; ")}` : "";
+        const historyNote = () => `${historyWarnings.length ? `\nLocal history was not fully persisted; recovery may be incomplete. ${historyWarnings.join("; ")}` : ""}${lateHistorySkipped || runtimeGeneration !== actionGeneration ? "\nThis result arrived after the Pi session changed. What it reports happened, but it was not recorded in the current session's history." : ""}`;
         const reason = params.reason as ContactSupervisorReason;
         if (reason !== "need_decision" && reason !== "progress_update" && reason !== "interview_request") {
           return {
@@ -3062,7 +3380,7 @@ function installParleyExtension(
           connectedClient = await ensureConnected("tool");
         } catch (error) {
           return {
-            content: [{ type: "text", text: `Parley not connected: ${getErrorMessage(error)}` }],
+            content: [{ type: "text", text: `Parley not connected: ${failureText(error)}` }],
             details: { error: true },
           };
         }
@@ -3082,7 +3400,7 @@ function installParleyExtension(
           resolvedSupervisor = await resolveSupervisorTarget(connectedClient, metadata);
         } catch (error) {
           return {
-            content: [{ type: "text", text: `Failed to resolve supervisor target: ${getErrorMessage(error)}` }],
+            content: [{ type: "text", text: `Failed to resolve supervisor target: ${failureText(error)}` }],
             details: { error: true },
           };
         }
@@ -3117,7 +3435,7 @@ function installParleyExtension(
             if (!result.delivered) {
               const errorText = result.reason ?? "Session may not exist or has disconnected.";
               return {
-                content: [{ type: "text", text: formatDeliveryResult(result, { kind: "Progress update", sender: senderIdentity, target: metadata.orchestratorTarget }) }],
+                content: [{ type: "text", text: describeDelivery(result, { kind: "Progress update", sender: senderIdentity, target: metadata.orchestratorTarget }) }],
                 details: deliveryDetails(result),
               };
             }
@@ -3131,16 +3449,19 @@ function installParleyExtension(
               subagent: { runId: metadata.runId, agent: metadata.agent, index: metadata.index },
             });
             const awareness = result.peerCompaction
-              ? `\n\n${formatPeerCompactionNotice(metadata.orchestratorTarget, result.peerCompaction, sendTo)}`
+              ? `\n\n${describeCompaction(metadata.orchestratorTarget, result.peerCompaction, sendTo)}`
               : "";
             connectedClient.acknowledgeSendContact(result);
+            // A late progress update never consumes the replacement session's conversation context.
+            const conversationContext = runtimeGeneration === actionGeneration ? replyTracker.formatConversationContext() : "";
             return {
-              content: [{ type: "text", text: formatDeliveryResult(result, { kind: "Progress update", sender: senderIdentity, target: metadata.orchestratorTarget }) + historyNote() + (replyTracker.formatConversationContext() ? `\n\n${replyTracker.formatConversationContext()}` : "") }],
+              // Conversation context is stateful (mention once, then count): render it exactly once.
+              content: [{ type: "text", text: describeDelivery(result, { kind: "Progress update", sender: senderIdentity, target: metadata.orchestratorTarget }) + historyNote() + (conversationContext ? `\n\n${conversationContext}` : "") }],
               details: deliveryDetails(result),
             };
           } catch (error) {
             return {
-              content: [{ type: "text", text: `Failed to send progress update: ${getErrorMessage(error)}` }],
+              content: [{ type: "text", text: `Failed to send progress update: ${failureText(error)}` }],
               details: { error: true },
             };
           }
@@ -3219,7 +3540,7 @@ function installParleyExtension(
             try { await replyPromise; answered = true; }
             catch { /* Only a still-pending waiter was rejected. A received answer survives missing acceptance. */ }
             if (sendResult.outcomeKnown || !answered) return {
-              content: [{ type: "text", text: formatDeliveryResult(sendResult, { kind: "Ask", sender: senderIdentity, target: metadata.orchestratorTarget }) }],
+              content: [{ type: "text", text: describeDelivery(sendResult, { kind: "Ask", sender: senderIdentity, target: metadata.orchestratorTarget }) }],
               details: { error: true, ...deliveryDetails(sendResult) },
             };
           }
@@ -3253,10 +3574,10 @@ function installParleyExtension(
           });
           const awareness = [
             requestCompaction
-              ? formatPeerCompactionNotice(metadata.orchestratorTarget, requestCompaction, sendTo)
+              ? describeCompaction(metadata.orchestratorTarget, requestCompaction, sendTo)
               : undefined,
             replyMessage.peerCompaction
-              ? formatPeerCompactionNotice(metadata.orchestratorTarget, replyMessage.peerCompaction, sendTo)
+              ? describeCompaction(metadata.orchestratorTarget, replyMessage.peerCompaction, sendTo)
               : undefined,
           ].filter((notice): notice is string => Boolean(notice));
           connectedClient.acknowledgeSendContact(sendResult);
@@ -3264,7 +3585,7 @@ function installParleyExtension(
           return {
             content: [{
               type: "text",
-              text: `${!sendResult.outcomeKnown ? "Ask acceptance remains unknown; no replay was attempted. A correlated answer was received independently.\n\n" : ""}${awareness.length ? `${awareness.join("\n\n")}\n\n` : ""}**Reply from supervisor:**\nQuestion message ID: ${questionId}\nReply message ID: ${replyMessage.id}\n\n${replyText}${replyAttachments}${historyNote()}${structuredReply?.error ? `\n\nThe structured answer could not be validated: ${structuredReply.error}` : ""}`,
+              text: `${!sendResult.outcomeKnown ? "Ask acceptance remains unknown; no replay was attempted. A correlated answer was received independently.\n\n" : ""}${awareness.length ? `${awareness.join("\n\n")}\n\n` : ""}**Reply from supervisor:**\nQuestion: ${messageRef(questionId)}\nReply: ${messageRef(replyMessage.id)}\n\n${verbatim(`${replyText}${replyAttachments}`)}${historyNote()}${structuredReply?.error ? `\n\nThe structured answer could not be validated: ${structuredReply.error}` : ""}`,
             }],
             details: {
               ...deliveryDetails(sendResult),
@@ -3288,11 +3609,11 @@ function installParleyExtension(
             }
           }
           const requestAwareness = requestSendResult?.peerCompaction
-            ? `\n\n${formatPeerCompactionNotice(metadata.orchestratorTarget, requestSendResult.peerCompaction, sendTo)}`
+            ? `\n\n${describeCompaction(metadata.orchestratorTarget, requestSendResult.peerCompaction, sendTo)}`
             : "";
           if (requestSendResult) connectedClient.acknowledgeSendContact(requestSendResult);
           return {
-            content: [{ type: "text", text: `Failed: ${getErrorMessage(error)}${requestAwareness}` }],
+            content: [{ type: "text", text: `Failed: ${failureText(error)}${requestAwareness}` }],
             details: {
               error: true,
               ...(questionId ? { messageId: questionId, deliveryState: latestDeliveryState(questionId, deliveryState) } : {}),
@@ -3338,7 +3659,7 @@ function installParleyExtension(
         }
         return new Text(text, 0, 0);
       },
-    }));
+    })));
   }
 
   function normalizeToolProfilePlaceholders(profile: SelfProfileUpdate | undefined): SelfProfileUpdate | undefined {
@@ -3375,7 +3696,7 @@ function installParleyExtension(
         // broker boundary.
         resolveEmbeddedPresenceName(configuration, requestedName, SESSION_PRESENCE_NAME_CONTEXT);
       } catch (error) {
-        return `Unable to resolve profile name: ${getErrorMessage(error)}`;
+        return `Unable to resolve profile name: ${failureText(error)}`;
       }
     }
     if (requestedName !== undefined) {
@@ -3426,7 +3747,7 @@ function installParleyExtension(
           requiredName: requestedName,
         });
       } catch (error) {
-        return `Unable to persist self profile; no changes were applied: ${getErrorMessage(error)}`;
+        return `Unable to persist self profile; no changes were applied: ${failureText(error)}`;
       }
       profileNameMutationTarget = requestedName;
       try {
@@ -3439,7 +3760,7 @@ function installParleyExtension(
           // The pending entry is conditional on Pi having persisted the new
           // canonical name, so it remains inert if abandonment cannot journal.
         }
-        return `Unable to update profile name: ${getErrorMessage(error)}`;
+        return `Unable to update profile name: ${failureText(error)}`;
       }
       profileNameMutationTarget = undefined;
       observedSessionName = requestedName;
@@ -3459,7 +3780,7 @@ function installParleyExtension(
         pi.appendEntry("parley_profile_updated", profileState);
         profileOwnershipRevocationPending = false;
       } catch (error) {
-        return `Unable to persist self profile; no changes were applied: ${getErrorMessage(error)}`;
+        return `Unable to persist self profile; no changes were applied: ${failureText(error)}`;
       }
       currentSessionDescription = nextDescription;
     }
@@ -3510,18 +3831,140 @@ function installParleyExtension(
     return result;
   }
 
-  function formatOutstandingAsks(limit = 3): string {
+  /** The reference for a counterpart recorded by canonical ID, using the display it was addressed by as a naming hint. */
+  function counterpartRef(id: string, display?: string): string {
+    const pinned = display ? references.current.resolveSession(display) : undefined;
+    if (references.current.isKnownSession(id) || !display || display === id || (pinned && pinned.id !== id)) {
+      return references.current.sessionRef(id);
+    }
+    return references.current.sessionRef({ id, name: display });
+  }
+  const quietOutstandingAsks = new Set<string>();
+  /** Automatic context mentions an ask whose local wait elapsed once; status always lists everything. */
+  function formatOutstandingAsks(limit = 3, options: { complete?: boolean } = {}): string {
     const entries = [...outstandingAsks.entries()].sort((a, b) => a[1].sentAt - b[1].sentAt);
     if (!entries.length) return "";
     const now = Date.now();
-    const lines = entries.slice(0, limit).map(([id, ask]) => {
+    const lines: string[] = [];
+    let quieted = 0;
+    let omitted = 0;
+    for (const [id, ask] of entries) {
       const ageMs = Math.max(0, now - ask.sentAt);
+      const elapsed = ageMs > askTimeoutMs;
+      if (!options.complete && elapsed && quietOutstandingAsks.has(id)) {
+        quieted += 1;
+        continue;
+      }
+      if (lines.length >= limit) {
+        omitted += 1;
+        continue;
+      }
+      if (!options.complete && elapsed) quietOutstandingAsks.add(id);
       const age = ageMs < 60_000 ? `${Math.round(ageMs / 1000)}s` : `${Math.round(ageMs / 60_000)}m`;
-      const elapsed = ageMs > askTimeoutMs ? "; local wait window elapsed" : "";
-      return `- ${ask.targetDisplay} · messageId ${id} · ${age}${elapsed} · ${ask.preview}`;
-    });
-    if (entries.length > limit) lines.push(`… ${entries.length - limit} more outstanding questions.`);
+      lines.push(`- ${references.current.messageRef(id)} to ${counterpartRef(ask.to, ask.targetDisplay)} · ${age}${elapsed ? "; local wait window elapsed" : ""} · ${verbatim(ask.preview)}`);
+    }
+    if (omitted > 0) lines.push(`… ${omitted} more outstanding questions.`);
+    if (quieted > 0) lines.push(`… ${quieted} earlier question(s) whose wait window elapsed; status lists them.`);
     return `Outstanding asks (${entries.length}, local tracking):\n${lines.join("\n")}`;
+  }
+
+  type ReferenceParams = { to?: string; targets?: string[]; replyTo?: string; messageId?: string; supersedes?: string; retryOf?: string };
+  interface ResolvedReferences<T> {
+    params: T;
+    /** The single `to` target, when it named a pinned reference. */
+    pinnedTarget?: { id: string; ref: string };
+    /** Canonical identities that came from pinned references and must be routed exactly. */
+    pinnedIds: Set<string>;
+    /** What the model called each translated identity, for model-facing display. */
+    displayFor: Map<string, string>;
+  }
+  /**
+   * Translate what a model typed into canonical identities before any routing.
+   * Pinned session references resolve to the identity they were shown for; other
+   * text keeps ordinary live name resolution. Canonical IDs pass through unchanged
+   * for programmatic callers.
+   */
+  function resolveModelReferences<T extends ReferenceParams>(params: T): ResolvedReferences<T> | { error: string } {
+    const next: T = { ...params };
+    const pinnedIds = new Set<string>();
+    const displayFor = new Map<string, string>();
+    const pinSession = (text: string): string => {
+      const resolved = references.current.resolveSession(text);
+      if (!resolved) return text;
+      pinnedIds.add(resolved.id);
+      displayFor.set(resolved.id, text.trim());
+      return resolved.id;
+    };
+    let pinnedTarget: { id: string; ref: string } | undefined;
+    if (typeof next.to === "string" && next.to.trim()) {
+      const id = pinSession(next.to);
+      if (pinnedIds.has(id)) pinnedTarget = { id, ref: next.to.trim() };
+      next.to = id;
+    }
+    if (Array.isArray(next.targets)) {
+      next.targets = next.targets.map((target) => typeof target === "string" && target.trim() ? pinSession(target) : target);
+    }
+    for (const key of ["replyTo", "messageId", "supersedes", "retryOf"] as const) {
+      const value = next[key];
+      if (typeof value !== "string" || !value.trim()) continue;
+      const resolved = references.current.resolveMessage(value);
+      if (resolved?.kind === "unknown") {
+        return { error: `${key} ${resolved.ref} is not a message this session knows. Message references such as #12 appear in receipts, incoming messages, pending, and status.` };
+      }
+      if (resolved) next[key] = resolved.id;
+    }
+    return { params: next, pinnedIds, displayFor, ...(pinnedTarget ? { pinnedTarget } : {}) };
+  }
+  /**
+   * Tell the model what happened when the session it addressed was not the one reached, or could
+   * not be reached while another session uses its name. Parley never redirects a pinned reference;
+   * the broker's offline-mail rule may deliver to a unique same-named session in the same directory,
+   * and a project launch may choose a new session. Each is reported as what it is.
+   */
+  function successorHintFor(
+    params: ReferenceParams & { action?: string },
+    resolved: ResolvedReferences<unknown>,
+    details: unknown,
+  ): string | undefined {
+    if (!["send", "ask", "reply"].includes(params.action ?? "")) return undefined;
+    type Outcome = {
+      delivered?: boolean; delivery?: string; outcomeKnown?: boolean; messageId?: string;
+      recipient?: { id?: string }; openedProjectPane?: boolean; outcomes?: BatchDeliveryOutcome[];
+    };
+    const outcome = details as Outcome | undefined;
+    const addressedAs = (id: string): string => resolved.displayFor.get(id) ?? references.current.sessionRef(id);
+    const rebound = (addressedId: string, actualId: string, projectLaunch: boolean): string => {
+      const addressed = addressedAs(addressedId);
+      const actual = references.current.sessionRef(actualId);
+      if (projectLaunch) return `${addressed} was not connected in that directory; this went to ${actual}, the session observed after the project launch.`;
+      const known = references.current.isKnownSession(actualId) ? actual : "another session";
+      return `${addressed} itself was not reached: the broker's offline-mail rule delivered this to ${known}, a different session using that name in the same directory. Address ${actual} directly if that is who you mean.`;
+    };
+    if (Array.isArray(outcome?.outcomes)) {
+      const lines = outcome!.outcomes
+        .filter((item) => item.delivered && item.requested && resolved.pinnedIds.has(item.requested) && item.targetId && item.targetId !== item.requested)
+        .map((item) => `- ${rebound(item.requested!, item.targetId!, false)}`);
+      return lines.length ? lines.join("\n") : undefined;
+    }
+    const counterpart = resolved.pinnedTarget?.id
+      ?? (params.replyTo ? replyTracker.getMessage(params.replyTo)?.from.id : undefined);
+    if (!counterpart) return undefined;
+    const addressed = addressedAs(counterpart);
+    const recipientId = outcome?.recipient?.id;
+    if (outcome?.delivered && recipientId && recipientId !== counterpart) return rebound(counterpart, recipientId, outcome.openedProjectPane === true);
+    const uncertain = outcome?.outcomeKnown === false || outcome?.delivery === "unknown";
+    if (uncertain) {
+      return references.current.isReachable(counterpart) === false
+        ? `${addressed} was not connected, and the recipient of this message is unknown; the broker may have delivered it elsewhere or not at all. Sending again could repeat it.`
+        : undefined;
+    }
+    const successor = references.current.successorHint(counterpart, addressed.replace(/~\d+$/, ""));
+    if (!successor) return undefined;
+    // Offline mail may still reach a same-named session later, so a resend could arrive twice.
+    const queued = outcome?.delivery === "queued" && outcome.messageId
+      ? ` ${references.current.messageRef(outcome.messageId)} is queued for ${addressed}; if you meant ${successor}, cancel ${references.current.messageRef(outcome.messageId)} before sending to ${successor}.`
+      : "";
+    return `${addressed} is not currently reachable. A different session, ${successor}, now uses that name; address ${successor} explicitly if you mean it. Parley did not redirect this.${queued}`;
   }
 
   pi.registerTool(defineTool({
@@ -3539,15 +3982,16 @@ function installParleyExtension(
 • broadcast: Independent messages to visible local peers, not remote peers.
 • advertise: Subagent public visibility within the current scope.
 • rename: Changes this session's name.
+• label: Gives a message a local name, like release-approval, usable wherever a message reference is.
 
-Receipts include sender/recipient identity, exact message IDs, delivery state, and nearby conversation context. Endpoint acceptance is not an acknowledgement from the colleague.`,
+Sessions and messages are named the way people would name them: a session by its name (name~2 when a different session later took a name you've already seen), a message by its number here, like #12. Use references as shown; parley keeps each one attached to what it first named. Receipts include sender and recipient, the message reference, delivery state, and nearby conversation context. Endpoint acceptance is not an acknowledgement from the colleague.`,
     promptSnippet: "Communicate with other Pi sessions.",
     promptGuidelines: [
       "Parley messages can wake colleagues; broadcasts reach every visible local peer.",
     ],
 
     parameters: Type.Object({
-      action: StringEnum(["list", "list-cwd", "send", "broadcast", "ask", "reply", "pending", "status", "cancel", "advertise", "rename", "read"] as const, {
+      action: StringEnum(["list", "list-cwd", "send", "broadcast", "ask", "reply", "pending", "status", "cancel", "advertise", "rename", "read", "label"] as const, {
         description: "Parley operation.",
       }),
       profile: Type.Optional(Type.Object({
@@ -3564,12 +4008,12 @@ Receipts include sender/recipient identity, exact message IDs, delivery state, a
         description: "Optional self-profile update.",
       })),
       to: Type.Optional(Type.String({
-        description: "One target session: name, full session ID, or the short id shown in parentheses by 'list' (a leading ID prefix resolves). For send/ask with cwd, omit to target the sole live session in that cwd or the newly opened project-pane session. For 'reply', disambiguates the pending ask.",
+        description: "One session, by the reference shown in list, receipts, or messages. For send/ask with cwd, omit to target the sole live session in that cwd or the newly opened project-pane session. For 'reply', narrows which sender you are answering.",
       })),
       targets: Type.Optional(Type.Array(Type.String(), {
         minItems: 1,
         maxItems: MAX_EXPLICIT_SEND_TARGETS,
-        description: "For 'send', several explicit target names or IDs. Each receives an independent message and outcome. Cannot be combined with 'to', cwd targeting, replyTo, supersedes, or retryOf.",
+        description: "For 'send', several session references. Each receives an independent message and outcome. Cannot be combined with 'to', cwd targeting, replyTo, supersedes, or retryOf.",
       })),
       message: Type.Optional(Type.String({
         description: "Message to send (for 'send', 'broadcast', 'ask', or 'reply' action)",
@@ -3581,16 +4025,19 @@ Receipts include sender/recipient identity, exact message IDs, delivery state, a
         language: Type.Optional(Type.String()),
       }), { description: "Inline text snapshots; no files are created in the receiving workspace." })),
       replyTo: Type.Optional(Type.String({
-        description: "Message ID to reply to (for threading or responding to an 'ask')",
+        description: "Message reference (like #12) to reply to, for threading or answering an ask.",
       })),
       messageId: Type.Optional(Type.String({
-        description: "Exact message ID for read or cancel; session-ID prefix matching does not apply.",
+        description: "Message reference (like #12) for read, cancel, or label.",
+      })),
+      label: Type.Optional(Type.String({
+        description: "A one-word local name for a message, like release-approval. With 'label', names the existing message in messageId; with send or ask, names the new message. Usable anywhere a message reference is.",
       })),
       supersedes: Type.Optional(Type.String({
-        description: "Previous message ID this send/ask explicitly supersedes. Only works for the same sender and receiver.",
+        description: "Reference of your earlier send/ask that this one replaces. Only works for the same sender and receiver.",
       })),
       retryOf: Type.Optional(Type.String({
-        description: "Previous message ID this send/ask is a user-authored retry of. Retries always send a new message ID.",
+        description: "Reference of an earlier send/ask this is a user-authored retry of. A retry is always a new message with its own reference.",
       })),
       cwd: Type.Optional(Type.String({
         description: "Working directory filter for 'list-cwd'. For send/ask, scopes target lookup to that directory; omit 'to' to target the sole live peer there. Absolute, or relative to the current session's cwd; '.' means the current cwd.",
@@ -3609,18 +4056,64 @@ Receipts include sender/recipient identity, exact message IDs, delivery state, a
       })),
     }),
 
-    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+    async execute(_toolCallId, modelParams, _signal, _onUpdate, ctx) {
       const actionGeneration = runtimeGeneration;
+      // This call belongs to the session that started it: present and allocate with its book.
+      const book = references.current;
+      return callBook.run(book, async () => {
+      const resolvedReferences = resolveModelReferences(modelParams);
+      if ("error" in resolvedReferences) {
+        return attachSelfProfile(presentToolResult({ content: [{ type: "text" as const, text: resolvedReferences.error }], details: { error: true } }, { book }));
+      }
+      const params = resolvedReferences.params;
+      const pinned = (value?: string): boolean => typeof value === "string" && resolvedReferences.pinnedIds.has(value);
+      const display = (value?: string): string | undefined => value === undefined ? undefined : resolvedReferences.displayFor.get(value) ?? value;
+      const routedSessions = new Set<string>(resolvedReferences.pinnedIds);
+      // Labels are claimed before any await, so concurrent calls cannot both take one.
+      const requestedLabel = typeof params.label === "string" && params.label.trim() ? params.label : undefined;
+      let labelReservation: ReturnType<ReferenceBook["reserveLabel"]> | undefined;
+      if (requestedLabel && (params.action === "send" || params.action === "ask")) {
+        if (params.targets?.some((target) => target.trim())) {
+          return attachSelfProfile(presentToolResult({ content: [{ type: "text" as const, text: "A label names one message; a multi-target send creates one message per recipient. Label each afterwards with the label action." }], details: { error: true } }, { book }));
+        }
+        labelReservation = book.reserveLabel(requestedLabel);
+        if (!labelReservation.ok) {
+          return attachSelfProfile(presentToolResult({ content: [{ type: "text" as const, text: `Label not available: ${labelReservation.reason} Nothing was sent.` }], details: { error: true } }, { book }));
+        }
+      }
+      let labelSettled = false;
+      /**
+       * A label follows the authored message's real lifecycle, settled the moment the send outcome
+       * is known and before anything names the message. Only known non-creation frees it: a local
+       * wait ending, an unknown outcome, or an observed delivery all keep it bound.
+       */
+      const settleLabel = (outcome: { id?: unknown; messageId?: unknown; delivered?: unknown; outcomeKnown?: unknown; delivery?: unknown; deliveryState?: unknown } | undefined): void => {
+        if (!labelReservation?.ok || labelSettled) return;
+        labelSettled = true;
+        const id = typeof outcome?.messageId === "string" ? outcome.messageId : typeof outcome?.id === "string" ? outcome.id : undefined;
+        const knownNotCreated = id === undefined
+          || (outcome!.delivered === false && outcome!.outcomeKnown === true)
+          || outcome!.deliveryState === "failed";
+        if (knownNotCreated) labelReservation.release();
+        else labelReservation.bind(id!);
+      };
       let sendIdentity: string | undefined;
       const historyWarnings: string[] = [];
+      let lateHistorySkipped = false;
       const recordActionEntry = (type: string, data: unknown): void => {
+        // A result that outlives its session never writes into the session that replaced it.
+        if (runtimeGeneration !== actionGeneration) { lateHistorySkipped = true; return; }
         try { pi.appendEntry(type, data); }
-        catch (error) { historyWarnings.push(`${type}: ${getErrorMessage(error)}`); }
+        catch (error) { historyWarnings.push(`${type}: ${failureText(error)}`); }
       };
+      // Session-scoped bookkeeping (pending questions, settlements) belongs to the session that
+      // started this call. A late result reports what happened but never creates or settles work
+      // in the session that replaced it.
+      const ownsSession = (): boolean => runtimeGeneration === actionGeneration;
       const settleSupersededQuestion = (): void => {
-        if (!params.supersedes) return;
+        if (!params.supersedes || !ownsSession()) return;
         outstandingAsks.delete(params.supersedes);
-        rejectOwnedReplyWaiter(params.supersedes, new Error(`Request ${params.supersedes} was superseded.`));
+        rejectOwnedReplyWaiter(params.supersedes, new Error(`Request ${messageRef(params.supersedes)} was superseded.`));
         recordActionEntry("parley_ask_settled", { messageId: params.supersedes, reason: "superseded", timestamp: Date.now() });
       };
       const toolResult = await (async (): Promise<AgentToolResult<unknown>> => {
@@ -3638,7 +4131,7 @@ Receipts include sender/recipient identity, exact message IDs, delivery state, a
         connectedClient = await ensureConnected("tool");
       } catch (error) {
         return {
-          content: [{ type: "text", text: `Parley not connected: ${getErrorMessage(error)}` }],
+          content: [{ type: "text", text: `Parley not connected: ${failureText(error)}` }],
           details: { error: true },
         };
       }
@@ -3653,7 +4146,7 @@ Receipts include sender/recipient identity, exact message IDs, delivery state, a
         ).name;
       } catch (error) {
         return {
-          content: [{ type: "text", text: `Action ${params.action} was not performed. Presence name resolution failed: ${getErrorMessage(error)}` }],
+          content: [{ type: "text", text: `Action ${params.action} was not performed. Presence name resolution failed: ${failureText(error)}` }],
           details: { error: true },
         };
       }
@@ -3709,9 +4202,9 @@ Receipts include sender/recipient identity, exact message IDs, delivery state, a
         ? undefined
         : params.targets;
 
-      if (messageId && action !== "cancel" && action !== "read") {
+      if (messageId && action !== "cancel" && action !== "read" && action !== "label") {
         return {
-          content: [{ type: "text", text: "messageId identifies a retained message for read or cancel; sends and asks create a new message ID." }],
+          content: [{ type: "text", text: "messageId identifies a retained message for read or cancel; sends and asks create a new message." }],
           details: { error: true },
         };
       }
@@ -3739,7 +4232,7 @@ Receipts include sender/recipient identity, exact message IDs, delivery state, a
             result = await connectedClient.advertise(resolvedName ?? requestedName);
           } catch (error) {
             return {
-              content: [{ type: "text", text: `Advertise failed: ${getErrorMessage(error)}` }],
+              content: [{ type: "text", text: `Advertise failed: ${failureText(error)}` }],
               details: { error: true },
             };
           }
@@ -3798,11 +4291,11 @@ Receipts include sender/recipient identity, exact message IDs, delivery state, a
               };
             }
 
-            const prefixes = sessionIdPrefixes(sessions);
-            const currentSection = `**Current session:**\n${formatSessionListRow(currentSession, currentSession.cwd, true, prefixes.get(currentSession.id)!)}`;
+            const refs = rosterReferences(sessions);
+            const currentSection = `**Current session:**\n${formatSessionListRow(currentSession, currentSession.cwd, true, refs.get(currentSession.id)!, originOf(currentSession))}`;
             const otherSection = otherSessions.length === 0
               ? "**Other sessions:**\nNo other sessions connected."
-              : `**Other sessions:**\n${otherSessions.map((session) => formatSessionListRow(session, currentSession.cwd, false, prefixes.get(session.id)!)).join("\n")}`;
+              : `**Other sessions:**\n${otherSessions.map((session) => formatSessionListRow(session, currentSession.cwd, false, refs.get(session.id)!, originOf(session))).join("\n")}`;
 
             return {
               content: [{ type: "text", text: `${currentSection}\n\n${otherSection}` }],
@@ -3810,7 +4303,7 @@ Receipts include sender/recipient identity, exact message IDs, delivery state, a
             };
           } catch (error) {
             return {
-              content: [{ type: "text", text: `Failed to list sessions: ${getErrorMessage(error)}` }],
+              content: [{ type: "text", text: `Failed to list sessions: ${failureText(error)}` }],
               details: { error: true },
             };
           }
@@ -3852,11 +4345,11 @@ Receipts include sender/recipient identity, exact message IDs, delivery state, a
               }
             }
 
-            const prefixes = sessionIdPrefixes(sessions);
-            const currentSection = `**Current session:**\n${formatSessionListRow(currentSession, currentSession.cwd, true, prefixes.get(currentSession.id)!)}`;
+            const refs = rosterReferences(sessions);
+            const currentSection = `**Current session:**\n${formatSessionListRow(currentSession, currentSession.cwd, true, refs.get(currentSession.id)!, originOf(currentSession))}`;
             const otherSection = otherSessions.length === 0
               ? `**Other sessions (cwd: ${filterCwd}):**\n${emptyNote}`
-              : `**Other sessions (cwd: ${filterCwd}):**\n${otherSessions.map((session) => formatSessionListRow(session, currentSession.cwd, false, prefixes.get(session.id)!)).join("\n")}`;
+              : `**Other sessions (cwd: ${filterCwd}):**\n${otherSessions.map((session) => formatSessionListRow(session, currentSession.cwd, false, refs.get(session.id)!, originOf(session))).join("\n")}`;
 
             return {
               content: [{ type: "text", text: `${currentSection}\n\n${otherSection}` }],
@@ -3864,7 +4357,7 @@ Receipts include sender/recipient identity, exact message IDs, delivery state, a
             };
           } catch (error) {
             return {
-              content: [{ type: "text", text: `Failed to list sessions: ${getErrorMessage(error)}` }],
+              content: [{ type: "text", text: `Failed to list sessions: ${failureText(error)}` }],
               details: { error: true },
             };
           }
@@ -3879,18 +4372,18 @@ Receipts include sender/recipient identity, exact message IDs, delivery state, a
           }
           try {
             const result = await connectedClient.cancelMessage(messageId);
-            if (result.delivered && result.outcomeKnown) {
+            if (result.delivered && result.outcomeKnown && ownsSession()) {
               outstandingAsks.delete(messageId);
-              rejectOwnedReplyWaiter(messageId, new Error(`Request ${messageId} was withdrawn.`));
+              rejectOwnedReplyWaiter(messageId, new Error(`Request ${messageRef(messageId)} was withdrawn.`));
               recordActionEntry("parley_ask_settled", { messageId, reason: "withdrawn", timestamp: Date.now() });
             }
             return {
-              content: [{ type: "text", text: formatCancellationResult(result) }],
+              content: [{ type: "text", text: describeCancellation(result) }],
               details: deliveryDetails(result),
             };
           } catch (error) {
             return {
-              content: [{ type: "text", text: `Failed to cancel message: ${getErrorMessage(error)}` }],
+              content: [{ type: "text", text: `Failed to cancel message: ${failureText(error)}` }],
               details: { error: true, messageId },
             };
           }
@@ -3919,7 +4412,7 @@ Receipts include sender/recipient identity, exact message IDs, delivery state, a
             syncPresenceIdentity(ctx.sessionManager.getSessionId());
           } catch (error) {
             return {
-              content: [{ type: "text", text: `Unable to set the session name: ${getErrorMessage(error)}` }],
+              content: [{ type: "text", text: `Unable to set the session name: ${failureText(error)}` }],
               details: { error: true },
             };
           }
@@ -3954,15 +4447,13 @@ Receipts include sender/recipient identity, exact message IDs, delivery state, a
           try {
             const sessions = await connectedClient.listSessions();
             const currentSessionId = connectedClient.sessionId;
-            const prefixes = sessionIdPrefixes(sessions);
+            const refs = rosterReferences(sessions);
             const recipients: BatchDeliveryTarget[] = sessions
               .filter((session) => session.id !== currentSessionId && !session.federation)
               .sort((left, right) => left.id.localeCompare(right.id))
               .map((session) => ({
                 requested: session.id,
-                label: session.name
-                  ? `${session.name} (${prefixes.get(session.id) ?? session.id.slice(0, 8)})`
-                  : prefixes.get(session.id) ?? session.id,
+                label: refs.get(session.id)!,
                 session,
               }));
             if (recipients.length === 0) {
@@ -3991,8 +4482,11 @@ Receipts include sender/recipient identity, exact message IDs, delivery state, a
               batchId,
               broadcast: true,
               signal: _signal,
+              record: recordActionEntry,
             });
             return batchSendToolResult({
+              message: messageRef,
+              compaction: describeCompaction,
               batchId,
               outcomes,
               requestedTargetCount: recipients.length,
@@ -4003,7 +4497,7 @@ Receipts include sender/recipient identity, exact message IDs, delivery state, a
             });
           } catch (error) {
             return {
-              content: [{ type: "text", text: `Failed to broadcast: ${getErrorMessage(error)}` }],
+              content: [{ type: "text", text: `Failed to broadcast: ${failureText(error)}` }],
               details: { error: true },
             };
           }
@@ -4050,7 +4544,7 @@ Receipts include sender/recipient identity, exact message IDs, delivery state, a
               let duplicateCount = 0;
               for (const requested of requestedTargets) {
                 try {
-                  const session = resolveSessionFromRoster(sessions, requested);
+                  const session = resolveSessionFromRoster(sessions, requested, pinned(requested));
                   if (session) {
                     if (seenSessionIds.has(session.id)) {
                       duplicateCount += 1;
@@ -4059,7 +4553,7 @@ Receipts include sender/recipient identity, exact message IDs, delivery state, a
                     seenSessionIds.add(session.id);
                     recipients.push({
                       requested,
-                      label: requested,
+                      label: display(requested)!,
                       session,
                       ...(session.id === connectedClient.sessionId
                         ? { resolutionError: "Cannot message the current session", resolutionCode: "E_SELF_TARGET" }
@@ -4072,12 +4566,12 @@ Receipts include sender/recipient identity, exact message IDs, delivery state, a
                     continue;
                   }
                   seenUnresolved.add(requested);
-                  recipients.push({ requested, label: requested });
+                  recipients.push({ requested, label: display(requested)! });
                 } catch (error) {
                   recipients.push({
                     requested,
-                    label: requested,
-                    resolutionError: getErrorMessage(error),
+                    label: display(requested)!,
+                    resolutionError: failureText(error),
                     resolutionCode: "E_TARGET_RESOLUTION",
                   });
                 }
@@ -4088,8 +4582,9 @@ Receipts include sender/recipient identity, exact message IDs, delivery state, a
                 const attachmentText = attachments?.length ? formatAttachments(attachments) : "";
                 const recipientLines = recipients.map((recipient) => {
                   if (recipient.session) {
+                    // A human approving an exact endpoint sees which one: its name and canonical identity.
                     const name = recipient.session.name ? `${recipient.session.name} ` : "";
-                    return `- ${recipient.requested} → ${name}(${recipient.session.id})`;
+                    return `- ${recipient.label} → ${name}(${recipient.session.id})`;
                   }
                   if (recipient.resolutionError) {
                     return `- ${recipient.requested} → will fail: ${recipient.resolutionError}`;
@@ -4119,9 +4614,13 @@ Receipts include sender/recipient identity, exact message IDs, delivery state, a
                 batchId,
                 broadcast: false,
                 signal: _signal,
+                record: recordActionEntry,
+                isExactIdentity: (requested) => pinned(requested),
                 allowRosterMailboxFallback: !confirmedSnapshot,
               });
               return batchSendToolResult({
+              message: messageRef,
+              compaction: describeCompaction,
                 batchId,
                 outcomes,
                 requestedTargetCount: requestedTargets.length,
@@ -4131,7 +4630,7 @@ Receipts include sender/recipient identity, exact message IDs, delivery state, a
               });
             } catch (error) {
               return {
-                content: [{ type: "text", text: `Failed to send: ${getErrorMessage(error)}` }],
+                content: [{ type: "text", text: `Failed to send: ${failureText(error)}` }],
                 details: { error: true },
               };
             }
@@ -4164,10 +4663,11 @@ Receipts include sender/recipient identity, exact message IDs, delivery state, a
               }
             }
             const target: DeliveryTarget = cwd
-              ? await resolveCwdDeliveryTarget(connectedClient, { to, cwd, openProjectPaneIfMissing, focus, signal: _signal })
-              : { id: await resolveSessionTarget(connectedClient, to!) ?? to!, label: to! };
+              ? await resolveCwdDeliveryTarget(connectedClient, { to, exactTo: pinned(to), cwd, openProjectPaneIfMissing, focus, signal: _signal })
+              : { id: await resolveSessionTarget(connectedClient, to!, pinned(to)) ?? to!, label: display(to)! };
             const sendTo = target.id;
-            const targetDisplay = target.projectPane ? target.label : to ?? target.label;
+            routedSessions.add(sendTo);
+            const targetDisplay = target.projectPane ? target.label : display(to) ?? target.label;
             if (sendTo === connectedClient.sessionId) {
               return {
                 content: [{ type: "text", text: "Cannot message the current session" }],
@@ -4187,7 +4687,7 @@ Receipts include sender/recipient identity, exact message IDs, delivery state, a
               }
             }
             const threadRecipient = replyTo
-              ? resolveSessionFromRoster(await connectedClient.listSessions(), sendTo)
+              ? resolveSessionFromRoster(await connectedClient.listSessions(), sendTo, pinned(sendTo))
               : undefined;
             const prepared = threadRecipient?.federation
               ? await connectedClient.prepareConversation(threadRecipient)
@@ -4209,10 +4709,11 @@ Receipts include sender/recipient identity, exact message IDs, delivery state, a
             captureSendIdentity();
             const result = prepared
               ? await connectedClient.sendToSession(prepared.recipient, sendOptions)
-              : await connectedClient.send(sendTo, sendOptions);
+              : await connectedClient.send(sendTo, { ...sendOptions, exactIdentity: pinned(sendTo) });
+            settleLabel(result);
             if (!result.delivered) {
               return {
-                content: [{ type: "text", text: formatDeliveryResult(result, { kind: "Message", sender: sendIdentity!, target: targetDisplay }) + projectObservation(target) }],
+                content: [{ type: "text", text: describeDelivery(result, { kind: "Message", sender: sendIdentity!, target: targetDisplay }) + projectObservation(target) }],
                 details: { ...deliveryDetails(result), ...(target.projectPane ? { projectLaunch: target.projectPane } : {}) },
               };
             }
@@ -4227,7 +4728,7 @@ Receipts include sender/recipient identity, exact message IDs, delivery state, a
               ...(result.peerCompaction ? { peerCompaction: result.peerCompaction } : {}),
               timestamp: Date.now(),
             });
-            const awarenessText = formatDeliveryResult(result, { kind: "Message", sender: sendIdentity!, target: targetDisplay }) + projectObservation(target);
+            const awarenessText = describeDelivery(result, { kind: "Message", sender: sendIdentity!, target: targetDisplay }) + projectObservation(target);
             connectedClient.acknowledgeSendContact(result);
             return {
               content: [{
@@ -4237,13 +4738,13 @@ Receipts include sender/recipient identity, exact message IDs, delivery state, a
               details: {
                 ...deliveryDetails(result),
                 ...(replyTo ? { replyTo } : {}),
-                ...(target.projectPane ? { openedProjectPane: true, projectRoot: target.projectPane.projectRoot, projectLauncher: target.projectPane.provider.kind === "session" ? target.projectPane.provider.name : "configured-command" } : {}),
+                ...(target.projectPane ? { openedProjectPane: true, projectLaunch: target.projectPane, projectRoot: target.projectPane.projectRoot, projectLauncher: target.projectPane.provider.kind === "session" ? target.projectPane.provider.name : "configured-command" } : {}),
               },
             };
           } catch (error) {
             return {
-              content: [{ type: "text", text: `Failed to send: ${getErrorMessage(error)}` }],
-              details: { error: true },
+              content: [{ type: "text", text: `Failed to send: ${failureText(error)}` }],
+              details: { error: true, ...failureIdentities(error) },
             };
           }
         }
@@ -4280,15 +4781,17 @@ Receipts include sender/recipient identity, exact message IDs, delivery state, a
           let questionId: string | null = null;
           let questionCompaction: PeerCompactionNotice | undefined;
           let questionSendResult: SendResult | undefined;
-          let questionTargetDisplay = to ?? cwd ?? "peer";
+          let questionTargetDisplay = display(to) ?? cwd ?? "peer";
           let questionTargetId: string | undefined;
           const rememberQuestion = (id: string, target: string, label: string, endpointEpoch?: string, originEpoch?: string): void => {
+            if (!ownsSession()) { lateHistorySkipped = true; return; }
             const sentAt = Date.now();
             const binding = { ...(endpointEpoch ? { endpointEpoch } : {}), ...(originEpoch ? { originEpoch } : {}) };
             outstandingAsks.set(id, { to: target, ...binding, targetDisplay: label, preview: previewText(message, 120) ?? message, sentAt, message: { text: message, attachments } });
             recordActionEntry("parley_ask_pending", { messageId: id, to: target, ...binding, targetDisplay: label, message: { text: message, attachments }, sentAt });
           };
           const settleQuestion = (id: string, reason: string): void => {
+            if (!ownsSession()) return;
             outstandingAsks.delete(id);
             recordActionEntry("parley_ask_settled", { messageId: id, reason, timestamp: Date.now() });
           };
@@ -4302,19 +4805,20 @@ Receipts include sender/recipient identity, exact message IDs, delivery state, a
             }
             let target: DeliveryTarget;
             if (cwd) {
-              target = await resolveCwdDeliveryTarget(connectedClient, { to, cwd, openProjectPaneIfMissing, focus, signal: _signal });
+              target = await resolveCwdDeliveryTarget(connectedClient, { to, exactTo: pinned(to), cwd, openProjectPaneIfMissing, focus, signal: _signal });
             } else {
-              const resolved = resolveSessionFromRoster(await connectedClient.listSessions(), to!);
+              const resolved = resolveSessionFromRoster(await connectedClient.listSessions(), to!, pinned(to));
               if (!resolved) {
                 return {
-                  content: [{ type: "text", text: `Session "${to}" is not currently connected. Questions require a connected peer; no question was sent.` }],
+                  content: [{ type: "text", text: `Session "${display(to)}" is not currently connected. Questions require a connected peer; no question was sent.` }],
                   details: { error: true },
                 };
               }
-              target = { id: resolved.id, label: to!, session: resolved };
+              target = { id: resolved.id, label: display(to)!, session: resolved };
             }
             const sendTo = target.id;
-            const targetDisplay = target.projectPane ? target.label : to ?? target.label;
+            routedSessions.add(sendTo);
+            const targetDisplay = target.projectPane ? target.label : display(to) ?? target.label;
             questionTargetDisplay = targetDisplay;
             questionTargetId = sendTo;
             if (_signal?.aborted) {
@@ -4348,7 +4852,7 @@ Receipts include sender/recipient identity, exact message IDs, delivery state, a
             const responderOriginEpoch = prepared?.recipient.federation?.originEpoch;
             const sendQuestion = (options: SendOptions): Promise<SendResult> => prepared
               ? connectedClient.sendToSession(prepared.recipient, options)
-              : connectedClient.send(sendTo, options);
+              : connectedClient.send(sendTo, { ...options, exactIdentity: pinned(sendTo) });
             if (blocking === false) {
               const askId = preparedId;
               rememberQuestion(askId, sendTo, targetDisplay, responderEpoch, responderOriginEpoch);
@@ -4366,12 +4870,13 @@ Receipts include sender/recipient identity, exact message IDs, delivery state, a
                 signal: _signal,
                 contactKind: "direct",
               });
+              settleLabel({ ...sendResult, messageId: askId });
               if (!sendResult.delivered) {
                 if (sendResult.outcomeKnown) {
                   settleQuestion(askId, "not-delivered");
                 }
                 return {
-                  content: [{ type: "text", text: formatDeliveryResult(sendResult, { kind: "Ask", sender: sendIdentity!, target: targetDisplay }) + projectObservation(target) }],
+                  content: [{ type: "text", text: describeDelivery(sendResult, { kind: "Ask", sender: sendIdentity!, target: targetDisplay }) + projectObservation(target) }],
                   details: { error: true, ...deliveryDetails(sendResult) },
                 };
               }
@@ -4390,13 +4895,13 @@ Receipts include sender/recipient identity, exact message IDs, delivery state, a
               return {
                 content: [{
                   type: "text",
-                  text: `${formatDeliveryResult(sendResult, { kind: "Ask", sender: sendIdentity!, target: targetDisplay }) + projectObservation(target)}\nNon-blocking: the answer arrives in this conversation.`,
+                  text: `${describeDelivery(sendResult, { kind: "Ask", sender: sendIdentity!, target: targetDisplay }) + projectObservation(target)}\nNon-blocking: the answer arrives in this conversation.`,
                 }],
                 details: {
                   nonBlocking: true,
                   messageId: askId,
                   ...deliveryDetails(sendResult),
-                  ...(target.projectPane ? { openedProjectPane: true, projectRoot: target.projectPane.projectRoot, projectLauncher: target.projectPane.provider.kind === "session" ? target.projectPane.provider.name : "configured-command" } : {}),
+                  ...(target.projectPane ? { openedProjectPane: true, projectLaunch: target.projectPane, projectRoot: target.projectPane.projectRoot, projectLauncher: target.projectPane.provider.kind === "session" ? target.projectPane.provider.name : "configured-command" } : {}),
                 },
               };
             }
@@ -4419,6 +4924,7 @@ Receipts include sender/recipient identity, exact message IDs, delivery state, a
               contactKind: "direct",
             });
 
+            settleLabel({ ...sendResult, messageId: questionId });
             questionSendResult = sendResult;
             deliveryState = sendResult.delivery;
             questionCompaction = sendResult.peerCompaction;
@@ -4439,7 +4945,7 @@ Receipts include sender/recipient identity, exact message IDs, delivery state, a
                 // queued after the send result's continuation.
               }
               if (sendResult.outcomeKnown || !answered) return {
-                content: [{ type: "text", text: formatDeliveryResult(sendResult, { kind: "Ask", sender: sendIdentity!, target: targetDisplay }) + projectObservation(target) }],
+                content: [{ type: "text", text: describeDelivery(sendResult, { kind: "Ask", sender: sendIdentity!, target: targetDisplay }) + projectObservation(target) }],
                 details: { error: true, ...deliveryDetails(sendResult) },
               };
             }
@@ -4471,17 +4977,17 @@ Receipts include sender/recipient identity, exact message IDs, delivery state, a
               !questionCompaction || replyMessage.peerCompaction.generation > questionCompaction.generation
             ) ? replyMessage.peerCompaction : questionCompaction;
             const awarenessText = latestCompaction
-              ? `${formatPeerCompactionNotice(targetDisplay, latestCompaction, sendTo)}\n\n`
+              ? `${describeCompaction(targetDisplay, latestCompaction, sendTo)}\n\n`
               : "";
             connectedClient.acknowledgeSendContact(sendResult);
             acknowledgeInboundMessageContact(connectedClient, replyMessage);
             return {
-              content: [{ type: "text", text: `${!sendResult.outcomeKnown ? "Ask acceptance remains unknown; no replay was attempted. A correlated answer was received independently.\n\n" : ""}${awarenessText}**Reply from ${targetDisplay}** (asked as ${sendIdentity!}):\nQuestion message ID: ${questionId}\nReply message ID: ${replyMessage.id}\n\n${replyText}${replyAttachments}` }],
+              content: [{ type: "text", text: `${!sendResult.outcomeKnown ? "Ask acceptance remains unknown; no replay was attempted. A correlated answer was received independently.\n\n" : ""}${awarenessText}**Reply from ${targetDisplay}** (asked as ${sendIdentity!}):\nQuestion: ${messageRef(questionId)}\nReply: ${messageRef(replyMessage.id)}\n\n${verbatim(`${replyText}${replyAttachments}`)}` }],
               details: {
                 ...deliveryDetails(sendResult),
                 replyMessageId: replyMessage.id,
                 ...(latestCompaction ? { peerCompaction: latestCompaction } : {}),
-                ...(target.projectPane ? { openedProjectPane: true, projectRoot: target.projectPane.projectRoot, projectLauncher: target.projectPane.provider.kind === "session" ? target.projectPane.provider.name : "configured-command" } : {}),
+                ...(target.projectPane ? { openedProjectPane: true, projectLaunch: target.projectPane, projectRoot: target.projectPane.projectRoot, projectLauncher: target.projectPane.provider.kind === "session" ? target.projectPane.provider.name : "configured-command" } : {}),
               },
             };
           } catch (error) {
@@ -4493,17 +4999,18 @@ Receipts include sender/recipient identity, exact message IDs, delivery state, a
                 // The waiter is cleanup-only on this path. The real failure is the one from the outer catch.
               }
             }
-            const failureText = `Failed: ${getErrorMessage(error)}`;
+            const failureMessage = `Failed: ${failureText(error)}`;
             if (questionSendResult) connectedClient.acknowledgeSendContact(questionSendResult);
             return {
               content: [{
                 type: "text",
                 text: questionCompaction
-                  ? `${failureText}\n\n${formatPeerCompactionNotice(questionTargetDisplay, questionCompaction, questionTargetId)}`
-                  : failureText,
+                  ? `${failureMessage}\n\n${describeCompaction(questionTargetDisplay, questionCompaction, questionTargetId)}`
+                  : failureMessage,
               }],
               details: {
                 error: true,
+                ...failureIdentities(error),
                 ...(questionId ? { messageId: questionId, deliveryState: latestDeliveryState(questionId, deliveryState) } : {}),
                 ...(questionCompaction ? { peerCompaction: questionCompaction } : {}),
               },
@@ -4526,7 +5033,7 @@ Receipts include sender/recipient identity, exact message IDs, delivery state, a
           }
 
           try {
-            const target = replyTracker.resolveReplyTarget({ to, replyTo });
+            const target = replyTracker.resolveReplyTarget({ to, replyTo, exactSender: pinned(to) });
             if (target.from.id === connectedClient.sessionId) {
               return {
                 content: [{ type: "text", text: "Cannot message the current session" }],
@@ -4551,16 +5058,16 @@ Receipts include sender/recipient identity, exact message IDs, delivery state, a
             captureSendIdentity();
             const result = prepared
               ? await connectedClient.sendToSession(prepared.recipient, replyOptions)
-              : await connectedClient.send(target.from.id, replyOptions);
+              : await connectedClient.send(target.from.id, { ...replyOptions, exactIdentity: pinned(to) });
             if (!result.delivered) {
               return {
-                content: [{ type: "text", text: formatDeliveryResult(result, { kind: "Reply", sender: sendIdentity!, target: target.from.name || target.from.id }) }],
+                content: [{ type: "text", text: describeDelivery(result, { kind: "Reply", sender: sendIdentity!, target: references.current.sessionRef(target.from) }) }],
                 details: deliveryDetails(result),
               };
             }
-            dismissIncomingAsk(target.message.id);
+            if (ownsSession()) dismissIncomingAsk(target.message.id);
             recordActionEntry("parley_sent", {
-              to: target.from.name || target.from.id,
+              to: references.current.sessionRef(target.from),
               targetId: result.recipient?.id ?? target.from.id,
               as: sendIdentity!,
               toolCallId: _toolCallId,
@@ -4569,8 +5076,8 @@ Receipts include sender/recipient identity, exact message IDs, delivery state, a
               ...(result.peerCompaction ? { peerCompaction: result.peerCompaction } : {}),
               timestamp: Date.now(),
             });
-            const targetDisplay = target.from.name || target.from.id;
-            const awarenessText = formatDeliveryResult(result, { kind: "Reply", sender: sendIdentity!, target: targetDisplay });
+            const targetDisplay = references.current.sessionRef(target.from);
+            const awarenessText = describeDelivery(result, { kind: "Reply", sender: sendIdentity!, target: targetDisplay });
             connectedClient.acknowledgeSendContact(result);
             return {
               content: [{
@@ -4581,29 +5088,43 @@ Receipts include sender/recipient identity, exact message IDs, delivery state, a
             };
           } catch (error) {
             return {
-              content: [{ type: "text", text: `Failed to reply: ${getErrorMessage(error)}` }],
+              content: [{ type: "text", text: `Failed to reply: ${failureText(error)}` }],
               details: { error: true },
             };
           }
         }
 
+        case "label": {
+          if (!messageId || !requestedLabel) {
+            return { content: [{ type: "text", text: "label needs messageId (the message to name) and label (its new name)." }], details: { error: true } };
+          }
+          if (!book.isKnownMessage(messageId)) {
+            return { content: [{ type: "text", text: `${messageId} is not a message this session knows.` }], details: { error: true } };
+          }
+          const labelled = book.labelMessage(messageId, requestedLabel);
+          if (!labelled.ok) {
+            return { content: [{ type: "text", text: `Label not applied: ${labelled.reason}` }], details: { error: true } };
+          }
+          return { content: [{ type: "text", text: `Message ${labelled.ref}; ${requestedLabel} now names it here.` }], details: { messageId } };
+        }
+
         case "read": {
           const retained = messageId ? replyTracker.getMessage(messageId) : undefined;
           if (!retained) {
-            return { content: [{ type: "text", text: messageId ? `Message ${messageId} is not retained in this session.` : "Missing messageId." }], details: { error: true } };
+            return { content: [{ type: "text", text: messageId ? `Message ${references.current.isKnownMessage(messageId) ? messageRef(messageId) : messageId} is not retained in this session.` : "Missing messageId." }], details: { error: true } };
           }
           const { from, message: original, disposition } = retained;
-          const state = disposition ? `\nStatus: ${disposition.state}${disposition.replacementId ? ` by message ${disposition.replacementId}` : ""}` : "";
+          const state = disposition ? `\nStatus: ${disposition.state}${disposition.replacementId ? ` by message ${references.current.messageRef(disposition.replacementId)}` : ""}` : "";
           const attachmentsText = original.content.attachments?.length ? formatAttachments(original.content.attachments) : "";
-          const origin = from.federation ? `\nRemote origin: ${from.federation.originLabel || from.federation.originId}` : "";
+          const origin = from.federation ? `\nRemote origin: ${references.current.originRef(from.federation)}` : "";
           return {
-            content: [{ type: "text", text: `From ${from.name || from.id}${from.description ? ` — ${from.description}` : ""} (${from.cwd})${origin}\n${formatInboundDeliveryMetadata(original)}${state}\n\n${original.content.text}${attachmentsText}` }],
+            content: [{ type: "text", text: `From ${references.current.sessionRef(from)}${from.description ? ` — ${from.description}` : ""} (${from.cwd})${origin}\n${formatInboundDeliveryMetadata(original, messageRef)}${state}\n\n${verbatim(`${original.content.text}${attachmentsText}`)}` }],
             details: { messageId: original.id },
           };
         }
 
         case "pending": {
-          const conversation = replyTracker.formatConversationContext({ limit: Infinity, previewLength: 180 });
+          const conversation = replyTracker.formatConversationContext({ limit: Infinity, previewLength: 180, complete: true });
           return {
             content: [{ type: "text", text: conversation || "No unresolved inbound asks." }],
             details: {},
@@ -4614,11 +5135,11 @@ Receipts include sender/recipient identity, exact message IDs, delivery state, a
           try {
             const mySessionId = connectedClient.sessionId;
             const sessions = await connectedClient.listSessions();
-            const outstandingText = `\n${formatOutstandingAsks(20) || "Outstanding asks: none"}`;
+            const outstandingText = `\n${formatOutstandingAsks(20, { complete: true }) || "Outstanding asks: none"}`;
             return {
               content: [{
                 type: "text",
-                text: `**Parley Status:**\nConnected: Yes\nSession ID: ${mySessionId}\nVisible connected sessions: ${sessions.length} (including this session; scope and permissions apply)${outstandingText}`,
+                text: `**Parley Status:**\nConnected: Yes\nSession: ${references.current.sessionRef(sessions.find((session) => session.id === mySessionId) ?? mySessionId ?? "unknown")}\nVisible connected sessions: ${sessions.length} (including this session; scope and permissions apply)${outstandingText}`,
               }],
               details: {
                 outstandingAsks: [...outstandingAsks.entries()].map(([id, ask]) => ({
@@ -4630,7 +5151,7 @@ Receipts include sender/recipient identity, exact message IDs, delivery state, a
             };
           } catch (error) {
             return {
-              content: [{ type: "text", text: `Failed to get status: ${getErrorMessage(error)}` }],
+              content: [{ type: "text", text: `Failed to get status: ${failureText(error)}` }],
               details: { error: true },
             };
           }
@@ -4646,17 +5167,26 @@ Receipts include sender/recipient identity, exact message IDs, delivery state, a
       if (sendIdentity && ["send", "ask", "reply", "broadcast"].includes(params.action)) {
         toolResult.details = { ...(toolResult.details as Record<string, unknown> ?? {}), senderIdentity: sendIdentity };
       }
-      if (["send", "ask", "reply", "cancel", "broadcast"].includes(params.action)) {
+      const stale = runtimeGeneration !== actionGeneration;
+      // No send happened (validation, resolution, or launch failure): decide from what the result reports.
+      settleLabel(toolResult.details as Parameters<typeof settleLabel>[0]);
+      if (!stale && ["send", "ask", "reply", "cancel", "broadcast"].includes(params.action)) {
         const conversation = replyTracker.formatConversationContext();
         if (conversation) toolResult.content.push({ type: "text", text: conversation });
         const outstanding = formatOutstandingAsks();
         if (outstanding) toolResult.content.push({ type: "text", text: outstanding });
       }
+      if (stale || lateHistorySkipped) {
+        toolResult.content.push({ type: "text", text: "This result arrived after the Pi session changed. What it reports happened, but it was not recorded in the current session's history." });
+      }
       if (conversationPersistenceWarning) toolResult.content.push({ type: "text", text: conversationPersistenceWarning });
       if (historyWarnings.length) {
         toolResult.content.push({ type: "text", text: `Local history was not fully persisted; recovery may be incomplete. ${historyWarnings.join("; ")}` });
       }
-      return attachSelfProfile(toolResult, normalizeToolProfilePlaceholders(params.profile) !== undefined);
+      const hint = stale ? undefined : successorHintFor(params, resolvedReferences, toolResult.details);
+      if (hint) toolResult.content.push({ type: "text", text: hint });
+      return attachSelfProfile(presentToolResult(toolResult, { book, sessions: routedSessions }), normalizeToolProfilePlaceholders(params.profile) !== undefined);
+      });
     },
     renderCall(args, theme, context) {
       const action = typeof args.action === "string" ? args.action : PARLEY_TOOL_NAME;
@@ -4673,9 +5203,10 @@ Receipts include sender/recipient identity, exact message IDs, delivery state, a
         text += " " + theme.fg("muted", `as ${senderIdentity}`);
       }
       if (target) {
-        text += " " + theme.fg("muted", "→") + " " + theme.fg("accent", target);
+        text += " " + theme.fg("muted", "→") + " " + theme.fg("accent", references.current.present(target));
       } else if (targets.length > 0) {
-        const targetSummary = targets.length <= 3 ? targets.join(", ") : `${targets.slice(0, 3).join(", ")} +${targets.length - 3}`;
+        const presentedTargets = targets.map((value) => references.current.present(value));
+        const targetSummary = presentedTargets.length <= 3 ? presentedTargets.join(", ") : `${presentedTargets.slice(0, 3).join(", ")} +${presentedTargets.length - 3}`;
         text += " " + theme.fg("muted", "→") + " " + theme.fg("accent", targetSummary);
       } else if (action === "broadcast") {
         text += " " + theme.fg("muted", "→ visible local sessions");
@@ -4704,9 +5235,10 @@ Receipts include sender/recipient identity, exact message IDs, delivery state, a
       const failed = Boolean(context.isError || details?.error === true || (details?.delivered === false && !details?.replyMessageId));
       const uncertain = details?.outcomeKnown === false || (details?.unknownCount ?? 0) > 0;
       let text = uncertain ? theme.fg("warning", "? ") : failed ? theme.fg("error", "✗ ") : theme.fg("success", "✓ ");
-      text += theme.fg(uncertain ? "warning" : failed ? "error" : "text", result.content.filter((item) => item.type === "text").map((item) => item.text).join("\n"));
+      text += theme.fg(uncertain ? "warning" : failed ? "error" : "text", references.current.present(result.content.filter((item) => item.type === "text").map((item) => item.text).join("\n")));
       if (details?.messageId && !context.expanded) {
-        text += theme.fg("dim", ` (${details.messageId.slice(0, 8)})`);
+        const messageRef = references.current.messageRef(details.messageId);
+        if (!text.includes(messageRef)) text += theme.fg("dim", ` (${messageRef})`);
       }
       if (details?.reason && context.expanded) {
         text += "\n" + theme.fg("dim", `Reason: ${details.reason}`);
@@ -4724,7 +5256,9 @@ Receipts include sender/recipient identity, exact message IDs, delivery state, a
     return true;
   }
 
-  async function insertParleyId(ctx: ExtensionContext): Promise<void> {
+  /** By default a human contact card; `--id` inserts the stable canonical target for programmatic handoff. */
+  async function insertParleyId(ctx: ExtensionContext, args = ""): Promise<void> {
+    const canonical = args.trim().split(/\s+/).includes("--id");
     const commandGeneration = runtimeGeneration;
     const liveContext = getLiveContext(ctx, commandGeneration);
     if (!liveContext) return;
@@ -4732,17 +5266,22 @@ Receipts include sender/recipient identity, exact message IDs, delivery state, a
     try {
       contactClient = await ensureConnected("tool");
     } catch (error) {
-      notifyIfLive(ctx, `Parley unavailable: ${getErrorMessage(error)}`, "error", commandGeneration);
+      notifyIfLive(ctx, `Parley unavailable: ${failureText(error)}`, "error", commandGeneration);
       return;
     }
     const sessionId = contactClient.sessionId;
     if (!sessionId || !getLiveContext(liveContext, commandGeneration)) return;
-    const snippet = formatParleyContactSnippet(sessionId);
+    const self = contactClient.getSelfSession();
+    const contact = self?.name?.trim() || currentSendIdentity(contactClient);
+    const snippet = canonical
+      ? formatParleyContactSnippet(sessionId)
+      : `Pi parley contact: ${contact}${self?.cwd ? ` (in ${self.cwd})` : ""}`;
+    const summary = canonical ? `parley contact target: ${sessionId}` : `parley contact: ${contact}`;
     if (insertIntoEditor(liveContext, snippet)) {
-      notifyIfLive(liveContext, `Inserted parley contact target: ${sessionId}`, "info", commandGeneration);
+      notifyIfLive(liveContext, `Inserted ${summary}`, "info", commandGeneration);
       return;
     }
-    notifyIfLive(liveContext, `Parley contact target: ${sessionId}`, "info", commandGeneration);
+    notifyIfLive(liveContext, summary.charAt(0).toUpperCase() + summary.slice(1), "info", commandGeneration);
   }
 
   async function setParleyAlias(args: string, ctx: ExtensionContext): Promise<void> {
@@ -4772,7 +5311,7 @@ Receipts include sender/recipient identity, exact message IDs, delivery state, a
           currentAlias ? `Current alias: ${currentAlias}` : "Enter an alias",
         );
       } catch (error) {
-        notifyAliasCommand(liveContext, `Unable to set session alias: ${getErrorMessage(error)}`, "error", commandGeneration);
+        notifyAliasCommand(liveContext, `Unable to set session alias: ${failureText(error)}`, "error", commandGeneration);
         return;
       }
       if (entered === undefined) return;
@@ -4795,7 +5334,7 @@ Receipts include sender/recipient identity, exact message IDs, delivery state, a
       // command reports success.
       syncPresenceIdentity(liveContext.sessionManager.getSessionId());
     } catch (error) {
-      notifyAliasCommand(liveContext, `Unable to set session alias: ${getErrorMessage(error)}`, "error", commandGeneration);
+      notifyAliasCommand(liveContext, `Unable to set session alias: ${failureText(error)}`, "error", commandGeneration);
       return;
     }
     notifyAliasCommand(liveContext, `Session alias set: ${alias}`, "info", commandGeneration);
@@ -4811,7 +5350,7 @@ Receipts include sender/recipient identity, exact message IDs, delivery state, a
     try {
       overlayClient = await ensureConnected("overlay");
     } catch (error) {
-      notifyIfLive(ctx, `Parley unavailable: ${getErrorMessage(error)}`, "error", overlayGeneration);
+      notifyIfLive(ctx, `Parley unavailable: ${failureText(error)}`, "error", overlayGeneration);
       return;
     }
     if (!getLiveContext(ctx, overlayGeneration)) return;
@@ -4820,7 +5359,7 @@ Receipts include sender/recipient identity, exact message IDs, delivery state, a
 
     let currentSession: SessionInfo;
     let sessions: SessionInfo[];
-    let duplicates: Set<string>;
+    let rosterRefs: Map<string, string>;
     try {
       const mySessionId = overlayClient.sessionId;
       const allSessions = await overlayClient.listSessions();
@@ -4831,15 +5370,15 @@ Receipts include sender/recipient identity, exact message IDs, delivery state, a
         return;
       }
       currentSession = foundCurrentSession;
-      duplicates = duplicateSessionNames(allSessions);
+      rosterRefs = rosterReferences(allSessions);
       sessions = allSessions.filter(s => s.id !== mySessionId);
     } catch (error) {
-      notifyIfLive(ctx, `Failed to list sessions: ${getErrorMessage(error)}`, "error", overlayGeneration);
+      notifyIfLive(ctx, `Failed to list sessions: ${failureText(error)}`, "error", overlayGeneration);
       return;
     }
 
     const selectedSession = await ctx.ui.custom<SessionInfo | undefined>(
-      (_tui, theme, keybindings, done) => new SessionListOverlay(theme, keybindings, currentSession, sessions, done),
+      (_tui, theme, keybindings, done) => new SessionListOverlay(theme, keybindings, currentSession, sessions, done, (session) => rosterRefs.get(session.id) ?? references.current.sessionRef(session), originOf),
       { overlay: true, overlayOptions: { width: 88 } }
     ).catch(() => undefined);
 
@@ -4848,12 +5387,12 @@ Receipts include sender/recipient identity, exact message IDs, delivery state, a
     try {
       overlayClient = await ensureConnected("overlay");
     } catch (error) {
-      notifyIfLive(ctx, `Parley unavailable: ${getErrorMessage(error)}`, "error", overlayGeneration);
+      notifyIfLive(ctx, `Parley unavailable: ${failureText(error)}`, "error", overlayGeneration);
       return;
     }
     if (!getLiveContext(ctx, overlayGeneration)) return;
 
-    const targetLabel = formatSessionLabel(selectedSession, duplicates);
+    const targetLabel = rosterRefs.get(selectedSession.id) ?? references.current.sessionRef(selectedSession);
 
     const result = await ctx.ui.custom<ComposeResult>(
       (tui, theme, keybindings, done) => new ComposeOverlay(tui, theme, keybindings, selectedSession, targetLabel, overlayClient, done),
@@ -4876,7 +5415,7 @@ Receipts include sender/recipient identity, exact message IDs, delivery state, a
       notifyIfLive(
         ctx,
         result.peerCompaction
-          ? `${deliveryNotice}\n\n${formatPeerCompactionNotice(targetLabel, result.peerCompaction, selectedSession.id)}`
+          ? presentForModel(`${deliveryNotice}\n\n${describeCompaction(targetLabel, result.peerCompaction, selectedSession.id)}`)
           : deliveryNotice,
         "info",
         overlayGeneration,
@@ -4891,8 +5430,8 @@ Receipts include sender/recipient identity, exact message IDs, delivery state, a
   });
 
   pi.registerCommand("parley-id", {
-    description: "Insert a stable parley contact target snippet for this session into the editor",
-    handler: async (_args, ctx) => insertParleyId(ctx),
+    description: "Insert this session's parley contact into the editor (--id for the stable canonical target)",
+    handler: async (args, ctx) => insertParleyId(ctx, args),
   });
 
   pi.registerCommand("alias", {

@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
-import { createExtensionHarness } from "./test/extension-harness.ts";
+import { createExtensionHarness, mentions } from "./test/extension-harness.ts";
 import type { Message, SessionInfo } from "./types.ts";
 
 const home = mkdtempSync(path.join(tmpdir(), "ic-r-"));
@@ -114,19 +114,19 @@ test("busy headless answers retain correlation and survive fire-and-forget host 
     await until(() => asynchronousFailures === 2, "asynchronous host failures");
     assert.ok(harness.sentMessages.every((entry) => entry.options?.deliverAs === "steer"));
     const beforeModel = text(await call(harness, { action: "status" }));
-    assert.ok(beforeModel.includes(first!.id), "void send return must not settle the question");
-    assert.ok(beforeModel.includes(second!.id));
+    assert.ok(mentions(beforeModel, harness.referenceFor(first!.id)), "void send return must not settle the question");
+    assert.ok(mentions(beforeModel, harness.referenceFor(second!.id)));
     const messages = await modelContext(harness);
     const answer = messages.find((item) => item.content.includes("Yes, with"))!.content;
-    assert.ok(answer.includes(first!.id));
+    assert.ok(mentions(answer, harness.referenceFor(first!.id)));
     assert.match(answer, /Can the index be built online/);
     assert.match(answer, /coordinating the database migration/);
     assert.match(answer, /snapshot/i);
     assert.match(answer, /CREATE INDEX CONCURRENTLY example ON records \(id\);/);
     assert.doesNotMatch(answer, /To reply, use|parley\(\{|broker delivered|receiver received|seq \d/);
     const afterModel = text(await call(harness, { action: "status" }));
-    assert.ok(!afterModel.includes(first!.id));
-    assert.ok(afterModel.includes(second!.id));
+    assert.ok(!mentions(afterModel, harness.referenceFor(first!.id)));
+    assert.ok(mentions(afterModel, harness.referenceFor(second!.id)));
     const firstAnswer = messages.find((item) => item.content.includes("Yes, with"))!;
     const hostHistory = [{ role: "user", content: "What remains unresolved?", timestamp: Date.now() }];
     const originalHostHistory = structuredClone(hostHistory);
@@ -142,7 +142,7 @@ test("busy headless answers retain correlation and survive fire-and-forget host 
     await peer.send(target.id, { text: "Rollback is still under review", replyTo: second!.id, completesAsk: false });
     await until(() => asynchronousFailures === 3, "progress delivered");
     await modelContext(harness);
-    assert.ok(text(await call(harness, { action: "status" })).includes(second!.id), "threaded progress is not answer intent");
+    assert.ok(mentions(text(await call(harness, { action: "status" })), harness.referenceFor(second!.id)), "threaded progress is not answer intent");
   } finally { await harness.emitLifecycle("session_shutdown"); await peer.disconnect(); }
 });
 
@@ -159,7 +159,7 @@ test("a busy headless recipient learns a withdrawal even when its host drops the
     assert.equal((await peer.cancelMessage(sent.id)).delivered, true);
     await until(() => harness.sentMessages.some((item) => item.message.customType === "parley_message_control"), "withdrawal steering");
     const withdrawal = (await modelContext(harness)).find((item) => item.content.includes("withdrawn by its sender"))!.content;
-    assert.ok(withdrawal.includes(sent.id));
+    assert.ok(mentions(withdrawal, harness.referenceFor(sent.id)));
     assert.match(withdrawal, /Start the migration after review/);
     assert.match(withdrawal, /does not undo/);
     assert.match(text(await call(harness, { action: "read", messageId: sent.id })), /Status: withdrawn/);
@@ -207,9 +207,9 @@ test("retained requests track answers and replacements without renewing delivery
     const replacement = await peer.send(target.id, { text: "The replacement plan is now available", supersedes: old.id });
     await until(() => harness.sentMessages.length === 4, "replacement plus supersession control");
     const updated = await modelContext(harness, hostHistory);
-    const oldHistory = updated.find((item) => item.customType === "parley_message" && item.content.includes(old.id))!;
+    const oldHistory = updated.find((item) => item.customType === "parley_message" && mentions(item.content, harness.referenceFor(old.id)))!;
     assert.match(oldHistory.content, /Status: superseded by message/);
-    assert.ok(oldHistory.content.includes(replacement.id));
+    assert.ok(mentions(oldHistory.content, harness.referenceFor(replacement.id)));
     assert.match(oldHistory.content, /Use the initial deployment plan/);
     assert.doesNotMatch(oldHistory.content, /Reply requested/);
     await harness.emitLifecycle("agent_end");
@@ -325,24 +325,24 @@ test("restart recovers full pending snapshots, unsurfaced answers and outstandin
     (oldRequest.data as { message: Message }).message.replyDeadline = Date.now() - 1;
     await first.emitLifecycle("session_shutdown");
     await start(second, peer, "recovery-worker");
-    assert.ok(text(await call(second, { action: "status" })).includes(asked[0]!.id), "unobserved answer must not settle on restart");
+    assert.ok(mentions(text(await call(second, { action: "status" })), second.referenceFor(asked[0]!.id)), "unobserved answer must not settle on restart");
     const recovered = await modelContext(second);
     assert.match(recovered.map((message) => message.content).join("\n"), /The window can move to Sunday/);
-    assert.ok(!text(await call(second, { action: "status" })).includes(asked[0]!.id));
+    assert.ok(!mentions(text(await call(second, { action: "status" })), second.referenceFor(asked[0]!.id)));
     const full = text(await call(second, { action: "read", messageId: request.id }));
     assert.match(full, /complete recovery protocol is retained/);
     assert.match(full, /snapshot/i);
     const pending = text(await call(second, { action: "pending" }));
-    assert.ok(pending.includes(request.id));
+    assert.ok(mentions(pending, second.referenceFor(request.id)));
     assert.match(pending, /reply window elapsed, not withdrawn/);
     await call(second, { action: "reply", replyTo: request.id, message: "Reviewed the migration and recovery protocol" });
     // Older sessions have only nested parley_sent.message.replyTo, not a separate settlement event.
     legacy.entries.push(...structuredClone(second.entries.filter((entry) => entry.type !== "parley_inbound_settled")));
     await start(legacy, peer, "legacy-worker");
-    assert.ok(!text(await call(legacy, { action: "pending" })).includes(request.id), "legacy answered requests do not resurrect");
+    assert.ok(!mentions(text(await call(legacy, { action: "pending" })), legacy.referenceFor(request.id)), "legacy answered requests do not resurrect");
     await start(fresh, peer, "fresh-worker");
-    assert.ok(!text(await call(fresh, { action: "pending" })).includes(request.id));
-    assert.ok(!text(await call(fresh, { action: "status" })).includes(asked[0]!.id));
+    assert.doesNotMatch(text(await call(fresh, { action: "pending" })), /Review the entire migration plan/);
+    assert.doesNotMatch(text(await call(fresh, { action: "status" })), /Can the maintenance window move/);
   } finally {
     await first.emitLifecycle("session_shutdown"); await second.emitLifecycle("session_shutdown"); await fresh.emitLifecycle("session_shutdown"); await legacy.emitLifecycle("session_shutdown"); await peer.disconnect();
   }
@@ -386,7 +386,7 @@ test("implicit replies survive inspection without guessing between fresh convers
     // Actual Pi ordering: turn_start runs before steering has been consumed into model context.
     await harness.emitLifecycle("turn_start");
     await modelContext(harness, hostHistory);
-    assert.ok(text(await call(harness, { action: "pending" })).includes(current.id));
+    assert.ok(mentions(text(await call(harness, { action: "pending" })), harness.referenceFor(current.id)));
     // Leave this ordinary note unanswered: a later unrelated run must not inherit it.
     await harness.emitLifecycle("turn_end");
     await harness.emitLifecycle("agent_end");
@@ -408,15 +408,15 @@ test("implicit replies survive inspection without guessing between fresh convers
     await modelContext(harness, hostHistory);
     const ambiguous = await call(harness, { action: "reply", message: "This needs a target" });
     assert.equal(ambiguous.details?.error, true, "the sole pending ask does not disambiguate two fresh conversations");
-    assert.ok(text(ambiguous).includes(update.id), "the ordinary message is a visible candidate");
-    assert.ok(text(ambiguous).includes(question.id), "the question is a visible candidate");
+    assert.ok(mentions(text(ambiguous), harness.referenceFor(update.id)), "the ordinary message is a visible candidate");
+    assert.ok(mentions(text(ambiguous), harness.referenceFor(question.id)), "the question is a visible candidate");
     assert.equal(alphaReplies.length, 1);
     assert.equal(betaReplies.length, 0);
     const targeted = await call(harness, { action: "reply", to: "boundary-alpha", message: "Thanks for the addendum" });
     assert.notEqual(targeted.details?.error, true);
     await until(() => alphaReplies.length === 2, "explicitly targeted ordinary reply");
     assert.equal(alphaReplies[1]!.replyTo, update.id);
-    assert.ok(text(await call(harness, { action: "pending" })).includes(question.id));
+    assert.ok(mentions(text(await call(harness, { action: "pending" })), harness.referenceFor(question.id)));
     await call(harness, { action: "reply", replyTo: question.id, message: "Yes, the release can proceed" });
     await until(() => betaReplies.length === 1, "explicitly targeted answer");
     assert.equal(betaReplies[0]!.replyTo, question.id);
@@ -430,7 +430,7 @@ test("implicit replies survive inspection without guessing between fresh convers
     await call(harness, { action: "reply", to: "boundary-alpha", message: "Thanks for the new note" });
     await until(() => alphaReplies.length === 3, "reply with an explicit sender");
     assert.equal(alphaReplies[2]!.replyTo, newerNote.id, "specifying the sender must not switch to an older question");
-    assert.ok(text(await call(harness, { action: "pending" })).includes(olderAsk.id), "acknowledging a note does not approve the older request");
+    assert.ok(mentions(text(await call(harness, { action: "pending" })), harness.referenceFor(olderAsk.id)), "acknowledging a note does not approve the older request");
   } finally { await harness.emitLifecycle("session_shutdown"); await alpha.disconnect(); await beta.disconnect(); }
 });
 
@@ -461,13 +461,13 @@ test("history write failures preserve live messages, withdrawals, answer settlem
     await until(() => harness.sentMessages.some((item) => item.message.customType === "parley_message_control"), "withdrawal despite history failure");
     const cancelled = await modelContext(harness);
     assert.match(cancelled.map((item) => item.content).join("\n"), /withdrawn by its sender/);
-    assert.ok(!text(await call(harness, { action: "pending" })).includes(request.id));
+    assert.doesNotMatch(text(await call(harness, { action: "pending" })), /Review the migration before release/);
 
     await peer.send(target.id, { text: "The deployment date is Sunday", replyTo: outgoingQuestion.id, completesAsk: true });
     await until(() => harness.sentMessages.some((item) => item.message.content?.includes("The deployment date is Sunday")), "requested answer despite history failure");
-    assert.ok(text(await call(harness, { action: "status" })).includes(outgoingQuestion.id));
+    assert.ok(mentions(text(await call(harness, { action: "status" })), harness.referenceFor(outgoingQuestion.id)));
     assert.match((await modelContext(harness)).map((item) => item.content).join("\n"), /The deployment date is Sunday/);
-    assert.ok(!text(await call(harness, { action: "status" })).includes(outgoingQuestion.id), "observed answer settles locally even if its journal write fails");
+    assert.ok(!mentions(text(await call(harness, { action: "status" })), harness.referenceFor(outgoingQuestion.id)), "observed answer settles locally even if its journal write fails");
 
     const finalRequest = await peer.send(target.id, { text: "Can the release proceed?", expectsReply: true });
     await until(() => harness.sentMessages.some((item) => item.message.content?.includes("Can the release proceed?")), "final request");
@@ -477,7 +477,7 @@ test("history write failures preserve live messages, withdrawals, answer settlem
     assert.notEqual(reply.details?.error, true, "history failure must not turn delivered reply into tool failure");
     assert.equal(reply.details?.delivered, true);
     assert.match(text(reply), /history.*not fully persisted|recovery.*incomplete/i);
-    assert.ok(!text(await call(harness, { action: "pending" })).includes(finalRequest.id));
+    assert.doesNotMatch(text(await call(harness, { action: "pending" })), /Can the release proceed\?/);
   } finally { await harness.emitLifecycle("session_shutdown"); await peer.disconnect(); }
 });
 
@@ -496,8 +496,8 @@ test("blocking answers retain full snapshots for exact-ID read and follow-up acr
     });
     const answer = await answerResult;
     assert.notEqual(answer.details?.error, true);
-    const answerId = text(answer).match(/Reply message ID: ([^\n]+)/)?.[1];
-    assert.equal(answerId, response.id, "the model-visible answer identifies the retained reply");
+    const answerId = text(answer).match(/Reply: ([^\n]+)/)?.[1];
+    assert.equal(answerId, first.referenceFor(response.id), "the model-visible answer identifies the retained reply");
     assert.match(text(await call(first, { action: "read", messageId: answerId })), /Restore writes to the original table, then remove the new index/);
     assert.equal(first.sentMessages.filter((item) => item.message.customType === "parley_message").length, 0, "blocking tool result is the only answer delivery");
 
@@ -507,14 +507,14 @@ test("blocking answers retain full snapshots for exact-ID read and follow-up acr
     await start(restored, peer, "blocking-context-worker");
     const recovered = text(await call(restored, { action: "read", messageId: answerId }));
     assert.match(recovered, /blocking-context-planner/);
-    assert.ok(recovered.includes(question.id), "reply correlation survives reload");
+    assert.ok(mentions(recovered, restored.referenceFor(question.id)), "reply correlation survives reload");
     assert.match(recovered, /Restore writes to the original table, then remove the new index/);
     assert.equal(restored.sentMessages.filter((item) => item.message.customType === "parley_message").length, 0, "reload does not inject a second copy of a blocking answer");
     const followUpReceived = once(peer, "message", { signal: AbortSignal.timeout(8_000) }) as Promise<[SessionInfo, Message]>;
     const followUp = await call(restored, { action: "reply", replyTo: answerId, message: "Thanks; how long should we retain the original index?" });
     assert.equal(followUp.details?.delivered, true, text(followUp));
     const [, followUpMessage] = await followUpReceived;
-    assert.equal(followUpMessage.replyTo, answerId);
+    assert.equal(followUpMessage.replyTo, response.id, "the restored reference still threads the canonical retained answer on the wire");
     assert.match(followUpMessage.content.text, /how long should we retain/);
   } finally { await first.emitLifecycle("session_shutdown"); await restored.emitLifecycle("session_shutdown"); await peer.disconnect(); }
 });
@@ -530,13 +530,13 @@ test("recovery reconciles a host-persisted answer even when the settlement recor
     const [, question] = await questionReceived;
     await peer.send(target.id, { text: "Sunday morning is approved", replyTo: question.id, completesAsk: true });
     await until(() => first.sentMessages.some((item) => item.message.content?.includes("Sunday morning is approved")), "answer offered to host");
-    assert.ok(text(await call(first, { action: "status" })).includes(question.id), "the unconfirmed send remains outstanding");
+    assert.ok(mentions(text(await call(first, { action: "status" })), first.referenceFor(question.id)), "the unconfirmed send remains outstanding");
     restored.entries.push(...structuredClone(first.entries));
     // The host persisted the answer immediately before process loss, without returning a confirmation event.
     restored.persistedMessages.push(...structuredClone(first.sentMessages.map((item) => item.message)));
     await first.emitLifecycle("session_shutdown");
     await start(restored, peer, "persisted-answer-worker");
-    assert.ok(!text(await call(restored, { action: "status" })).includes(question.id), "the persisted answer settles the recovered question");
+    assert.ok(!mentions(text(await call(restored, { action: "status" })), restored.referenceFor(question.id)), "the persisted answer settles the recovered question");
     assert.equal(restored.sentMessages.length, 0, "already-persisted answer is not reinjected");
   } finally { await first.emitLifecycle("session_shutdown"); await restored.emitLifecycle("session_shutdown"); await peer.disconnect(); }
 });
@@ -560,7 +560,7 @@ test("a persisted withdrawal survives reload even when custom history writes fai
     restored.persistedMessages.push(...structuredClone(first.persistedMessages));
     await first.emitLifecycle("session_shutdown");
     await start(restored, peer, "persisted-withdrawal-worker");
-    assert.ok(!text(await call(restored, { action: "pending" })).includes(request.id), "durable withdrawal does not resurrect as pending work");
+    assert.ok(!mentions(text(await call(restored, { action: "pending" })), restored.referenceFor(request.id)), "durable withdrawal does not resurrect as pending work");
     assert.match(text(await call(restored, { action: "read", messageId: request.id })), /Prepare the release checklist/);
     assert.match(text(await call(restored, { action: "read", messageId: request.id })), /Status: withdrawn/);
     assert.equal(restored.sentMessages.length, 0, "neither historical request nor withdrawal is injected as new work");
@@ -582,10 +582,10 @@ test("an interrupted blocking answer is recovered when the host never persisted 
     restored.entries.push(...structuredClone(first.entries.filter((entry) => entry.type !== "parley_ask_settled")));
     await first.emitLifecycle("session_shutdown");
     await start(restored, peer, "interrupted-answer-worker");
-    assert.ok(text(await call(restored, { action: "status" })).includes(question.id));
+    assert.ok(mentions(text(await call(restored, { action: "status" })), restored.referenceFor(question.id)));
     const recovered = await modelContext(restored);
     assert.match(recovered.map((item) => item.content).join("\n"), /Use the verified Sunday backup/);
-    assert.ok(!text(await call(restored, { action: "status" })).includes(question.id), "recovered answer settles after model-context delivery");
+    assert.ok(!mentions(text(await call(restored, { action: "status" })), restored.referenceFor(question.id)), "recovered answer settles after model-context delivery");
   } finally { await first.emitLifecycle("session_shutdown"); await restored.emitLifecycle("session_shutdown"); await peer.disconnect(); }
 });
 

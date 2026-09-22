@@ -69,7 +69,19 @@ Any parley action accepts an optional `profile` with `name` and/or `description`
 
 `send` shares information; `ask` requests an answer; `reply` communicates back to the colleague. Questions can wait for an answer in the tool call or receive it later while work continues. A notification stays a notification even when another question is pending, and colleagues can consult each other without closing the original question.
 
-Messages carry the sender, the text, and related conversation context. Receipts include exact message IDs and observed delivery state. Endpoint acceptance, a colleague's answer, and completed work are different events. Unknown delivery may mean the message arrived but its acknowledgement did not.
+Messages carry the sender, the text, and related conversation context. Receipts include the message reference and observed delivery state. Endpoint acceptance, a colleague's answer, and completed work are different events. Unknown delivery may mean the message arrived but its acknowledgement did not.
+
+### References
+
+Models, like people, work with names. Everything a model reads or types names a session by its name (`pi:parley`, `FlightDeck VM:parley`) and a message by a local number (`#12`). Canonical session and message IDs, including origin-qualified federation handles, stay on the wire and in result `details`, and parley translates in both directions.
+
+A reference stays attached to what it first named. It is never recycled, whether through a rename, a reconnect, a reload, or a different session later taking the same name. That newcomer gets `name~2` instead. Unnamed sessions appear as `unnamed`, `unnamed~2`, and hosts without a label as `remote-1`, never as ID fragments.
+
+Parley routes a reference only to the identity it names, never back through a name or ID prefix that could match someone else. A live target is addressed by its exact endpoint. An absent local target uses the broker's exact-identity mode (`exact-identity-send-v1`), which looks up only that identity's disconnected entry. A broker that predates the mode refuses before anything is sent (`E_EXACT_IDENTITY_UNSUPPORTED`) rather than falling back to a looser lookup. Federated targets are already addressed exactly. Delivery to an absent session still follows the broker's offline-mail rule: queued mail may be handed to the one live session using the same name in the same directory, as it always has. When that happens the result says so. When a session you address is unreachable and another session uses its name, the result names that session as a choice and, if your message was queued, tells you how to withdraw it. An unknown outcome is reported as unknown. A project launch that chooses a new session says it was a project launch.
+
+Message numbers are local to a session, so your `#12` is not your colleague's `#12`. Threading still crosses the wire exactly, through `replyTo`. A message can also carry local labels: `label` names an existing message (sent or received), and `label` on `send` or `ask` names the new one. Labels appear next to the number (`#12 · release-approval`) and work wherever a message reference does.
+
+An earlier request whose reply window has elapsed, or whose sender is currently unreachable, is mentioned once in automatic conversation context and then only counted. `pending` and `status` always list everything. Waiting is not settlement: a request absent from a flapping roster is unreachable, not ended.
 
 Incoming content can wake an idle session or join a busy session's next model turn, including headless sessions. Attachment names label inline text snapshots, not files created in the receiving workspace.
 
@@ -88,14 +100,15 @@ Local history and broker routing have different lifetimes. Thread relationships 
 | Parameter | Type | Description |
 |-----------|------|-------------|
 | `action` | string | `"list"`, `"list-cwd"`, `"send"`, `"broadcast"`, `"ask"`, `"reply"`, `"pending"`, `"read"`, `"status"`, `"cancel"`, `"advertise"`, or `"rename"` |
-| `to` | string | One target session name or ID. Without `cwd`, send/ask resolve it within the visible roster. With `cwd`, send/ask require the target to be in that directory. Also disambiguates reply. |
-| `targets` | string[] | For `send`, 1–32 explicit session names or IDs. Each recipient gets an independent message and delivery outcome. Cannot be combined with `to`, cwd targeting, or conversation-specific reply/retry/supersede fields. |
+| `to` | string | One session reference, as shown by `list`, receipts, or messages. Without `cwd`, send/ask resolve it within the visible roster. With `cwd`, send/ask require the target to be in that directory. Also narrows reply. |
+| `targets` | string[] | For `send`, 1–32 session references. Each recipient gets an independent message and delivery outcome. Cannot be combined with `to`, cwd targeting, or conversation-specific reply/retry/supersede fields. |
 | `message` | string | Message text (for send/broadcast/ask/reply) |
 | `attachments` | array | Inline text snapshots: `{ type: "file" \| "snippet" \| "context", name, content, language? }`. No files are created at the destination. |
-| `replyTo` | string | Exact message ID for conversation threading. `reply` explicitly answers; a threaded `send` remains a notification. |
-| `messageId` | string | Exact message ID for `cancel` or retained-message `read`; session-ID prefix matching does not apply |
-| `supersedes` | string | Optional previous message ID that this send/ask explicitly replaces |
-| `retryOf` | string | Optional previous message ID that this send/ask explicitly retries |
+| `replyTo` | string | Message reference (like `#12`) for conversation threading. `reply` explicitly answers; a threaded `send` remains a notification. |
+| `messageId` | string | Message reference for `cancel`, retained-message `read`, or `label` |
+| `label` | string | A one-word local name for a message. With `label`, names `messageId`; with `send`/`ask`, names the new message. |
+| `supersedes` | string | Optional reference of an earlier send/ask that this one explicitly replaces |
+| `retryOf` | string | Optional reference of an earlier send/ask that this one explicitly retries |
 | `cwd` | string | Working directory filter for `list-cwd`. For send/ask, scopes target lookup to that directory; without `to`, selects the sole live peer there. |
 | `blocking` | boolean | For `ask`, `true` waits for the answer (default); `false` returns the initial delivery outcome and receives the answer later in the conversation |
 | `openProjectPaneIfMissing` | boolean | For `send`/`ask` with `cwd`, launch Pi in that project through a registered generic project launcher when no matching live session exists |
@@ -121,7 +134,7 @@ Registered only with the required pi-subagents child bridge metadata and no nati
 
 ### parley actions
 
-**`list` / `list-cwd`** — Returns the current session and visible connected peers with name, short session ID, directory, focus, model, context usage, and activity. `list-cwd` filters by directory. Activity follows Pi lifecycle events: `idle`, `thinking`, `tool:<name>`, or, on supported hosts, `compacting`. Presence changes do not wake peers. Federation rows indicate their remote capabilities.
+**`list` / `list-cwd`** — Returns the current session and visible connected peers by reference, with directory, focus, model, context usage, and activity. `list-cwd` filters by directory. Activity follows Pi lifecycle events: `idle`, `thinking`, `tool:<name>`, or, on supported hosts, `compacting`. Presence changes do not wake peers. Federation rows indicate their remote capabilities.
 
 **`send`** — Sends to one `to` or independently to 1–32 explicit `targets`. Duplicate aliases for one live endpoint deliver once; partial failures do not roll back successes. Group sends reject `replyTo`, `supersedes`, and `retryOf`. A singular send can carry thread context, but never infers or completes an ask's answer. `confirmSend` can require one UI approval before ordinary delivery; group approval pins the resolved endpoints so an alias cannot silently rebind afterward.
 
@@ -131,11 +144,13 @@ Registered only with the required pi-subagents child bridge metadata and no nati
 
 **`reply`** — Explicitly answers a pending ask or threads a response to an ordinary message. It uses the active parley context, otherwise the sole pending ask; `to` can select a sender and exact `replyTo` can select a retained message. Ambiguity returns candidate context rather than guessing. A clarification `ask` does not complete the original question.
 
-**`pending` / `read`** — `pending` shows unanswered-request context, including exact IDs and reply-window state. `read` returns one retained incoming message's full text and attachment snapshots by `messageId`; it is not an archive search or remote-file read.
+**`pending` / `read`** — `pending` shows every unanswered request, with message references and reply-window state. `read` returns one retained incoming message's full text and attachment snapshots by `messageId`; it is not an archive search or remote-file read.
 
-**`cancel`** — Operates on an exact message ID previously sent by this session. It distinguishes offline removal, known nondelivery, and withdrawal requested from a live recipient. Unknown outcomes remain unknown. A visible withdrawal or supersession notice does not erase earlier messages or undo work.
+**`label`** — Gives a message a session-local name, like `release-approval`, usable anywhere a message reference is. Labels persist with the session and never replace the message's number.
 
-**`status`** — Reports connectivity, the current session ID, visible connected-session count, and locally tracked outstanding questions, including requests whose local wait has ended. Local age is not an authoritative broker completion signal.
+**`cancel`** — Operates on a message this session previously sent. It distinguishes offline removal, known nondelivery, and withdrawal requested from a live recipient. Unknown outcomes remain unknown. A visible withdrawal or supersession notice does not erase earlier messages or undo work.
+
+**`status`** — Reports connectivity, the current session's reference, visible connected-session count, and locally tracked outstanding questions, including requests whose local wait has ended. Local age is not an authoritative broker completion signal.
 
 **`rename` / `advertise`** — `rename` sets this session's canonical Pi name through `name`. `advertise` is the subagent-only public-discovery action; changing a canonical name alone does not widen visibility permissions.
 

@@ -33,16 +33,16 @@ function shortSessionId(session: SessionInfo): string {
   return (session.federation?.remoteStableSessionId ?? session.id).slice(0, 8);
 }
 
-function sessionTitle(session: SessionInfo, options?: { self?: boolean; sameCwd?: boolean }): string {
-  const name = session.name || "Unnamed session";
+function sessionTitle(session: SessionInfo, options?: { self?: boolean; sameCwd?: boolean; reference?: string; origin?: string }): string {
+  const name = options?.reference ?? `${session.name || "Unnamed session"} (${shortSessionId(session)})`;
   const remote = session.federation
-    ? `remote:${session.federation.originLabel ?? session.federation.originId}`
+    ? `remote:${options?.origin ?? session.federation.originLabel ?? session.federation.originId}`
     : undefined;
   const tags = [options?.self ? "self" : undefined, options?.sameCwd ? "same cwd" : undefined, remote]
     .filter((tag): tag is string => Boolean(tag));
   const suffix = tags.length ? ` [${tags.join(", ")}]` : "";
   const description = session.description ? ` — ${session.description}` : "";
-  return `${name} (${shortSessionId(session)})${suffix}${description}`;
+  return `${name}${suffix}${description}`;
 }
 
 export class SessionListOverlay implements Component {
@@ -60,6 +60,8 @@ export class SessionListOverlay implements Component {
     currentSession: SessionInfo,
     sessions: SessionInfo[],
     done: (result: SessionInfo | undefined) => void,
+    private readonly referenceFor?: (session: SessionInfo) => string,
+    private readonly originFor?: (session: SessionInfo) => string | undefined,
   ) {
     this.theme = theme;
     this.keybindings = keybindings;
@@ -123,7 +125,7 @@ export class SessionListOverlay implements Component {
     lines.push(row(this.theme.bold(" Current Session")));
     lines.push(border(`├${"─".repeat(contentWidth)}┤`));
     lines.push(row());
-    lines.push(row(`  ${this.theme.fg("dim", sessionTitle(this.currentSession, { self: true }))}`));
+    lines.push(row(`  ${this.theme.fg("dim", sessionTitle(this.currentSession, { self: true, reference: this.referenceFor?.(this.currentSession), origin: this.originFor?.(this.currentSession) }))}`));
     lines.push(row(`  ${this.theme.fg("dim", `${middleTruncate(this.currentSession.cwd, Math.max(8, contentWidth - 4))} • ${this.currentSession.model}`)}`));
     lines.push(row());
     lines.push(border(`├${"─".repeat(contentWidth)}┤`));
@@ -144,7 +146,7 @@ export class SessionListOverlay implements Component {
         const isSelected = index === this.selectedIndex;
         const sameCwd = session.cwd === this.currentSession.cwd;
         const prefix = isSelected ? this.theme.fg("accent", "→ ") : "  ";
-        const title = sessionTitle(session, { sameCwd });
+        const title = sessionTitle(session, { sameCwd, reference: this.referenceFor?.(session), origin: this.originFor?.(session) });
         const pathText = `${middleTruncate(session.cwd, Math.max(8, contentWidth - 4))} • ${session.model}`;
 
         lines.push(row(`${prefix}${isSelected ? this.theme.fg("accent", title) : title}`));

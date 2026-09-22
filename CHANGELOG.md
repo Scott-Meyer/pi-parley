@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+
+- Everything a model reads or types now uses human-readable references: session names (`name~2` when a different session later takes a name already seen) and per-session message numbers (`#12`). Canonical session and message IDs, including `oqs1.`/`oqm1.` federation handles, stay on the wire and in `details`; tool inputs still accept them from programmatic callers.
+- References are pinned and persisted: renames, reconnects, reloads, and name reuse never recycle one. Parley routes a pinned reference only to its exact identity. Absent local targets use the new negotiated `exact-identity-send-v1` broker mode (`SendOptions.exactIdentity`), which never falls back to name or prefix lookup; brokers without it refuse before sending with `E_EXACT_IDENTITY_UNSUPPORTED`. The broker's existing offline-mail rule (a unique same-name, same-directory live session may receive queued mail) is unchanged and is now reported when it applies; a same-named session is otherwise offered as a choice.
+- A new `label` action and `label` parameter on `send`/`ask` give messages session-local names alongside their numbers.
+- `/parley-id` inserts a readable contact by default; `/parley-id --id` keeps the stable canonical target.
+- `sessionIdPrefixes` remains exported but is deprecated; model-facing text no longer uses ID prefixes.
+- Automatic conversation context mentions elapsed or unreachable requests once and then counts them; `pending` and `status` stay complete.
+- Collapsed tool rows, inline messages, and the session picker show the same references instead of 8-character ID prefixes.
+
 ## 1.3.0 - 2026-09-21
 
 ### Added

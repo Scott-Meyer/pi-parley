@@ -6,7 +6,7 @@ import path from "node:path";
 import { once } from "node:events";
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { COMPACTION_AWARENESS_FEATURE, CONVERSATION_CONTRACT_FEATURE, EXACT_SEND_FEATURE, type ClientMessage } from "../types.ts";
+import { COMPACTION_AWARENESS_FEATURE, CONVERSATION_CONTRACT_FEATURE, EXACT_SEND_FEATURE, EXACT_IDENTITY_SEND_FEATURE, type ClientMessage } from "../types.ts";
 import { createMessageReader, writeMessage } from "./framing.ts";
 import { getBrokerSocketPath } from "./paths.ts";
 
@@ -200,9 +200,11 @@ async function withScriptedBroker(
 ): Promise<void> {
   const agentDir = mkdtempSync(path.join(process.platform === "win32" ? tmpdir() : "/tmp", "pi-wire-"));
   const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
+  const previousTransport = process.env.PI_PARLEY_TRANSPORT;
   process.env.PI_CODING_AGENT_DIR = agentDir;
+  process.env.PI_PARLEY_TRANSPORT = "socket";
   const socketPath = getBrokerSocketPath();
-  mkdirSync(path.dirname(socketPath), { recursive: true });
+  if (process.platform !== "win32") mkdirSync(path.dirname(socketPath), { recursive: true });
   const sockets: net.Socket[] = [];
   const server = net.createServer(socket => {
     sockets.push(socket);
@@ -232,6 +234,8 @@ async function withScriptedBroker(
     await new Promise<void>(resolve => server.close(() => resolve()));
     if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
     else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
+    if (previousTransport === undefined) delete process.env.PI_PARLEY_TRANSPORT;
+    else process.env.PI_PARLEY_TRANSPORT = previousTransport;
     rmSync(agentDir, { recursive: true, force: true });
   }
 }
@@ -532,5 +536,65 @@ test("snapshots without endpoint epochs fail closed while ordinary legacy discov
     assert.equal(sends.length, 1);
     assert.equal(sends[0]?.targetEpoch, undefined);
     assert.equal(lists, 1);
+  });
+});
+
+test("exact offline identity requires negotiation and never uses a live name or prefix overlap", async () => {
+  for (const negotiated of [false, true]) {
+    const sends: Extract<ClientMessage, { type: "send" }>[] = [];
+    const features = negotiated ? [...REQUIRED_FEATURES, EXACT_IDENTITY_SEND_FEATURE] : REQUIRED_FEATURES;
+    await withScriptedBroker(features, (socket, frame) => {
+      if (frame.type === "list") {
+        writeMessage(socket, { type: "sessions", requestId: frame.requestId, sessions: [{
+          ...TEST_REGISTRATION, id: "pinned-id-helper", name: "pinned-id", endpointEpoch: "other-epoch",
+        }] });
+        return true;
+      }
+      if (frame.type === "send") {
+        sends.push(frame);
+        writeMessage(socket, { ...accepted(frame.message.id), delivery: "queued" });
+      }
+    }, async client => {
+      const result = await client.send("pinned-id", { text: "Only this identity", exactIdentity: true });
+      if (!negotiated) {
+        assert.equal(result.code, "E_EXACT_IDENTITY_UNSUPPORTED");
+        assert.equal(result.outcomeKnown, true);
+        assert.equal(result.delivered, false);
+        assert.equal(sends.length, 0, "legacy refusal writes no instruction, never guessing the overlapping peer");
+      } else {
+        assert.equal(result.delivery, "queued");
+        assert.equal(sends.length, 1);
+        assert.equal(sends[0]!.to, "pinned-id");
+        assert.equal(sends[0]!.targetId, "pinned-id");
+        assert.equal(sends[0]!.targetMode, "identity");
+        assert.equal(sends[0]!.targetEpoch, undefined);
+      }
+    });
+  }
+});
+
+test("exact live identity and absent federated identity retain the compatible existing wire modes", async () => {
+  const remote = encodeOriginQualifiedSessionIdentity({ originId: "host:remote", remoteScopeAlias: "scope", remoteStableSessionId: "peer" });
+  const sends: Extract<ClientMessage, { type: "send" }>[] = [];
+  await withScriptedBroker(REQUIRED_FEATURES, (socket, frame) => {
+    if (frame.type === "list") {
+      writeMessage(socket, { type: "sessions", requestId: frame.requestId, sessions: [{
+        ...TEST_REGISTRATION, id: "live-id", name: "live", endpointEpoch: "live-epoch",
+      }] });
+      return true;
+    }
+    if (frame.type === "send") {
+      sends.push(frame);
+      writeMessage(socket, accepted(frame.message.id));
+    }
+  }, async client => {
+    assert.equal((await client.send("live-id", { text: "Exact live contact", exactIdentity: true })).delivered, true);
+    assert.equal(sends[0]!.targetId, "live-id");
+    assert.equal(sends[0]!.targetEpoch, "live-epoch");
+    assert.equal(sends[0]!.targetMode, "resolved");
+    assert.equal((await client.send(remote, { text: "Remote identity", exactIdentity: true })).delivered, true);
+    assert.equal(sends[1]!.to, remote);
+    assert.equal(sends[1]!.targetId, undefined, "qualified federation identities are intrinsically exact, not local offline mode");
+    assert.equal(sends[1]!.targetMode, undefined);
   });
 });

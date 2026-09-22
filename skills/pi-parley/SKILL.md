@@ -11,7 +11,7 @@ Parley connects Pi sessions so they can work together like colleagues. Each has 
 
 `send` shares information. `ask` requests an answer and can wait for it or receive it later while work continues. `reply` communicates back to the colleague and answers a question when applicable. An update can remain an update even while a question is outstanding.
 
-Messages and receipts carry identities, exact message IDs, related questions, and delivery state. Acceptance by a session, an answer from a colleague, and completion of work are different events. Missing acknowledgements and withdrawn requests appear as context where they matter.
+Sessions are named by their names and messages by local numbers like `#12`; use them as shown, and parley keeps each attached to what it first named (a newcomer reusing a name you know appears as `name~2`). Messages and receipts carry these references, related questions, and delivery state. Acceptance by a session, an answer from a colleague, and completion of work are different events. Missing acknowledgements and withdrawn requests appear as context where they matter.
 
 Discovery reflects this session's visibility, not every Pi process. Some remote peers support only text messages. Optional project launches report the request, the session observed, and message delivery separately.
 

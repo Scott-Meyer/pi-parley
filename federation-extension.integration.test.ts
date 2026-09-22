@@ -68,9 +68,28 @@ async function inAgentDir<T>(
     else process.env.PI_PARLEY_TRANSPORT = previousTransport;
   }
 }
+// Canonical federation identities belong to the wire and to details; models only see references.
+const CANONICAL_HANDLE = /oq[sm]1\./;
 function caller(harness: ReturnType<typeof createExtensionHarness>) {
-  return (params: Record<string, unknown>) => harness.tools.find((tool) => tool.name === "parley")!
-    .execute("federated-call", params, new AbortController().signal, undefined, harness.ctx);
+  return async (params: Record<string, unknown>) => {
+    const result = await harness.tools.find((tool) => tool.name === "parley")!
+      .execute("federated-call", params, new AbortController().signal, undefined, harness.ctx);
+    assert.doesNotMatch(text(result), CANONICAL_HANDLE, "model-facing tool text never carries canonical handles");
+    return result;
+  };
+}
+/** Everything parley writes around a message is readable; the peer's own words stay exactly as written. */
+function assertModelMessagesReadable(harness: ReturnType<typeof createExtensionHarness>): void {
+  for (const { message } of harness.sentMessages) {
+    const body = (message.details as { message?: Message } | undefined)?.message?.content.text;
+    const generated = body ? String(message.content ?? "").split(body).join("") : String(message.content ?? "");
+    assert.doesNotMatch(generated, CANONICAL_HANDLE, "injected conversation text never carries canonical handles");
+    if (body) assert.ok(String(message.content).includes(body), "peer-authored text reaches the model verbatim");
+  }
+}
+/** The roster row a model would read for a reference, if listed. */
+function rosterRow(rows: string, reference: string): string | undefined {
+  return rows.split("\n").find((line) => line.startsWith(`• ${reference} — `));
 }
 async function waitUntil(predicate: () => boolean | Promise<boolean>, explanation: string): Promise<void> {
   const deadline = Date.now() + 5000;
@@ -329,7 +348,7 @@ for (const tcp of [false, true]) test(`late ${tcp ? "authenticated TCP" : "socke
     const harnesses: ReturnType<typeof createExtensionHarness>[] = [];
     const streams: net.Socket[] = [];
     type FixtureBroker = { dir: string; target: BrokerConnectTarget; origin: FederationOrigin; alias: string };
-    type Consumer = { broker: FixtureBroker; id: string; harness: ReturnType<typeof createExtensionHarness>; call: ReturnType<typeof caller> };
+    type Consumer = { broker: FixtureBroker; id: string; name: string; harness: ReturnType<typeof createExtensionHarness>; call: ReturnType<typeof caller> };
     const qualified = (actor: Consumer) => encodeOriginQualifiedSessionIdentity({ originId: actor.broker.origin.id,
       remoteScopeAlias: actor.broker.alias, remoteStableSessionId: actor.id });
     const history = (actor: Consumer) => restoreConversationHistory(actor.harness.ctx.sessionManager.getEntries());
@@ -363,7 +382,7 @@ for (const tcp of [false, true]) test(`late ${tcp ? "authenticated TCP" : "socke
         if (previous === undefined) delete process.env.PI_PARLEY_TRANSPORT;
         else process.env.PI_PARLEY_TRANSPORT = previous;
       }
-      return { broker, id, harness, call };
+      return { broker, id, name, harness, call };
     };
     const attach = async (a: FixtureBroker, b: FixtureBroker) => {
       const endpoint = async (local: FixtureBroker, remote: FixtureBroker) => {
@@ -388,19 +407,19 @@ for (const tcp of [false, true]) test(`late ${tcp ? "authenticated TCP" : "socke
       const a = await admit(ma, "late-qualified-a", "late-a");
       const b = await admit(mb, "late-qualified-b", "late-b");
       const c = await admit(mc, "late-qualified-c", "late-c");
-      await waitUntil(async () => (await list(a)).includes(qualified(b)) && (await list(a)).includes(qualified(c)), "late A roster converges");
-      assert.ok(!(await list(b)).includes(qualified(c)), "B cannot import C through broker A");
+      await waitUntil(async () => Boolean(rosterRow(await list(a), b.name) && rosterRow(await list(a), c.name)), "late A roster converges");
+      assert.ok(!rosterRow(await list(b), c.name), "B cannot import C through broker A");
       await attach(mb, mc);
       const actors = [a, b, c];
       for (const actor of actors) await waitUntil(async () => {
         const rows = await list(actor);
-        return actors.filter(other => other !== actor).every(other => rows.includes(qualified(other)));
+        return actors.filter(other => other !== actor).every(other => rosterRow(rows, other.name)?.includes("remote:"));
       }, "third-edge qualified roster converges");
 
       for (const asker of actors) for (const responder of actors) if (asker !== responder) {
-        // Both selectors come from fresh registered-tool lists, not raw foreign UUIDs.
-        assert.ok((await list(asker)).includes(qualified(responder)));
-        const question = await asker.call({ action: "ask", to: qualified(responder), blocking: false,
+        // Selectors are the readable references a model reads in fresh lists, never raw foreign handles.
+        assert.ok(rosterRow(await list(asker), responder.name));
+        const question = await asker.call({ action: "ask", to: responder.name, blocking: false,
           message: `late-qualified:${asker.id}:${responder.id}` });
         assert.equal(question.details?.delivered, true, text(question));
         const questionId = question.details?.messageId as string;
@@ -412,15 +431,15 @@ for (const tcp of [false, true]) test(`late ${tcp ? "authenticated TCP" : "socke
           "actual inbound record and restored host-persisted context preserve identical sender identity");
         assert.equal(history(responder).persistedIncoming.has(questionId), true, "host persisted actual incoming ask");
         const freshRows = await list(responder);
-        assert.ok(freshRows.includes(qualified(asker)));
-        assert.equal(received.from.id, qualified(asker), "retained sender equals fresh qualified roster contact");
+        assert.ok(rosterRow(freshRows, asker.name));
+        assert.equal(received.from.id, qualified(asker), "retained sender is the canonical qualified identity behind the readable row");
         const routing = received.from.federation!;
         assert.deepEqual([routing.originId, routing.remoteScopeAlias, routing.remoteStableSessionId],
           [asker.broker.origin.id, asker.broker.alias, asker.id]);
         assert.ok(received.from.endpointEpoch);
         assert.equal(received.message.expectsReply, true);
         assert.equal((await outstanding(asker)).some(ask => ask.messageId === questionId), true);
-        const answer = await responder.call({ action: "reply", to: qualified(asker), replyTo: questionId,
+        const answer = await responder.call({ action: "reply", to: asker.name, replyTo: questionId,
           message: `answer:${questionId}` });
         assert.equal(answer.details?.delivered, true, text(answer));
         const answerId = answer.details?.messageId as string;
@@ -435,20 +454,23 @@ for (const tcp of [false, true]) test(`late ${tcp ? "authenticated TCP" : "socke
         assert.equal(settled(responder, questionId), true);
       }
 
-      const question = await a.call({ action: "ask", to: qualified(b), blocking: false, message: "withdrawal must not retarget" });
+      const question = await a.call({ action: "ask", to: b.name, blocking: false, message: "withdrawal must not retarget" });
       assert.equal(question.details?.delivered, true, text(question));
       const questionId = question.details?.messageId as string;
       await waitUntil(() => inbound(b, questionId).length > 0, "withdrawal-control ask is received first");
       const original = history(b).incoming.get(questionId)!;
       await ab.close();
-      await waitUntil(async () => !(await list(b)).includes(qualified(a)), "original sender is actually withdrawn");
+      await waitUntil(async () => !rosterRow(await list(b), "late-a"), "original sender is actually withdrawn");
       const replacement = await admit(mc, "different-qualified-a", "late-a");
-      await waitUntil(async () => (await list(b)).includes(qualified(replacement)), "same-name different-identity actor is visible");
-      assert.ok((await list(b)).includes(`• late-a (${qualified(replacement)})`), "replacement truly has the original profile name");
+      // B already knows "late-a" as the original sender, so the same-named newcomer gets its own reference.
+      await waitUntil(async () => Boolean(rosterRow(await list(b), "late-a~2")), "same-name different-identity actor is visible");
+      assert.ok(!rosterRow(await list(b), "late-a"), "the original reference is not recycled for the replacement");
       assert.notEqual(qualified(replacement), original.from.id);
-      const failed = await b.call({ action: "reply", to: original.from.id, replyTo: questionId, message: "must not reach replacement" });
+      const failed = await b.call({ action: "reply", to: "late-a", replyTo: questionId, message: "must not reach replacement" });
       assert.equal(failed.details?.error, true, text(failed));
       assert.match(text(failed), /Conversation recipient is not visible or is ambiguous/);
+      assert.match(text(failed), /late-a is not currently reachable\. A different session, late-a~2, now uses that name.*Parley did not redirect this/s,
+        "the successor is named as a choice, never taken");
       assert.equal((await outstanding(a)).some(ask => ask.messageId === questionId), true);
       assert.equal(history(a).outgoing.has(questionId), true);
       assert.equal(history(b).incoming.get(questionId)?.from.id, original.from.id);
@@ -456,7 +478,7 @@ for (const tcp of [false, true]) test(`late ${tcp ? "authenticated TCP" : "socke
       assert.match(text(await b.call({ action: "pending" })), /withdrawal must not retarget/);
       // Observe a subsequent delivery through the same B–C transport. `pending`
       // only reads local state and cannot establish receiver progress.
-      const marker = await b.call({ action: "send", to: qualified(replacement), message: "withdrawal-observation-marker" });
+      const marker = await b.call({ action: "send", to: "late-a~2", message: "withdrawal-observation-marker" });
       assert.equal(marker.details?.delivered, true, text(marker));
       const markerId = marker.details?.messageId as string;
       await waitUntil(() => inbound(replacement, markerId).length > 0, "subsequent marker reaches actual replacement history");
@@ -466,6 +488,7 @@ for (const tcp of [false, true]) test(`late ${tcp ? "authenticated TCP" : "socke
         && (entry.data as { message: Message }).message.content.text === "must not reach replacement"), false,
       "the failed reply was not misdelivered before the subsequent ordered marker");
       assert.equal(inbound(b, questionId).length, 1);
+      for (const actor of [...actors, replacement]) assertModelMessagesReadable(actor.harness);
     } finally {
       await Promise.all(links.map(link => link.close()));
       for (const stream of streams) stream.destroy();

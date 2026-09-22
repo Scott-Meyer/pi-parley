@@ -1,5 +1,7 @@
 export const EXTENSION_BUS_FEATURE = "extension-bus-v1";
 export const EXACT_SEND_FEATURE = "exact-send-v1";
+/** Exact local session identity, including the broker's authorized offline-mail path. */
+export const EXACT_IDENTITY_SEND_FEATURE = "exact-identity-send-v1";
 export const COMPACTION_AWARENESS_FEATURE = "compaction-awareness-v1";
 export const SESSION_PROFILE_FEATURE = "session-profile-v1";
 /** Local-client projection/preflight for negotiated single-hop remote text conversations. */
@@ -205,7 +207,7 @@ export type ClientMessage =
   | { type: "extension_capabilities_update"; extensions: ExtensionCapability[] }
   | { type: "list"; requestId: string }
   | { type: "advertise"; requestId: string; name: string }
-  | { type: "send"; to: string; message: Message; targetId?: string; targetEpoch?: string; targetMode?: "resolved" | "snapshot"; contactKind?: "direct" | "broadcast" }
+  | { type: "send"; to: string; message: Message; targetId?: string; targetEpoch?: string; targetMode?: "resolved" | "snapshot" | "identity"; contactKind?: "direct" | "broadcast" }
   | { type: "compaction_completed"; eventId: string }
   | { type: "direct_contact_seen"; token: string }
   | { type: "message_receipt"; receipt: MessageReceipt }

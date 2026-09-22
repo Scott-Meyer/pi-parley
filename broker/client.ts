@@ -5,7 +5,7 @@ import { writeMessage, createMessageReader } from "./framing.ts";
 import { getBrokerConnectTarget, type BrokerConnectTarget } from "./paths.ts";
 import { isMessage, isMessageControl, isMessageReceipt, isPeerCompactionNotice, isSessionInfo } from "./protocol.ts";
 import { getParleyScopeId } from "../config.ts";
-import { COMPACTION_AWARENESS_FEATURE, CONVERSATION_CONTRACT_FEATURE, FEDERATED_CONVERSATION_FEATURE, EXACT_SEND_FEATURE, EXTENSION_BUS_FEATURE, type DeliveryDetails } from "../types.ts";
+import { COMPACTION_AWARENESS_FEATURE, CONVERSATION_CONTRACT_FEATURE, FEDERATED_CONVERSATION_FEATURE, EXACT_SEND_FEATURE, EXACT_IDENTITY_SEND_FEATURE, EXTENSION_BUS_FEATURE, type DeliveryDetails } from "../types.ts";
 import type {
   Attachment,
   BrokerMessage,
@@ -43,6 +43,12 @@ export interface SendOptions {
   signal?: AbortSignal;
   /** Broadcast delivery never reads or advances direct-collaboration watermarks. */
   contactKind?: "direct" | "broadcast";
+  /** Resolve only this canonical session identity, never a name or ID prefix.
+   * Live delivery pins its endpoint epoch. Local offline delivery requires the
+   * broker's exact-identity feature and retains its existing mailbox policy:
+   * a unique same-name/cwd reconnect may receive the message. No broker restart
+   * or ambiguous legacy fallback is attempted. */
+  exactIdentity?: boolean;
 }
 
 export interface SendResult extends DeliveryDetails {
@@ -350,7 +356,7 @@ export class ParleyClient extends EventEmitter {
           session,
           ...(sessionId ? { sessionId } : {}),
           ...(scopeId ? { scopeId } : {}),
-          clientFeatures: [COMPACTION_AWARENESS_FEATURE, CONVERSATION_CONTRACT_FEATURE, EXACT_SEND_FEATURE, FEDERATED_CONVERSATION_FEATURE],
+          clientFeatures: [COMPACTION_AWARENESS_FEATURE, CONVERSATION_CONTRACT_FEATURE, EXACT_SEND_FEATURE, EXACT_IDENTITY_SEND_FEATURE, FEDERATED_CONVERSATION_FEATURE],
           ...(typeof target === "string" ? {} : { stateId: target.stateId }),
         });
       } catch (error) {
@@ -519,6 +525,8 @@ export class ParleyClient extends EventEmitter {
 
         this.pendingLists.delete(requestId);
         this._selfSession = sessions.find((session) => session.id === this._sessionId) ?? this._selfSession;
+        // Observers learn each complete roster snapshot a caller requested.
+        this.emit("roster", sessions);
         pending.resolve(sessions);
         break;
       }
@@ -1005,7 +1013,7 @@ export class ParleyClient extends EventEmitter {
       retryable: false, code,
       reason: `${toError(error).message}; delivery may have occurred. The message has not been withdrawn.`,
     });
-    const sendOnce = (targetId?: string, targetEpoch?: string): Promise<SendResult> => {
+    const sendOnce = (targetId?: string, targetEpoch?: string, offlineIdentity = false): Promise<SendResult> => {
       if (options.signal?.aborted) return Promise.resolve(cancelledResult());
       if (this.pendingSends.has(messageId)) return Promise.resolve(unknownResult("This message ID already has an in-flight send", "E_MESSAGE_IN_FLIGHT"));
       return new Promise((resolve) => {
@@ -1022,7 +1030,8 @@ export class ParleyClient extends EventEmitter {
         try {
           writeMessage(socket, {
             type: "send", to, message,
-            ...(targetId && targetEpoch ? { targetId, targetEpoch, targetMode: rosterTarget === undefined && !messageId.startsWith("oqm1.") ? "resolved" : "snapshot" } : {}),
+            ...(offlineIdentity ? { targetId: to, targetMode: "identity" }
+              : targetId && targetEpoch ? { targetId, targetEpoch, targetMode: rosterTarget === undefined && !messageId.startsWith("oqm1.") ? "resolved" : "snapshot" } : {}),
             ...(options.contactKind ? { contactKind: options.contactKind } : {}),
           });
         } catch (error) {
@@ -1031,12 +1040,12 @@ export class ParleyClient extends EventEmitter {
         }
       });
     };
-    if (options.replyTo && rosterTarget === undefined && !options.replyTo.startsWith("oqm1.") && !to.startsWith("oqs1.")) return sendOnce();
+    if (options.replyTo && !options.exactIdentity && rosterTarget === undefined && !options.replyTo.startsWith("oqm1.") && !to.startsWith("oqs1.")) return sendOnce();
     const resolveTarget = async (): Promise<{ id: string; epoch: string; session: SessionInfo } | null> => {
       const sessions = await this.listSessions();
       const byId = sessions.find((session) => session.id === to);
-      const byName = byId ? [] : sessions.filter((session) => session.name?.toLowerCase() === to.toLowerCase());
-      const byPrefix = byId || byName.length > 0 ? [] : sessions.filter((session) => session.id.startsWith(to));
+      const byName = byId || options.exactIdentity ? [] : sessions.filter((session) => session.name?.toLowerCase() === to.toLowerCase());
+      const byPrefix = byId || options.exactIdentity || byName.length > 0 ? [] : sessions.filter((session) => session.id.startsWith(to));
       const matches = byId ? [byId] : byName.length > 0 ? byName : byPrefix;
       const target = matches.length === 1 ? matches[0]! : null;
       return target?.endpointEpoch ? { id: target.id, epoch: target.endpointEpoch, session: target } : null;
@@ -1045,7 +1054,16 @@ export class ParleyClient extends EventEmitter {
     try {
       const target: { id: string; epoch: string; session?: SessionInfo } | null = rosterTarget === undefined ? await resolveTarget() : rosterTarget;
       if (options.signal?.aborted) return cancelledResult();
-      if (!target) return sendOnce();
+      if (!target) {
+        // Qualified federation identities already resolve exactly at the broker.
+        if (options.exactIdentity && !to.startsWith("oqs1.")) {
+          if (!this.supportsFeature(EXACT_IDENTITY_SEND_FEATURE)) {
+            return failedBeforeSend("This broker cannot address an exact offline session; no send frame was written by this attempt", "E_EXACT_IDENTITY_UNSUPPORTED");
+          }
+          return sendOnce(undefined, undefined, true);
+        }
+        return sendOnce();
+      }
       if (target.session?.federation?.conversation && !messageId.startsWith("oqm1.")) {
         try {
           const prepared = await this.prepareConversation(target.session, { messageId: options.messageId });

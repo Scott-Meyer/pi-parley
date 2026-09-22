@@ -207,7 +207,9 @@ test("mailbox undelivered receipt: sender is notified when a queued message can 
 async function withConversationBroker(run: (agentDir: string, connect: (name: string, id?: string, beforeConnect?: (client: ParleyClient) => void) => Promise<ParleyClient>) => Promise<void>) {
   const agentDir = mkdtempSync(path.join(process.platform === "win32" ? tmpdir() : "/tmp", "pi-conv-"));
   const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
+  const previousTransport = process.env.PI_PARLEY_TRANSPORT;
   process.env.PI_CODING_AGENT_DIR = agentDir;
+  process.env.PI_PARLEY_TRANSPORT = "socket";
   const clients: ParleyClient[] = [];
   const broker = await startBroker(agentDir);
   try {
@@ -223,6 +225,8 @@ async function withConversationBroker(run: (agentDir: string, connect: (name: st
     await stopBroker(broker);
     if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
     else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
+    if (previousTransport === undefined) delete process.env.PI_PARLEY_TRANSPORT;
+    else process.env.PI_PARLEY_TRANSPORT = previousTransport;
     rmSync(agentDir, { recursive: true, force: true });
   }
 }
@@ -330,7 +334,7 @@ test("lost local acknowledgements preserve unknown outcomes and IDs, cancellatio
     receiver.on("message", (_from, message) => inbound.push(message));
     const proxyDir = path.join(agentDir, "proxy");
     const proxyPath = getBrokerSocketPath(process.platform, proxyDir);
-    mkdirSync(path.dirname(proxyPath), { recursive: true });
+    if (process.platform !== "win32") mkdirSync(path.dirname(proxyPath), { recursive: true });
     const sockets: net.Socket[] = [];
     let dropAcks = true;
     let dropCancellationAcks = false;
@@ -606,5 +610,133 @@ test("mailbox rechecks a previously fitting envelope when compaction enrichment 
     const replay = await sender.send(receiverId, { text, messageId });
     assert.equal(replay.code, "E_MESSAGE_TOO_LARGE");
     assert.equal(replay.outcomeKnown, true);
+  });
+});
+
+test("exact identities retain authorized offline mail and refuse all selector fallbacks, even across roster races", { timeout: 30_000 }, async () => {
+  await withConversationBroker(async (_agentDir, connect) => {
+    const sender = await connect("identity-sender");
+    const original = await connect("identity-builder", "pinned-builder");
+    const id = original.sessionId!;
+    const liveMessages: Message[] = [];
+    original.on("message", (_from, message) => liveMessages.push(message));
+    const list = sender.listSessions.bind(sender);
+    // Underreported discovery also occurs when a peer arrives just after the
+    // roster snapshot. The broker resolves this identity atomically either way.
+    sender.listSessions = async () => [];
+    try {
+      const live = await sender.send(id, { text: "Present at the broker", exactIdentity: true });
+      assert.equal(live.delivery, "socket_delivered");
+      assert.equal(live.recipient?.id, id);
+      await original.listSessions();
+      assert.equal(liveMessages.length, 1);
+    } finally { sender.listSessions = list; }
+    await original.disconnect();
+
+    let unrelated: ParleyClient | undefined;
+    const unrelatedMessages: Message[] = [];
+    sender.listSessions = async (...args) => {
+      const snapshot = await list(...args);
+      unrelated = await connect("unrelated", "pinned-builder-helper", peer => {
+        peer.on("message", (_from, message) => unrelatedMessages.push(message));
+      });
+      return snapshot; // Overlap appeared after the snapshot, before send.
+    };
+    let queued;
+    try { queued = await sender.send(id, { text: "For the absent original", exactIdentity: true }); }
+    finally { sender.listSessions = list; }
+    assert.equal(queued.delivery, "queued", "exact disconnected entry keeps its original mailbox");
+    assert.equal(queued.recipient?.id, id);
+    await unrelated!.listSessions();
+    assert.equal(unrelatedMessages.length, 0, "a late prefix overlap never becomes the recipient");
+    assert.equal((await sender.cancelMessage(queued.id)).cancellation, "removed_from_mailbox");
+    assert.equal((await sender.send(id, { text: "Offline asks are not queued", exactIdentity: true, expectsReply: true })).code, "E_TARGET_DISCONNECTED");
+
+    const replacementMessages: Message[] = [];
+    const replacement = await connect("identity-builder", "replacement-builder", peer => {
+      peer.on("message", (_from, message) => replacementMessages.push(message));
+    });
+    const rebound = await sender.send(id, { text: "Mailbox reconnect policy", exactIdentity: true });
+    assert.equal(rebound.delivery, "socket_delivered");
+    assert.equal(rebound.recipient?.id, replacement.sessionId, "existing unique same-name/cwd mail rebinding stays observable");
+    await replacement.listSessions();
+    assert.equal(replacementMessages.length, 1);
+    assert.equal((await sender.send(replacement.sessionId!, { text: "Forged thread", exactIdentity: true, replyTo: "unowned-question" })).code, "E_REPLY_TARGET");
+
+    // An expired or never-observed exact identity has no disconnected entry.
+    // Neither an overlapping disconnected name nor prefix can stand in for it.
+    const deadPrefix = await connect("different-name", "forgotten-identity-helper");
+    const deadName = await connect("forgotten-identity", "different-identity");
+    await deadPrefix.disconnect(); await deadName.disconnect();
+    const forgotten = await sender.send("forgotten-identity", { text: "No exact identity exists", exactIdentity: true });
+    assert.equal(forgotten.delivered, false);
+    assert.equal(forgotten.outcomeKnown, true);
+    assert.equal(forgotten.code, "E_TARGET_NOT_FOUND");
+  });
+});
+
+test("offline mailbox identity never transfers delivery or recipient identity to an unrelated hidden child", { timeout: 30_000 }, async () => {
+  await withConversationBroker(async (_agentDir, connect) => {
+    const sender = await connect("mailbox-sender");
+    const original = await connect("mailbox-builder", "original-mailbox");
+    const supervisor = await connect("private-supervisor");
+    await original.disconnect();
+    const queued = await sender.send("original-mailbox", { text: "Queued before the child appears", exactIdentity: true });
+    assert.equal(queued.delivery, "queued");
+    const hidden = new ParleyClient();
+    const hiddenMessages: Message[] = [];
+    hidden.on("message", (_from, message) => hiddenMessages.push(message));
+    try {
+      await hidden.connect({
+        ...baseRegistration("mailbox-builder"), isSubagent: true,
+        supervisorSessionId: supervisor.sessionId!, supervisorName: "private-supervisor",
+      }, "hidden-child");
+      await hidden.listSessions();
+      assert.equal(hiddenMessages.length, 0, "registration must not flush old main-session mail into a hidden replacement");
+      assert.equal((await sender.listSessions()).some(session => session.id === "hidden-child"), false);
+      for (const exactIdentity of [false, true]) {
+        const outcome = await sender.send("original-mailbox", { text: "Wait for an authorized reconnect", exactIdentity });
+        assert.equal(outcome.delivery, "queued", "a hidden same-name/cwd child cannot receive ordinary or exact offline mail");
+        assert.equal(outcome.recipient?.id, "original-mailbox", "receipt must not leak the hidden child's identity");
+        assert.equal((await sender.cancelMessage(outcome.id)).cancellation, "removed_from_mailbox");
+      }
+      await hidden.listSessions();
+      assert.equal(hiddenMessages.length, 0);
+      assert.equal((await sender.cancelMessage(queued.id)).cancellation, "removed_from_mailbox", "unauthorized flush must leave the original queued work owned and cancellable");
+    } finally { await hidden.disconnect(); }
+  });
+});
+
+test("accepted offline mail keeps its author's granted authority when that actor later reconnects privately", { timeout: 30_000 }, async () => {
+  await withConversationBroker(async (_agentDir, connect) => {
+    const supervisor = await connect("mail-author-supervisor");
+    const original = await connect("mail-recipient", "mail-recipient-id");
+    const registration = {
+      ...baseRegistration("mail-author"), isSubagent: true,
+      supervisorSessionId: supervisor.sessionId!, supervisorName: "mail-author-supervisor",
+    };
+    const author = new ParleyClient();
+    const privateReconnect = new ParleyClient();
+    try {
+      await author.connect(registration, "mail-author-id");
+      await author.advertise("mail-author");
+      await original.disconnect();
+      const queued = await author.send("mail-recipient-id", { text: "Accepted while publicly discoverable", exactIdentity: true });
+      assert.equal(queued.delivery, "queued");
+      await author.disconnect();
+      await privateReconnect.connect(registration, "mail-author-id");
+      assert.equal((await privateReconnect.listSessions()).some(session => session.id === "mail-recipient-id"), false);
+      const received: Message[] = [];
+      const recipient = await connect("mail-recipient", "mail-recipient-id", client => {
+        client.on("message", (_from, message) => received.push(message));
+      });
+      await recipient.listSessions();
+      assert.equal(received.length, 1, "already accepted mail retains its creation-time authority; reconnect is not withdrawal");
+      assert.equal(received[0].id, queued.id);
+      assert.equal(received[0].content.text, "Accepted while publicly discoverable");
+    } finally {
+      await author.disconnect();
+      await privateReconnect.disconnect();
+    }
   });
 });

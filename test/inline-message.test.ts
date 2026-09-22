@@ -4,6 +4,7 @@ import { stripVTControlCharacters } from "node:util";
 
 import { visibleWidth } from "@mariozechner/pi-tui";
 import { formatPeerCompactionNotice } from "../compaction-awareness.ts";
+import { formatDeliveryResult } from "../message-results.ts";
 import { InlineMessageComponent } from "../ui/inline-message.ts";
 import type { Message, SessionInfo } from "../types.ts";
 
@@ -85,8 +86,8 @@ test("compaction notices identify the actual peer after mailbox identity rebound
     previousGeneration: 1,
     compactedAt: 1234,
   });
-  assert.match(notice, /replacement-worker \[session replacem\]/);
-  assert.match(notice, /message was requested for departed-worker \[session departed\]/);
+  assert.match(notice, /replacement-worker \[session replacement-session-id\]/);
+  assert.match(notice, /message was requested for departed-worker \[session departed-session-id\]/);
   assert.doesNotMatch(notice, /Notice: departed-worker compacted/);
 });
 
@@ -99,8 +100,8 @@ test("broker-authored rebound ID wins even when it matches the replacement name"
     previousGeneration: 1,
     compactedAt: 1234,
   }, "orchestrator");
-  assert.match(notice, /orchestrator \[session replacem\]/);
-  assert.match(notice, /message was requested for orchestrator \[session orchestr\]/);
+  assert.match(notice, /orchestrator \[session replacement-session-id\]/);
+  assert.match(notice, /message was requested for orchestrator \[session orchestrator\]/);
 });
 
 test("routing names are not mistaken for stable-ID rebound", () => {
@@ -245,4 +246,47 @@ test("inline messages pick up mutable theme proxy changes on rerender", () => {
   assert.match(after, /\u001b\[97mThis is a long message/);
   assert.match(after, /\u001b\[90m╭/);
   assert.notEqual(before, after);
+});
+
+test("with typed naming, a rebound notice names each identity by its own reference", async () => {
+  const { ReferenceBook } = await import("../references.ts");
+  const book = new ReferenceBook();
+  // builder names another session; Bob names the session the message was meant for.
+  book.observeLive([{ id: "other-id", name: "builder" }, { id: "old-bob", name: "Bob" }], { complete: true });
+  book.sessionRef("other-id");
+  book.sessionRef("old-bob");
+  book.observeLive([{ id: "builder", name: "Bob" }], {});
+  const notice = formatPeerCompactionNotice("Bob~2", {
+    peerSessionId: "builder",
+    peerName: "Bob",
+    requestedPeerSessionId: "old-bob",
+    generation: 2,
+    previousGeneration: 1,
+    compactedAt: 1234,
+  }, undefined, (id, name) => book.sessionRef(name ? { id, name } : id));
+  assert.match(notice, /^Notice: Bob~2 \(message was requested for Bob\) compacted context/);
+  assert.doesNotMatch(notice, /\[session|builder/, "no raw identity, and never another session's reference");
+});
+
+test("a delivery receipt carrying a rebound compaction notice names every identity by its own reference", async () => {
+  const { ReferenceBook } = await import("../references.ts");
+  const book = new ReferenceBook();
+  book.observeLive([{ id: "other-id", name: "builder" }, { id: "old-bob", name: "Bob" }], { complete: true });
+  book.sessionRef("other-id");
+  book.sessionRef("old-bob");
+  book.observeLive([{ id: "builder", name: "Bob" }], {});
+  const recipient = { id: "builder", name: "Bob", cwd: "/tmp", model: "m", pid: 1, startedAt: 0, lastActivity: 0 };
+  // The receipt path the actor uses: typed recipient, message, and compaction naming together.
+  const receipt = formatDeliveryResult({
+    id: "m-1", delivered: true, delivery: "socket_delivered", outcomeKnown: true, retryable: false, recipient,
+    peerCompaction: { peerSessionId: "builder", peerName: "Bob", requestedPeerSessionId: "old-bob", generation: 2, previousGeneration: 1, compactedAt: 1234 },
+  }, {
+    kind: "Message", sender: "observer", target: "Bob",
+    sessionRef: (session) => book.sessionRef(session),
+    messageRef: (id) => book.messageRef(id),
+    sessionName: (id, name) => book.sessionRef(name ? { id, name } : id),
+  });
+  assert.match(receipt, /^Message sent as observer to Bob~2\.\nMessage: #1/);
+  assert.match(receipt, /Notice: Bob~2 \(message was requested for Bob\) compacted context/);
+  assert.doesNotMatch(receipt, /\[session|builder/, "no raw identity, and never another session's reference");
 });

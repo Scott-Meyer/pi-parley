@@ -246,6 +246,8 @@ export function resolveTargetInCwd(input: {
   currentSessionId: string;
   targetCwd: string;
   to?: string;
+  /** Typed naming for sessions in model-facing errors; raw name and ID by default. */
+  sessionRef?: (session: SessionInfo) => string;
 }): ProjectTargetResolution {
   // cwd addresses a local filesystem, not a similarly spelled remote path.
   const inCwd = input.sessions.filter((session) => session.federation === undefined && sameCwd(session.cwd, input.targetCwd));
@@ -259,7 +261,7 @@ export function resolveTargetInCwd(input: {
     if (candidates.length === 0) {
       return { kind: "missing", targetCwd: input.targetCwd, reason: `No other local parley sessions are visible in ${input.targetCwd}.` };
     }
-    throw new Error(`Multiple parley sessions are connected in ${input.targetCwd}: ${formatSessionRefs(candidates)}. Specify 'to'.`);
+    throw new Error(`Multiple parley sessions are connected in ${input.targetCwd}: ${formatSessionRefs(candidates, input.sessionRef)}. Specify 'to'.`);
   }
 
   const byId = inCwd.find((session) => session.id === target);
@@ -269,7 +271,7 @@ export function resolveTargetInCwd(input: {
   const byName = inCwd.filter((session) => session.name?.toLowerCase() === lowerName);
   if (byName.length === 1) return { kind: "found", session: byName[0], targetCwd: input.targetCwd };
   if (byName.length > 1) {
-    throw new Error(`Multiple parley sessions named "${target}" are connected in ${input.targetCwd}: ${formatSessionRefs(byName)}. Address one by session ID.`);
+    throw new Error(`Multiple parley sessions named "${target}" are connected in ${input.targetCwd}: ${formatSessionRefs(byName, input.sessionRef)}. Address one by the reference shown.`);
   }
 
   const byIdPrefix = inCwd.filter((session) => session.id.startsWith(target));
@@ -393,6 +395,8 @@ export async function waitForProjectSession(client: ListSessionsClient, input: {
   signal?: AbortSignal;
   timeoutMs?: number;
   pollMs?: number;
+  /** Typed naming for sessions in model-facing errors; raw name and ID by default. */
+  sessionRef?: (session: SessionInfo) => string;
 }): Promise<SessionInfo> {
   const deadline = Date.now() + (input.timeoutMs ?? DEFAULT_PROJECT_AGENT_TIMEOUT_MS);
   const pollMs = input.pollMs ?? DEFAULT_PROJECT_AGENT_POLL_MS;
@@ -412,7 +416,7 @@ export async function waitForProjectSession(client: ListSessionsClient, input: {
       );
       if (newInProject.length === 1) return newInProject[0]!;
       if (newInProject.length > 1) {
-        throw new Error(`Multiple new local parley sessions are visible in ${input.projectRoot}: ${formatSessionRefs(newInProject)}. Their relationship to the launch is unknown.`);
+        throw new Error(`Multiple new local parley sessions are visible in ${input.projectRoot}: ${formatSessionRefs(newInProject, input.sessionRef)}. Their relationship to the launch is unknown.`);
       }
 
       await sleep(Math.min(pollMs, Math.max(0, deadline - Date.now())), input.signal);
@@ -440,9 +444,9 @@ function errorText(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-function formatSessionRefs(sessions: SessionInfo[]): string {
+function formatSessionRefs(sessions: SessionInfo[], sessionRef?: (session: SessionInfo) => string): string {
   return sessions
-    .map((session) => `${session.name || "Unnamed session"} (${session.id.slice(0, 8)})`)
+    .map((session) => sessionRef ? sessionRef(session) : `${session.name || "Unnamed session"} (${session.id})`)
     .join(", ");
 }
 

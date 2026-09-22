@@ -17,7 +17,7 @@ import {
 } from "./paths.ts";
 import { getAskTimeoutMs } from "../config.ts";
 import { sameCwd } from "../cwd.ts";
-import { COMPACTION_AWARENESS_FEATURE, CONVERSATION_CONTRACT_FEATURE, FEDERATED_CONVERSATION_FEATURE, EXACT_SEND_FEATURE, EXTENSION_BUS_FEATURE, SESSION_PROFILE_FEATURE } from "../types.ts";
+import { COMPACTION_AWARENESS_FEATURE, CONVERSATION_CONTRACT_FEATURE, FEDERATED_CONVERSATION_FEATURE, EXACT_SEND_FEATURE, EXACT_IDENTITY_SEND_FEATURE, EXTENSION_BUS_FEATURE, SESSION_PROFILE_FEATURE } from "../types.ts";
 import type { CancellationState, DeliveryDetails, DeliveryState, SessionInfo, Message, BrokerMessage, ExtensionCapability, MessageControl, PeerCompactionNotice } from "../types.ts";
 import { ExtensionStateManager } from "./extension-state.ts";
 import { BROKER_RUNTIME_OCCUPIED_EXIT_CODE, BrokerRuntimeOccupiedError, claimBrokerRuntime } from "./runtime-claim.ts";
@@ -1650,7 +1650,7 @@ class ParleyBroker {
         this.writeBrokerFrame(socket, {
           type: "registered",
           sessionId: id,
-          features: [EXTENSION_BUS_FEATURE, EXACT_SEND_FEATURE, COMPACTION_AWARENESS_FEATURE, SESSION_PROFILE_FEATURE, CONVERSATION_CONTRACT_FEATURE, FEDERATED_CONVERSATION_FEATURE],
+          features: [EXTENSION_BUS_FEATURE, EXACT_SEND_FEATURE, EXACT_IDENTITY_SEND_FEATURE, COMPACTION_AWARENESS_FEATURE, SESSION_PROFILE_FEATURE, CONVERSATION_CONTRACT_FEATURE, FEDERATED_CONVERSATION_FEATURE],
           session: info,
         });
         this.broadcastScoped({ type: "session_joined", session: info }, info, key, scopeId);
@@ -1955,16 +1955,22 @@ class ParleyBroker {
         if (this.rejectRetainedUnknown(socket, currentKey, message.id)) break;
         const hasTargetId = clientMessage.targetId !== undefined;
         const hasTargetEpoch = clientMessage.targetEpoch !== undefined;
-        if (
-          hasTargetId !== hasTargetEpoch
-          || (clientMessage.targetMode !== undefined && (
-            !hasTargetId || !hasTargetEpoch
-            || (clientMessage.targetMode !== "resolved" && clientMessage.targetMode !== "snapshot")
-          ))
-          || (hasTargetId && (typeof clientMessage.targetId !== "string" || clientMessage.targetId.length === 0))
-          || (hasTargetEpoch && (typeof clientMessage.targetEpoch !== "string" || clientMessage.targetEpoch.length === 0))
-        ) {
-          this.writeDeliveryFailure(socket, message.id, "Exact target requires an id and endpoint epoch", "E_INVALID_TARGET");
+        const exactIdentity = clientMessage.targetMode === "identity";
+        const invalidTarget = exactIdentity
+          ? !hasTargetId || hasTargetEpoch || !isSessionId(clientMessage.targetId) || clientMessage.to !== clientMessage.targetId
+          : hasTargetId !== hasTargetEpoch
+            || (clientMessage.targetMode !== undefined && (
+              !hasTargetId || !hasTargetEpoch
+              || (clientMessage.targetMode !== "resolved" && clientMessage.targetMode !== "snapshot")
+            ))
+            || (hasTargetId && (typeof clientMessage.targetId !== "string" || clientMessage.targetId.length === 0))
+            || (hasTargetEpoch && (typeof clientMessage.targetEpoch !== "string" || clientMessage.targetEpoch.length === 0));
+        if (invalidTarget) {
+          this.writeDeliveryFailure(socket, message.id, "Exact target requires an id and endpoint epoch, or an exact local identity without an epoch", "E_INVALID_TARGET");
+          break;
+        }
+        if (exactIdentity && !fromSession.clientFeatures.has(EXACT_IDENTITY_SEND_FEATURE)) {
+          this.writeDeliveryFailure(socket, message.id, "Client did not negotiate exact-identity delivery", "E_SEND_UNSUPPORTED");
           break;
         }
         const routingTarget = hasTargetId ? clientMessage.targetId as string : clientMessage.to;
@@ -2025,7 +2031,7 @@ class ParleyBroker {
           clientMessage.to = targetId;
         }
 
-        const targets = this.findSessions(clientMessage.to as string, fromSession.scopeId, currentKey);
+        const targets = this.findSessions(clientMessage.to as string, fromSession.scopeId, currentKey, exactIdentity);
         if (targets.length === 1) {
           const target = targets[0];
           const fingerprint = this.deliveryFingerprint(message, target.info.id, contactKind);
@@ -2136,7 +2142,7 @@ class ParleyBroker {
           break;
         }
 
-        const disconnectedTargets = this.findDisconnectedSessions(clientMessage.to as string, fromSession.scopeId, currentKey);
+        const disconnectedTargets = this.findDisconnectedSessions(clientMessage.to as string, fromSession.scopeId, currentKey, exactIdentity);
         if (disconnectedTargets.length === 1) {
           if (contactKind === "broadcast") {
             this.writeDeliveryFailure(socket, message.id, "Broadcast recipients must still be connected", "E_TARGET_NOT_FOUND");
@@ -2851,6 +2857,13 @@ class ParleyBroker {
       }
 
       const liveSender = this.sessions.get(entry.fromKey);
+      // A name/cwd reconnect is not permission to deliver to a hidden child.
+      // The accepted sender snapshot owns this instruction's authority: a later
+      // private reconnect cannot withdraw already accepted work by changing presence.
+      if (!canSeeSession(entry.from, session.info)) {
+        index += 1;
+        continue;
+      }
       const receiverContact = entry.contactKind === "direct" && this.supportsCompactionAwareness(session)
         ? this.directContactPlan(
             session.scopeId,
@@ -3017,13 +3030,14 @@ class ParleyBroker {
     return canSeeSession(observer.info, subject);
   }
 
-  private findSessions(nameOrId: string, scopeId: string | undefined, requesterKey: string): ConnectedSession[] {
+  private findSessions(nameOrId: string, scopeId: string | undefined, requesterKey: string, exactIdentity = false): ConnectedSession[] {
     const visible = (session: ConnectedSession) => this.isVisibleTo(requesterKey, session.info);
 
     const byId = this.sessions.get(scopedSessionKey(scopeId, nameOrId));
     if (byId) {
       return visible(byId) ? [byId] : [];
     }
+    if (exactIdentity) return [];
 
     const lowerName = nameOrId.toLowerCase();
     const byName = Array.from(this.sessions.values()).filter(session => sameScope(session.scopeId, scopeId) && session.info.name?.toLowerCase() === lowerName && visible(session));
@@ -3036,7 +3050,7 @@ class ParleyBroker {
       .map(([, session]) => session);
   }
 
-  private findDisconnectedSessions(nameOrId: string, scopeId: string | undefined, requesterKey: string): DisconnectedSession[] {
+  private findDisconnectedSessions(nameOrId: string, scopeId: string | undefined, requesterKey: string, exactIdentity = false): DisconnectedSession[] {
     this.pruneDisconnectedSessions();
     const observer = this.sessions.get(requesterKey);
     const visible = (session: DisconnectedSession) => Boolean(observer) && canSeeSession(observer!.info, session.info);
@@ -3045,6 +3059,7 @@ class ParleyBroker {
     if (byId) {
       return visible(byId) ? [byId] : [];
     }
+    if (exactIdentity) return [];
 
     const lowerName = nameOrId.toLowerCase();
     const byName = Array.from(this.disconnectedSessions.values()).filter(session => sameScope(session.scopeId, scopeId) && session.info.name?.toLowerCase() === lowerName && visible(session));
@@ -3057,9 +3072,9 @@ class ParleyBroker {
       .map(([, session]) => session);
   }
 
-  private findUniqueLiveSessionForDisconnectedSession(disconnected: DisconnectedSession, senderKey?: string): ConnectedSession | null {
+  private findUniqueLiveSessionForDisconnectedSession(disconnected: DisconnectedSession, senderKey: string): ConnectedSession | null {
     const matches = this.findLiveSessionsSharingMailboxIdentity(disconnected)
-      .filter((session) => session.key !== senderKey);
+      .filter((session) => session.key !== senderKey && this.isVisibleTo(senderKey, session.info));
     return matches.length === 1 ? matches[0]! : null;
   }
 

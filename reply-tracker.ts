@@ -15,17 +15,13 @@ function senderMatchPriority(context: ParleyContext, to: string): number {
   return 3;
 }
 
-function matchesPendingSender(context: ParleyContext, to: string): boolean {
-  return senderMatchPriority(context, to) < 3;
-}
-
-function resolvePendingSender(pending: ParleyContext[], to: string): ParleyContext {
+function resolvePendingSender(pending: ParleyContext[], to: string, name: (to: string) => string = (value) => `"${value}"`): ParleyContext {
   const exactIdMatches = pending.filter((context) => senderMatchPriority(context, to) === 0);
   if (exactIdMatches.length === 1) {
     return exactIdMatches[0]!;
   }
   if (exactIdMatches.length > 1) {
-    throw new Error(`Multiple pending asks from session ID "${to}" — specify \`replyTo\``);
+    throw new Error(`Multiple pending asks from ${name(to)} — specify \`replyTo\` with the message reference`);
   }
 
   const exactNameMatches = pending.filter((context) => senderMatchPriority(context, to) === 1);
@@ -33,7 +29,7 @@ function resolvePendingSender(pending: ParleyContext[], to: string): ParleyConte
     return exactNameMatches[0]!;
   }
   if (exactNameMatches.length > 1) {
-    throw new Error(`Multiple pending asks match sender name "${to}" — specify a full session ID or \`replyTo\``);
+    throw new Error(`Multiple pending asks match sender name "${to}" — specify \`replyTo\` with the message reference`);
   }
 
   const idPrefixMatches = pending.filter((context) => senderMatchPriority(context, to) === 2);
@@ -44,15 +40,35 @@ function resolvePendingSender(pending: ParleyContext[], to: string): ParleyConte
     throw new Error(`Multiple pending asks match ID prefix "${to}" — use a longer session ID prefix or specify \`replyTo\``);
   }
 
-  throw new Error(`No pending ask from "${to}"`);
+  throw new Error(`No pending ask from ${name(to)}`);
 }
+
+/** How conversation text names sessions and messages for a model. Defaults keep raw identities. */
+export interface ConversationReferences {
+  session(from: SessionInfo): string;
+  message(id: string): string;
+  /** False only when the sender is known to be absent from the current roster. */
+  isReachable?(from: SessionInfo): boolean | undefined;
+  /** Mark quoted peer text so presentation leaves it as written. */
+  verbatim?(text: string): string;
+}
+
+const RAW_REFERENCES: ConversationReferences = {
+  session: (from) => from.name || from.id,
+  message: (id) => id,
+};
 
 export class ReplyTracker {
   private readonly messages = new Map<string, ParleyContext>();
   private readonly pendingAsks = new Map<string, ParleyContext>();
   private activeContexts: readonly ParleyContext[] = [];
+  /** Requests already mentioned in automatic context while elapsed or unreachable. */
+  private readonly quietAnnounced = new Set<string>();
 
-  constructor(private readonly askTimeoutMs = getAskTimeoutMs()) {}
+  constructor(
+    private readonly askTimeoutMs = getAskTimeoutMs(),
+    private readonly references: ConversationReferences = RAW_REFERENCES,
+  ) {}
 
   recordIncomingMessage(from: SessionInfo, message: Message, receivedAt = Date.now()): ParleyContext {
     const context = { from, message, receivedAt };
@@ -74,6 +90,12 @@ export class ReplyTracker {
     if (contexts.length > 0) this.activeContexts = [...contexts];
   }
 
+  /** A sender as the model knows it: its reference when this tracker has seen it, else the text given. */
+  private senderName(to: string): string {
+    for (const context of this.messages.values()) if (context.from.id === to) return this.references.session(context.from);
+    return `"${to}"`;
+  }
+
   clearActiveContexts(): void {
     this.activeContexts = [];
   }
@@ -81,18 +103,27 @@ export class ReplyTracker {
   reset(): void {
     this.messages.clear();
     this.pendingAsks.clear();
+    this.quietAnnounced.clear();
     this.clearActiveContexts();
   }
 
-  resolveReplyTarget(options: { to?: string; replyTo?: string }, now = Date.now()): ParleyContext {
+  /**
+   * `exactSender` means `to` is a pinned identity: only that exact sender matches, never a
+   * session whose name or ID merely overlaps it.
+   */
+  resolveReplyTarget(options: { to?: string; replyTo?: string; exactSender?: boolean }, now = Date.now()): ParleyContext {
+    const priorityOf = (context: ParleyContext, to: string): number => {
+      const priority = senderMatchPriority(context, to);
+      return options.exactSender && priority !== 0 ? 3 : priority;
+    };
 
     if (options.replyTo) {
       const target = this.messages.get(options.replyTo);
       if (!target) {
-        throw new Error(`No retained message with ID "${options.replyTo}"`);
+        throw new Error(`No retained message ${this.references.message(options.replyTo)}`);
       }
-      if (options.to && !matchesPendingSender(target, options.to)) {
-        throw new Error(`Pending ask "${options.replyTo}" is not from "${options.to}"`);
+      if (options.to && priorityOf(target, options.to) === 3) {
+        throw new Error(`Pending ask ${this.references.message(options.replyTo)} is not from ${this.senderName(options.to)}`);
       }
       return target;
     }
@@ -100,24 +131,26 @@ export class ReplyTracker {
     const pending = Array.from(this.pendingAsks.values());
     if (options.to) {
       const candidates = [...this.activeContexts, ...pending];
-      const priority = candidates.reduce((best, context) => Math.min(best, senderMatchPriority(context, options.to!)), 3);
-      const matches = candidates.filter((context) => priority < 3 && senderMatchPriority(context, options.to!) === priority);
+      const priority = candidates.reduce((best, context) => Math.min(best, priorityOf(context, options.to!)), 3);
+      const matches = candidates.filter((context) => priority < 3 && priorityOf(context, options.to!) === priority);
       const activeMatches = this.activeContexts.filter((context) => matches.includes(context));
       if (activeMatches.length > 0 && new Set(matches.map((context) => context.from.id)).size > 1) {
-        throw new Error(`Multiple senders match "${options.to}" — specify a full session ID or \`replyTo\`.`);
+        throw new Error(`Multiple senders match ${this.senderName(options.to)} — specify \`replyTo\` with the message reference.`);
       }
       if (activeMatches.length > 1) {
-        throw new Error(`Multiple active messages match "${options.to}" — specify \`replyTo\`.`);
+        throw new Error(`Multiple active messages match ${this.senderName(options.to)} — specify \`replyTo\`.`);
       }
       // Naming the sender narrows the conversation; it must not redirect an
       // acknowledgment of a fresh note into an answer to an older question.
       if (activeMatches.length === 1) return activeMatches[0]!;
-      if (pending.some((context) => matchesPendingSender(context, options.to!))) {
-        try { return resolvePendingSender(pending, options.to); } catch (error) {
-          throw new Error(`${(error as Error).message}\n${this.formatConversationContext({ now })}`);
+      if (pending.some((context) => priorityOf(context, options.to!) < 3)) {
+        try {
+          return resolvePendingSender(options.exactSender ? pending.filter((context) => context.from.id === options.to) : pending, options.to, (to) => this.senderName(to));
+        } catch (error) {
+          throw new Error(`${(error as Error).message}\n${this.formatConversationContext({ now, complete: true })}`);
         }
       }
-      throw new Error(`No pending ask from "${options.to}". Exact replyTo can identify a retained ordinary message.`);
+      throw new Error(`No pending ask from ${this.senderName(options.to)}. Exact replyTo can identify a retained ordinary message.`);
     }
 
     if (this.activeContexts.length > 1) {
@@ -134,7 +167,7 @@ export class ReplyTracker {
       throw new Error("No active parley context to reply to");
     }
 
-    throw new Error(`Multiple pending asks — specify \`to\` or \`replyTo\`.\n${this.formatConversationContext({ now })}`);
+    throw new Error(`Multiple pending asks — specify \`to\` or \`replyTo\`.\n${this.formatConversationContext({ now, complete: true })}`);
   }
 
   findUniquePendingAskFrom(to: string, now = Date.now()): ParleyContext | null {
@@ -190,8 +223,12 @@ export class ReplyTracker {
     return now > (context.message.replyDeadline ?? context.receivedAt + this.askTimeoutMs);
   }
 
-  /** Bounded adjacent context for action results; never selects or answers a request. */
-  formatConversationContext(options: { limit?: number; previewLength?: number; now?: number } = {}): string {
+  /**
+   * Bounded adjacent context for action results; never selects or answers a request.
+   * Automatic context mentions an elapsed or unreachable request once, then only counts
+   * it: waiting is not settlement, and `complete` (pending, errors) always lists everything.
+   */
+  formatConversationContext(options: { limit?: number; previewLength?: number; now?: number; complete?: boolean } = {}): string {
     const now = options.now ?? Date.now();
     const limit = Math.max(1, Math.floor(options.limit ?? 3));
     const previewLength = Math.max(20, Math.min(300, options.previewLength ?? 120));
@@ -199,15 +236,34 @@ export class ReplyTracker {
     const activeIds = new Set(this.activeContexts.map((context) => context.message.id));
     const contexts = [...this.activeContexts, ...pending.filter((item) => !activeIds.has(item.message.id))];
     if (contexts.length === 0) return "";
-    const lines = contexts.slice(0, limit).map((context) => {
+    const quote = this.references.verbatim ?? ((text: string) => text);
+    const lines: string[] = [];
+    let quieted = 0;
+    let omitted = 0;
+    for (const context of contexts) {
+      const id = context.message.id;
+      const awaiting = this.pendingAsks.has(id);
+      const elapsed = awaiting && this.replyWindowElapsed(context, now);
+      const unreachable = this.references.isReachable?.(context.from) === false;
+      const quietKey = (elapsed || unreachable) && !activeIds.has(id) ? `${id}\0${elapsed ? "elapsed" : ""}\0${unreachable ? "unreachable" : ""}` : undefined;
+      if (!options.complete && quietKey && this.quietAnnounced.has(quietKey)) {
+        quieted += 1;
+        continue;
+      }
+      if (lines.length >= limit) {
+        omitted += 1;
+        continue;
+      }
+      if (!options.complete && quietKey) this.quietAnnounced.add(quietKey);
       const preview = context.message.content.text.replace(/\s+/g, " ").trim();
-      const status = this.pendingAsks.has(context.message.id)
-        ? this.replyWindowElapsed(context, now) ? "unanswered; reply window elapsed, not withdrawn" : "awaiting your reply"
+      const status = awaiting
+        ? elapsed ? "unanswered; reply window elapsed, not withdrawn" : "awaiting your reply"
         : "active conversation";
       const attachments = context.message.content.attachments?.length;
-      return `- ${context.from.name || context.from.id} (${context.from.id}), message ${context.message.id} — ${status}: ${JSON.stringify(preview.length > previewLength ? `${preview.slice(0, previewLength - 1)}…` : preview)}${attachments ? ` [${attachments} attachment snapshot(s)]` : ""}${context.message.peerCompaction ? " [sender compacted since prior direct contact (notice at message arrival)]" : ""}`;
-    });
-    if (contexts.length > limit) lines.push(`- ${contexts.length - limit} more conversation(s); pending has the complete request list.`);
+      lines.push(`- ${this.references.session(context.from)}, message ${this.references.message(id)} — ${status}${unreachable ? " (sender currently unreachable)" : ""}: ${quote(JSON.stringify(preview.length > previewLength ? `${preview.slice(0, previewLength - 1)}…` : preview))}${attachments ? ` [${attachments} attachment snapshot(s)]` : ""}${context.message.peerCompaction ? " [sender compacted since prior direct contact (notice at message arrival)]" : ""}`);
+    }
+    if (omitted > 0) lines.push(`- ${omitted} more conversation(s); pending has the complete request list.`);
+    if (quieted > 0) lines.push(`- ${quieted} earlier unanswered request(s) already mentioned (reply window elapsed or sender unreachable); pending lists them.`);
     return `Conversation context (${pending.length} unanswered request${pending.length === 1 ? "" : "s"}):\n${lines.join("\n")}`;
   }
 }
