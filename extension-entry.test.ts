@@ -19,6 +19,33 @@ for (const key of Object.keys(process.env)) {
   }
 }
 
+test("presence-name resolver failures synchronously fail session startup", async (t) => {
+  for (const failure of [
+    { name: "throw", resolver: () => { throw new Error("policy unavailable"); }, pattern: /policy unavailable/ },
+    { name: "empty", resolver: () => "   ", pattern: /must return a non-empty string/ },
+  ]) {
+    await t.test(failure.name, async () => {
+      const harness = createExtensionHarness("raw-name", { sessionId: `resolver-${failure.name}` });
+      registerParleyExtension(harness.pi as never, { resolvePresenceName: failure.resolver });
+      await assert.rejects(harness.emitLifecycle("session_start"), failure.pattern);
+      await harness.emitLifecycle("session_shutdown");
+    });
+  }
+});
+
+test("presence-name policy cannot be attached after identity publication starts", async () => {
+  const owner = createExtensionHarness("already-started", { sessionId: "already-started-session" });
+  const lateWrapper = createExtensionHarness("late-wrapper");
+  lateWrapper.pi.events = { on: owner.pi.events.on, emit: owner.pi.events.emit };
+  registerParleyExtension(owner.pi as never);
+  await owner.emitLifecycle("session_start");
+  assert.throws(() => registerParleyExtension(lateWrapper.pi as never, {
+    resolvePresenceName: (candidate) => `late:${candidate ?? "session"}`,
+  }), /cannot be configured after identity publication has started/);
+  assert.equal(lateWrapper.tools.length, 0);
+  await owner.emitLifecycle("session_shutdown");
+});
+
 test("the packaged actor entry is explicit, runtime-idempotent, and re-arms after shutdown", async () => {
   assert.strictEqual(extension, registerParleyExtension);
   const agentDir = mkdtempSync(path.join(tmpdir(), "pl-extension-entry-"));
@@ -26,9 +53,10 @@ test("the packaged actor entry is explicit, runtime-idempotent, and re-arms afte
   const required = createExtensionHarness("flightdeck-required");
   const failed = createExtensionHarness("failed-wrapper");
   const ambient = createExtensionHarness("ambient-package");
+  const conflicting = createExtensionHarness("conflicting-wrapper");
   // Pi creates one ExtensionAPI facade per extension path, all forwarding to
   // one synchronous runtime event bus.
-  failed.pi.events = ambient.pi.events = {
+  failed.pi.events = ambient.pi.events = conflicting.pi.events = {
     on: required.pi.events.on,
     emit: required.pi.events.emit,
   };
@@ -57,7 +85,8 @@ test("the packaged actor entry is explicit, runtime-idempotent, and re-arms afte
     await settleImmediateWork();
     assert.deepEqual(outboxResults, [], "a discarded registration leaves no shared outbox handler");
 
-    registerParleyExtension(required.pi as never);
+    const requiredResolver = (candidate: string | undefined) => `embedded:${candidate ?? "session"}`;
+    registerParleyExtension(required.pi as never, { resolvePresenceName: requiredResolver });
     assert.equal(registryReadyCount, 1);
     emitOutboxRequest("after-recovered-registration");
     await settleImmediateWork();
@@ -76,6 +105,11 @@ test("the packaged actor entry is explicit, runtime-idempotent, and re-arms afte
     assert.equal(required.tools.length, requiredToolCount);
     assert.equal(required.commands.size, requiredCommandCount);
     assert.equal(required.shortcuts.size, requiredShortcutCount);
+
+    assert.throws(() => registerParleyExtension(conflicting.pi as never, {
+      resolvePresenceName: (candidate) => `other:${candidate ?? "session"}`,
+    }), /already configured/);
+    assert.equal(conflicting.tools.length, 0, "a rejected configuration remains claimed instead of installing a duplicate actor");
 
     await required.emitLifecycle("session_shutdown", { reason: "reload" });
     registerParleyExtension(ambient.pi as never);

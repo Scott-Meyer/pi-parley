@@ -46,6 +46,22 @@ import { isValidSessionDescription, isValidSessionName, normalizeSelfProfileUpda
 
 type SessionInfoChangedEvent = Extract<AgentSessionEvent, { type: "session_info_changed" }>;
 
+export interface ParleyPresenceNameContext {
+  readonly kind: "session" | "advertised";
+}
+
+export interface ParleyExtensionOptions {
+  readonly resolvePresenceName?: (
+    candidate: string | undefined,
+    context: ParleyPresenceNameContext,
+  ) => string;
+}
+
+interface ParleyExtensionConfiguration {
+  resolvePresenceName?: ParleyExtensionOptions["resolvePresenceName"];
+  presenceNameResolutionStarted: boolean;
+}
+
 const PARLEY_TOOL_NAME = "parley";
 const SUBAGENT_CONTROL_PARLEY_EVENT = "subagent:control-parley";
 const SUBAGENT_RESULT_PARLEY_EVENT = "subagent:result-parley";
@@ -645,11 +661,33 @@ function resolveParleyPresenceName(sessionName: string | undefined, sessionId: s
   const normalizedSessionId = sessionId.startsWith("session-") ? sessionId.slice("session-".length) : sessionId;
   return `${DEFAULT_UNNAMED_SESSION_ALIAS_PREFIX}-${normalizedSessionId.slice(0, 18)}`;
 }
-function buildPresenceIdentity(pi: ExtensionAPI, sessionId: string): { name: string; runtimeFallbackAlias: boolean } {
-  const sessionName = pi.getSessionName();
+const SESSION_PRESENCE_NAME_CONTEXT: ParleyPresenceNameContext = Object.freeze({ kind: "session" });
+const ADVERTISED_PRESENCE_NAME_CONTEXT: ParleyPresenceNameContext = Object.freeze({ kind: "advertised" });
+function resolveEmbeddedPresenceName(
+  configuration: ParleyExtensionConfiguration,
+  candidate: string | undefined,
+  context: ParleyPresenceNameContext,
+): string | undefined {
+  const resolver = configuration.resolvePresenceName;
+  if (!resolver) return candidate;
+  configuration.presenceNameResolutionStarted = true;
+  const resolved = resolver(candidate, context);
+  if (typeof resolved !== "string" || !resolved.trim()) {
+    throw new Error(`resolvePresenceName must return a non-empty string for ${context.kind} identity`);
+  }
+  return resolved.trim();
+}
+function buildPresenceIdentity(
+  pi: ExtensionAPI,
+  sessionId: string,
+  configuration: ParleyExtensionConfiguration,
+): { name: string; runtimeFallbackAlias: boolean } {
+  const sessionName = pi.getSessionName()?.trim() || undefined;
+  configuration.presenceNameResolutionStarted = true;
+  const resolvedName = resolveEmbeddedPresenceName(configuration, sessionName, SESSION_PRESENCE_NAME_CONTEXT);
   return {
-    name: resolveParleyPresenceName(sessionName, sessionId),
-    runtimeFallbackAlias: !sessionName?.trim(),
+    name: resolveParleyPresenceName(resolvedName, sessionId),
+    runtimeFallbackAlias: resolvedName === undefined,
   };
 }
 function resolveConfiguredParleySessionId(piSessionId: string, config: ParleyConfig): string {
@@ -715,23 +753,73 @@ function formatInboundDeliveryMetadata(message: Message): string {
   return parts.join("\n");
 }
 const PARLEY_EXTENSION_RUNTIME_CLAIM_EVENT = "pi-parley:extension-runtime-claim:v1";
-type ParleyExtensionRuntimeClaim = { version: 1; claim(): void };
+type ConfigureParleyExtension = (options: ParleyExtensionOptions) => void;
+type ParleyExtensionRuntimeClaim = {
+  version: 1;
+  claim(configure?: ConfigureParleyExtension): void;
+};
+
+function normalizeParleyExtensionOptions(options: ParleyExtensionOptions | undefined): ParleyExtensionOptions {
+  if (options === undefined) return Object.freeze({});
+  if (!options || typeof options !== "object") {
+    throw new TypeError("Parley extension options must be an object");
+  }
+  if (options.resolvePresenceName !== undefined && typeof options.resolvePresenceName !== "function") {
+    throw new TypeError("resolvePresenceName must be a function");
+  }
+  return Object.freeze({
+    ...(options.resolvePresenceName ? { resolvePresenceName: options.resolvePresenceName } : {}),
+  });
+}
+
+function configureParleyExtension(
+  configuration: ParleyExtensionConfiguration,
+  options: ParleyExtensionOptions,
+): void {
+  const resolver = options.resolvePresenceName;
+  if (!resolver || resolver === configuration.resolvePresenceName) return;
+  if (configuration.resolvePresenceName) {
+    throw new Error("Parley presence-name resolution is already configured by another extension wrapper");
+  }
+  if (configuration.presenceNameResolutionStarted) {
+    throw new Error("Parley presence-name resolution cannot be configured after identity publication has started");
+  }
+  configuration.resolvePresenceName = resolver;
+}
 
 /** Register Parley once in one Pi extension runtime.
  *
  * Every ExtensionAPI created by the same Pi runtime shares its event bus. That
  * bus is the identity boundary, so an app-owned wrapper and an ambient package
  * cannot install duplicate clients, tools, or lifecycle handlers. */
-export function registerParleyExtension(pi: ExtensionAPI): void {
+export function registerParleyExtension(pi: ExtensionAPI, options?: ParleyExtensionOptions): void {
+  const normalizedOptions = normalizeParleyExtensionOptions(options);
   // Pi creates a different ExtensionAPI facade (and jiti may create a separate
   // module realm) for every extension path. Their facades still route through
   // one synchronous runtime event bus, which is the cross-copy identity and
-  // claim boundary.
+  // claim boundary. The owner also accepts configuration from a later wrapper
+  // before its first identity publication, so ambient-first load order does
+  // not bypass an embedding policy.
   let alreadyClaimed = false;
-  const probe: ParleyExtensionRuntimeClaim = { version: 1, claim: () => { alreadyClaimed = true; } };
+  let configureClaimedExtension: ConfigureParleyExtension | undefined;
+  const probe: ParleyExtensionRuntimeClaim = {
+    version: 1,
+    claim: (configure) => {
+      alreadyClaimed = true;
+      configureClaimedExtension = configure;
+    },
+  };
   pi.events.emit(PARLEY_EXTENSION_RUNTIME_CLAIM_EVENT, probe);
-  if (alreadyClaimed) return;
+  if (alreadyClaimed) {
+    if (normalizedOptions.resolvePresenceName && !configureClaimedExtension) {
+      throw new Error("The active Parley extension does not support presence-name configuration");
+    }
+    configureClaimedExtension?.(normalizedOptions);
+    return;
+  }
 
+  const configuration: ParleyExtensionConfiguration = { presenceNameResolutionStarted: false };
+  configureParleyExtension(configuration, normalizedOptions);
   // Claim before registering tools/handlers, and release it if Parley's own
   // registration fails. A wrapper must call this as its final throwing step:
   // older Pi hosts do not discard event subscriptions if the wrapper throws
@@ -739,11 +827,18 @@ export function registerParleyExtension(pi: ExtensionAPI): void {
   const releaseRuntimeClaim = pi.events.on(PARLEY_EXTENSION_RUNTIME_CLAIM_EVENT, (payload) => {
     if (!payload || typeof payload !== "object") return;
     const candidate = payload as Partial<ParleyExtensionRuntimeClaim>;
-    if (candidate.version === 1 && typeof candidate.claim === "function") candidate.claim();
+    if (candidate.version !== 1 || typeof candidate.claim !== "function") return;
+    // Claim inside the event listener, but run fallible configuration only in
+    // the caller after emit returns. Real Pi event buses log and swallow
+    // listener errors; throwing before claim could otherwise install a second
+    // actor after a conflicting or late configuration request.
+    candidate.claim((claimedOptions) => {
+      configureParleyExtension(configuration, normalizeParleyExtensionOptions(claimedOptions));
+    });
   });
   const registrationRollback = [releaseRuntimeClaim];
   try {
-    installParleyExtension(pi, releaseRuntimeClaim, (cleanup) => registrationRollback.push(cleanup));
+    installParleyExtension(pi, configuration, releaseRuntimeClaim, (cleanup) => registrationRollback.push(cleanup));
   } catch (error) {
     for (const cleanup of registrationRollback.reverse()) {
       try { cleanup(); } catch { /* Preserve the registration failure. */ }
@@ -754,6 +849,7 @@ export function registerParleyExtension(pi: ExtensionAPI): void {
 
 function installParleyExtension(
   pi: ExtensionAPI,
+  configuration: ParleyExtensionConfiguration,
   releaseRuntimeClaim: () => void,
   retainRegistrationCleanup: (cleanup: () => void) => void,
 ): void {
@@ -1121,7 +1217,14 @@ function installParleyExtension(
       const currentName = pi.getSessionName()?.trim() || undefined;
       if (currentName === observedSessionName) return;
       observedSessionName = currentName;
-      syncPresenceIdentity(currentSessionId);
+      try {
+        syncPresenceIdentity(currentSessionId);
+      } catch (error) {
+        // Older hosts expose no name-change event to extensions. Never fall
+        // back to publishing the unqualified candidate when embedding policy
+        // rejects the compatibility-polled value.
+        console.error(`Parley presence name update failed: ${getErrorMessage(error)}`);
+      }
     }, 1_000);
     sessionNameCompatibilityTimer.unref?.();
   }
@@ -1266,7 +1369,7 @@ function installParleyExtension(
       throw new Error("Parley runtime not initialized");
     }
 
-    const identity = buildPresenceIdentity(pi, currentParleySessionId ?? currentSessionId);
+    const identity = buildPresenceIdentity(pi, currentParleySessionId ?? currentSessionId, configuration);
     const tmuxPane = currentTmuxPane();
     return {
       ...identity,
@@ -1342,12 +1445,13 @@ function installParleyExtension(
 
   function syncPresenceIdentity(sessionId: string): void {
     if (!getLiveContext()) return;
-    const identity = buildPresenceIdentity(pi, currentParleySessionId ?? sessionId);
+    const canonicalSessionName = pi.getSessionName()?.trim() || undefined;
+    const identity = buildPresenceIdentity(pi, currentParleySessionId ?? sessionId, configuration);
     if (
       profileManagedName
-      && !identity.runtimeFallbackAlias
-      && identity.name !== profileManagedName
-      && identity.name !== profileNameMutationTarget
+      && canonicalSessionName
+      && canonicalSessionName !== profileManagedName
+      && canonicalSessionName !== profileNameMutationTarget
     ) {
       profileManagedName = undefined;
       profileOwnershipRevocationPending = true;
@@ -1582,7 +1686,11 @@ function installParleyExtension(
     addTarget(currentParleySessionId);
     addTarget(activeClient?.sessionId);
     addTarget(pi.getSessionName());
-    if (currentSessionId) addTarget(buildPresenceIdentity(pi, currentParleySessionId ?? currentSessionId).name);
+    // Matching must not invoke embedding policy from a detached relay. Use the
+    // last identity admitted to the broker; before connection, IDs and the
+    // canonical host name above remain available and normal resolution can
+    // establish the broker-owned target.
+    addTarget(lastPresenceRequestedName);
     return Boolean(resolvedTo && activeClient?.sessionId && resolvedTo === activeClient.sessionId)
       || targets.has(to.trim().toLowerCase());
   }
@@ -2198,6 +2306,10 @@ function installParleyExtension(
         if (client === nextClient) {
           client = null;
         }
+        // A policy failure can occur after the broker accepted registration
+        // but before the live identity replay completes. Join that attempted
+        // client so its registration and heartbeat cannot outlive ownership.
+        await nextClient.disconnect().catch(() => undefined);
         retryAfterFailure = getLiveContext(contextAtStart, generationAtStart) !== null;
         throw toError(error);
       } finally {
@@ -2501,6 +2613,13 @@ function installParleyExtension(
     if (deferredInboundMessages.size || deferredInboundControls.size) scheduleInboundRetry();
   }
   function startSessionRuntime(ctx: ExtensionContext): void {
+    const nextSessionId = ctx.sessionManager.getSessionId();
+    const nextParleySessionId = resolveConfiguredParleySessionId(nextSessionId, config);
+    // Resolve policy synchronously at the lifecycle boundary. An invalid or
+    // throwing embedding policy fails session startup before timers, sockets,
+    // or an unqualified broker registration can begin.
+    buildPresenceIdentity(pi, nextParleySessionId, configuration);
+
     const previousClient = client;
     failPendingOutboxRequests(runtimeGeneration, "session_ended", "Session replaced");
     shuttingDown = false;
@@ -2522,8 +2641,8 @@ function installParleyExtension(
       void previousClient.disconnect().catch(() => undefined);
     }
     runtimeContext = ctx;
-    currentSessionId = ctx.sessionManager.getSessionId();
-    currentParleySessionId = resolveConfiguredParleySessionId(currentSessionId, config);
+    currentSessionId = nextSessionId;
+    currentParleySessionId = nextParleySessionId;
     publishParleySessionId(currentParleySessionId);
     currentModel = ctx.model?.id ?? "unknown";
     sessionStartedAt = Date.now();
@@ -2847,7 +2966,7 @@ function installParleyExtension(
     currentModel = event.model.id;
     if (client) {
       client.updatePresence({
-        ...buildPresenceIdentity(pi, currentParleySessionId ?? ctx.sessionManager.getSessionId()),
+        ...buildPresenceIdentity(pi, currentParleySessionId ?? ctx.sessionManager.getSessionId(), configuration),
         model: event.model.id,
         status: currentStatus(),
       });
@@ -3249,6 +3368,16 @@ function installParleyExtension(
     const currentName = pi.getSessionName()?.trim();
     const requestedName = normalized.profile.name;
     const nameChanges = requestedName !== undefined && currentName !== requestedName;
+    if (nameChanges && requestedName !== undefined) {
+      try {
+        // Validate embedding policy before persisting or mutating the host's
+        // canonical session name. Publication resolves it again at the actual
+        // broker boundary.
+        resolveEmbeddedPresenceName(configuration, requestedName, SESSION_PRESENCE_NAME_CONTEXT);
+      } catch (error) {
+        return `Unable to resolve profile name: ${getErrorMessage(error)}`;
+      }
+    }
     if (requestedName !== undefined) {
       const effectiveSession = client?.getSelfSession();
       if (
@@ -3514,11 +3643,20 @@ Receipts include sender/recipient identity, exact message IDs, delivery state, a
         };
       }
 
-      syncPresenceIdentity(ctx.sessionManager.getSessionId());
-      const requestedPresenceName = buildPresenceIdentity(
-        pi,
-        currentParleySessionId ?? ctx.sessionManager.getSessionId(),
-      ).name;
+      let requestedPresenceName: string;
+      try {
+        syncPresenceIdentity(ctx.sessionManager.getSessionId());
+        requestedPresenceName = buildPresenceIdentity(
+          pi,
+          currentParleySessionId ?? ctx.sessionManager.getSessionId(),
+          configuration,
+        ).name;
+      } catch (error) {
+        return {
+          content: [{ type: "text", text: `Action ${params.action} was not performed. Presence name resolution failed: ${getErrorMessage(error)}` }],
+          details: { error: true },
+        };
+      }
       const selfProjection = connectedClient.getSelfSession();
       const projectionMayChange = currentAdvertisedName === undefined
         && (selfProjection === undefined || selfProjection.name !== requestedPresenceName);
@@ -3591,7 +3729,14 @@ Receipts include sender/recipient identity, exact message IDs, delivery state, a
           const metadata = readChildOrchestratorMetadata();
           let result;
           try {
-            result = await connectedClient.advertise(requestedName);
+            const resolvedName = resolveEmbeddedPresenceName(
+              configuration,
+              requestedName,
+              ADVERTISED_PRESENCE_NAME_CONTEXT,
+            );
+            // A configured resolver always returns a non-empty value; without
+            // one, requestedName was validated above.
+            result = await connectedClient.advertise(resolvedName ?? requestedName);
           } catch (error) {
             return {
               content: [{ type: "text", text: `Advertise failed: ${getErrorMessage(error)}` }],
@@ -3766,17 +3911,18 @@ Receipts include sender/recipient identity, exact message IDs, delivery state, a
             };
           }
           try {
+            resolveEmbeddedPresenceName(configuration, requestedName, SESSION_PRESENCE_NAME_CONTEXT);
             pi.setSessionName(requestedName);
+            // session_info_changed is the canonical identity contract; this
+            // direct push is an idempotent fast path so the broker roster shows
+            // the new name before the call returns.
+            syncPresenceIdentity(ctx.sessionManager.getSessionId());
           } catch (error) {
             return {
               content: [{ type: "text", text: `Unable to set the session name: ${getErrorMessage(error)}` }],
               details: { error: true },
             };
           }
-          // session_info_changed is the canonical identity contract; this
-          // direct push is an idempotent fast path so the broker roster shows
-          // the new name before the call returns.
-          syncPresenceIdentity(ctx.sessionManager.getSessionId());
           let publication = "";
           try { await connectedClient.listSessions({ timeoutMs: 1_000 }); }
           catch { publication = " Broker publication has not been confirmed."; }
@@ -4639,17 +4785,19 @@ Receipts include sender/recipient identity, exact message IDs, delivery state, a
 
     if (!getLiveContext(liveContext, commandGeneration)) return;
     try {
+      // Resolve before mutating Pi's canonical name so an embedding-policy
+      // failure rejects /alias rather than leaving a raw name awaiting sync.
+      resolveEmbeddedPresenceName(configuration, alias, SESSION_PRESENCE_NAME_CONTEXT);
       pi.setSessionName(alias);
+      // session_info_changed is the canonical identity contract where the host
+      // forwards it to extensions. Keep this direct push as an idempotent fast
+      // path so /alias has completed broker presence synchronization before the
+      // command reports success.
+      syncPresenceIdentity(liveContext.sessionManager.getSessionId());
     } catch (error) {
       notifyAliasCommand(liveContext, `Unable to set session alias: ${getErrorMessage(error)}`, "error", commandGeneration);
       return;
     }
-
-    // session_info_changed is the canonical identity contract where the host
-    // forwards it to extensions. Keep this direct push as an idempotent fast
-    // path so /alias has completed broker presence synchronization before the
-    // command reports success.
-    syncPresenceIdentity(liveContext.sessionManager.getSessionId());
     notifyAliasCommand(liveContext, `Session alias set: ${alias}`, "info", commandGeneration);
   }
 

@@ -2868,22 +2868,147 @@ test("sessions publish automatic lifecycle status", { concurrency: false }, asyn
   }
 });
 
+test("embedded presence-name policy covers ambient-first session publication, old-host rename fallback, reconnect, advertise, and list", { concurrency: false }, async () => {
+  const { orchestrator, cleanup } = await setupClients();
+  const ambient = createExtensionHarness("tab", { hasUI: true, sessionId: "presence-policy-session" });
+  const required = createExtensionHarness("wrapper-facade", { hasUI: true, sessionId: "unused-wrapper-session" });
+  required.pi.events = {
+    on: ambient.pi.events.on,
+    emit: ambient.pi.events.emit,
+  };
+  const resolutions: Array<{ candidate: string | undefined; kind: "session" | "advertised" }> = [];
+
+  try {
+    await withChildOrchestratorEnv({
+      orchestratorTarget: "orchestrator",
+      orchestratorSessionId: orchestrator.sessionId ?? undefined,
+      runId: "presence-policy-run",
+      agent: "reviewer",
+      index: "0",
+    }, async () => {
+      const { registerParleyExtension } = await import("./extension.ts");
+      // Model the ambient physical copy loading before the required app wrapper.
+      registerParleyExtension(ambient.pi as never);
+      registerParleyExtension(required.pi as never, {
+        resolvePresenceName(candidate, context) {
+          resolutions.push({ candidate, kind: context.kind });
+          if (context.kind === "advertised" && candidate === "rejected") {
+            throw new Error("advertised identity rejected by embedding policy");
+          }
+          return context.kind === "advertised"
+            ? `computer:workspace:tab:${candidate ?? "child"}`
+            : `computer:workspace:${candidate ?? "tab"}`;
+        },
+      });
+      assert.equal(required.tools.length, 0, "the configured wrapper must reuse the ambient-owned actor");
+
+      await ambient.emitLifecycle("session_start");
+      await waitForSessionByName(orchestrator, "computer:workspace:tab");
+
+      // Upstream Pi 0.73.1 does not deliver session_info_changed through the
+      // extension API. Mutating only the host getter exercises the polling path.
+      ambient.pi.setSessionName("compat-renamed");
+      await waitForSessionByName(orchestrator, "computer:workspace:compat-renamed");
+      assert.ok(resolutions.some((entry) => entry.kind === "session" && entry.candidate === "compat-renamed"));
+
+      const aliasCommand = ambient.commands.get("alias");
+      assert.ok(aliasCommand);
+      await aliasCommand("alias-renamed", ambient.ctx);
+      await waitForSessionByName(orchestrator, "computer:workspace:alias-renamed");
+
+      const parleyTool = ambient.tools.find((tool) => tool.name === "parley");
+      assert.ok(parleyTool);
+      const renamed = await parleyTool.execute("presence-policy-rename", {
+        action: "rename",
+        name: "tool-renamed",
+      }, new AbortController().signal, undefined, ambient.ctx);
+      assert.match(renamed.content[0]?.text ?? "", /Session name set to "tool-renamed"/);
+      await waitForSessionByName(orchestrator, "computer:workspace:tool-renamed");
+
+      await ambient.emitLifecycle("session_shutdown", { reason: "reload" });
+      await ambient.emitLifecycle("session_start");
+      await waitForSessionByName(orchestrator, "computer:workspace:tool-renamed");
+      const rejected = await parleyTool.execute("presence-policy-advertise-rejected", {
+        action: "advertise",
+        name: "rejected",
+      }, new AbortController().signal, undefined, ambient.ctx);
+      assert.equal(rejected.details?.error, true);
+      assert.match(rejected.content[0]?.text ?? "", /advertised identity rejected by embedding policy/);
+      assert.equal((await orchestrator.listSessions()).some((session) => session.name === "rejected"), false);
+
+      const advertised = await parleyTool.execute("presence-policy-advertise", {
+        action: "advertise",
+        name: "child",
+      }, new AbortController().signal, undefined, ambient.ctx);
+      assert.match(advertised.content[0]?.text ?? "", /Advertised as "computer:workspace:tab:child"/);
+      await waitForSessionByName(orchestrator, "computer:workspace:tab:child");
+
+      const listed = await parleyTool.execute("presence-policy-list", {
+        action: "list",
+      }, new AbortController().signal, undefined, ambient.ctx);
+      assert.match(listed.content[0]?.text ?? "", /computer:workspace:tab:child/);
+      assert.ok(resolutions.some((entry) => entry.kind === "advertised" && entry.candidate === "child"));
+    });
+  } finally {
+    await ambient.emitLifecycle("session_shutdown");
+    await cleanup();
+  }
+});
+
+test("resolved wire names do not revoke canonical profile-name ownership", { concurrency: false }, async () => {
+  const { planner, cleanup } = await setupClients();
+  const harness = createExtensionHarness("", { hasUI: true, sessionId: "resolved-profile-session" });
+
+  try {
+    const { registerParleyExtension } = await import("./extension.ts");
+    registerParleyExtension(harness.pi as never, {
+      resolvePresenceName(candidate, context) {
+        assert.equal(context.kind, "session");
+        return `computer:workspace:${candidate ?? "tab"}`;
+      },
+    });
+    await harness.emitLifecycle("session_start");
+    const parleyTool = harness.tools.find((tool) => tool.name === "parley");
+    assert.ok(parleyTool);
+
+    const first = await parleyTool.execute("resolved-profile-first", {
+      action: "status",
+      profile: { name: "first-child" },
+    }, new AbortController().signal, undefined, harness.ctx);
+    assert.notEqual(first.details?.error, true);
+    await waitForSessionByName(planner, "computer:workspace:first-child");
+
+    const second = await parleyTool.execute("resolved-profile-second", {
+      action: "status",
+      profile: { name: "second-child" },
+    }, new AbortController().signal, undefined, harness.ctx);
+    assert.notEqual(second.details?.error, true);
+    assert.equal(harness.pi.getSessionName(), "second-child");
+    await waitForSessionByName(planner, "computer:workspace:second-child");
+  } finally {
+    await harness.emitLifecycle("session_shutdown");
+    await cleanup();
+  }
+});
+
 test("session_info_changed propagates /name changes without other activity", { concurrency: false }, async () => {
   const { planner, cleanup } = await setupClients();
   let sessionName = "idle-name-before";
   const harness = createExtensionHarness(() => sessionName, { hasUI: true });
 
   try {
-    const { default: piParleyExtension } = await import("./index.ts");
-    piParleyExtension(harness.pi as never);
+    const { registerParleyExtension } = await import("./extension.ts");
+    registerParleyExtension(harness.pi as never, {
+      resolvePresenceName: (candidate) => `event-policy:${candidate ?? "session"}`,
+    });
     await harness.emitLifecycle("session_start");
-    await waitForSessionByName(planner, "idle-name-before");
+    await waitForSessionByName(planner, "event-policy:idle-name-before");
     sessionName = "idle-name-after";
     await harness.emitLifecycle("session_info_changed", {
       type: "session_info_changed",
       name: sessionName,
     });
-    await waitForSessionByName(planner, "idle-name-after");
+    await waitForSessionByName(planner, "event-policy:idle-name-after");
   } finally {
     await harness.emitLifecycle("session_shutdown");
     await cleanup();
@@ -3310,6 +3435,56 @@ test("name changes during registration are replayed after the broker ACK", { con
     await waitForSessionByName(planner, "handshake-name-after");
   } finally {
     ParleyClient.prototype.connect = originalConnect;
+    releaseConnect();
+    await harness.emitLifecycle("session_shutdown");
+    await cleanup();
+  }
+});
+
+test("a rejected handshake-time name replay disconnects the accepted client without leaking registration", { concurrency: false }, async () => {
+  const { planner, cleanup } = await setupClients();
+  let sessionName = "before";
+  const harness = createExtensionHarness(() => sessionName, {
+    hasUI: true,
+    sessionId: "policy-handshake-session",
+  });
+  const originalConnect = ParleyClient.prototype.connect;
+  const originalDisconnect = ParleyClient.prototype.disconnect;
+  let connectEntered!: () => void;
+  const entered = new Promise<void>((resolve) => { connectEntered = resolve; });
+  let releaseConnect!: () => void;
+  const mayConnect = new Promise<void>((resolve) => { releaseConnect = resolve; });
+  let attemptDisconnected!: () => void;
+  const disconnected = new Promise<void>((resolve) => { attemptDisconnected = resolve; });
+
+  ParleyClient.prototype.connect = function (session, sessionId) {
+    connectEntered();
+    return mayConnect.then(() => originalConnect.call(this, session, sessionId));
+  };
+  ParleyClient.prototype.disconnect = function () {
+    if (this.sessionId === "policy-handshake-session") attemptDisconnected();
+    return originalDisconnect.call(this);
+  };
+
+  try {
+    const { registerParleyExtension } = await import("./extension.ts");
+    registerParleyExtension(harness.pi as never, {
+      resolvePresenceName(candidate) {
+        if (candidate === "rejected") throw new Error("rejected during handshake replay");
+        return `policy:${candidate ?? "session"}`;
+      },
+    });
+    await harness.emitLifecycle("session_start");
+    await entered;
+    sessionName = "rejected";
+    releaseConnect();
+
+    await disconnected;
+    await waitForNoSessionId(planner, "policy-handshake-session");
+    assert.equal((await planner.listSessions()).some((session) => session.name === "rejected"), false);
+  } finally {
+    ParleyClient.prototype.connect = originalConnect;
+    ParleyClient.prototype.disconnect = originalDisconnect;
     releaseConnect();
     await harness.emitLifecycle("session_shutdown");
     await cleanup();

@@ -31,7 +31,7 @@ async function until<T>(read: () => T | undefined | Promise<T | undefined>): Pro
 }
 async function startBroker(dir: string): Promise<ChildProcess> {
   const child = spawn(process.execPath, [getTsxCliPath(), path.join(process.cwd(), "broker/broker.ts")], {
-    env: { ...process.env, PI_CODING_AGENT_DIR: dir }, stdio: ["ignore", "pipe", "pipe"],
+    env: { ...process.env, PI_CODING_AGENT_DIR: dir, PI_PARLEY_TRANSPORT: "socket" }, stdio: ["ignore", "pipe", "pipe"],
   });
   let output = "";
   child.stdout!.on("data", chunk => { output += String(chunk); });
@@ -180,7 +180,7 @@ async function fixture(legacy: boolean | "send-only-exact" = false, clientFaults
     const originalScope = process.env.PI_PARLEY_SCOPE_ID;
     const originalTransport = process.env.PI_PARLEY_TRANSPORT;
     process.env.PI_CODING_AGENT_DIR = side === 0 && clientProxy ? clientDir : dirs[side];
-    if (side === 0 && clientProxy) process.env.PI_PARLEY_TRANSPORT = "tcp";
+    process.env.PI_PARLEY_TRANSPORT = side === 0 && clientProxy ? "tcp" : "socket";
     if (scope === undefined) delete process.env.PI_PARLEY_SCOPE_ID; else process.env.PI_PARLEY_SCOPE_ID = scope;
     const client = new ParleyClient();
     clients.push(client);
@@ -362,7 +362,11 @@ test("conversation delivery rejects replacement of either pinned endpoint, inclu
     b = await f.connect(1, "b");
     const replacementReply = await b.prepareConversation(ra);
     assert.equal((await b.sendToSession(replacementReply.recipient, { messageId: replacementReply.messageId, text: "replacement cannot answer", replyTo: third.messageId })).code, "E_REPLY_TARGET");
-    const fourth = await a.prepareConversation(await f.remote(a, "b"));
+    const replacementB = await until(async () => {
+      const row = await f.remote(a, "b");
+      return row.endpointEpoch !== third.recipient.endpointEpoch ? row : undefined;
+    });
+    const fourth = await a.prepareConversation(replacementB);
     assert.equal((await a.sendToSession(fourth.recipient, { messageId: fourth.messageId, text: "another live ask", expectsReply: true })).delivered, true);
     await a.disconnect();
     a = await f.connect(0, "a");

@@ -287,11 +287,19 @@ import { registerParleyExtension } from "pi-parley/extension";
 
 export default function applicationExtension(pi: ExtensionAPI) {
   registerApplicationStatus(pi);
-  registerParleyExtension(pi);
+  registerParleyExtension(pi, {
+    resolvePresenceName(candidate, context) {
+      return context.kind === "advertised"
+        ? `application:child:${candidate ?? "child"}`
+        : `application:${candidate ?? "session"}`;
+    },
+  });
 }
 ```
 
-Call `registerParleyExtension()` once as the wrapper factory's final potentially throwing operation, not from `session_start`, and load the required wrapper before optional user packages. Register the application's own resources first and do not throw after Parley returns: older supported Pi hosts do not retract event subscriptions when an outer extension factory later fails. Registration is idempotent across physical copies that implement this v1 actor entrypoint in one Pi runtime; shutdown releases that runtime claim so reload and session replacement bind fresh handlers. An older ambient pi-parley release cannot participate in the claim protocol and must be updated or excluded before an application forces its bundled actor. The factory starts no process, socket, watcher, or timer. Session-scoped work starts from lifecycle events or the first operation and is joined by Parley's `session_shutdown` handler; the wrapper owns no Parley teardown.
+The optional synchronous `resolvePresenceName(candidate, context)` policy controls every broker-visible name while leaving Parley unaware of the application's naming scheme. `candidate` is the canonical Pi session name or `undefined`; `context.kind` is `"session"` for initial connection, reconnect, compatibility-polled host renames, `/alias`, self rename, and ordinary presence updates, or `"advertised"` for the explicit `advertise` name. The trimmed nonempty result becomes the broker/client name. Throws, non-string results, and empty results fail the triggering startup or operation and never fall back to publishing the raw candidate. Keep the resolver deterministic and side-effect-free.
+
+Call `registerParleyExtension()` once as the wrapper factory's final potentially throwing operation, not from `session_start`, and load the required wrapper before optional user packages. Register the application's own resources first and do not throw after Parley returns: older supported Pi hosts do not retract event subscriptions when an outer extension factory later fails. Registration is idempotent across physical copies that implement this v1 actor entrypoint in one Pi runtime; an ambient-first v1 owner accepts a later wrapper's resolver before its first identity publication, while conflicting or late configuration fails closed. Shutdown releases that runtime claim so reload and session replacement bind fresh handlers. An older ambient pi-parley release cannot participate in the claim protocol and must be updated or excluded before an application forces its bundled actor. The factory starts no process, socket, watcher, or timer. Session-scoped work starts from lifecycle events or the first operation and is joined by Parley's `session_shutdown` handler; the wrapper owns no Parley teardown.
 
 Install the bundled tarball as the wrapper's private ordinary dependency rather than as another Pi package. The complete tarball and its production dependencies are required because the actor uses Parley's TypeScript extension, UI, client, broker, and spawn modules. Pi supplies the peer extension-runtime, TUI, and TypeBox modules. The application must set generic routing such as `PI_PARLEY_SCOPE_ID` before Pi loads extensions. A temporary FlightDeck launch-context bridge remains during rollout of that generic variable and version-matched remote actor enrollment; it is compatibility behavior, not part of the public embedding contract.
 

@@ -6,6 +6,7 @@
 
 - A compiled `pi-parley/federation` facade for inspecting and attaching exact brokers from plain Node hosts.
 - An explicit, runtime-idempotent `pi-parley/extension` entrypoint for application-owned Pi actor wrappers.
+- A synchronous `resolvePresenceName` embedding policy covering session identity, compatibility renames, reconnects, and explicit advertised identity without publishing an unqualified fallback.
 
 ### Changed
 

@@ -3,7 +3,8 @@ import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, write
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
+import { once } from "node:events";
 
 const repo = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 // Keep actual Unix socket paths within macOS's short sockaddr_un limit.
@@ -52,6 +53,91 @@ function run(command, args, options = {}) {
     ].filter(Boolean).join("\n"));
   }
   return result;
+}
+
+async function startRpc(command, args, options = {}) {
+  const child = spawn(command, args, { ...options, stdio: ["pipe", "pipe", "pipe"] });
+  const exited = new Promise((resolveExit) => child.once("exit", (code, signal) => resolveExit({ code, signal })));
+  const records = [];
+  const pending = new Map();
+  let stdoutBuffer = "";
+  let stderr = "";
+  child.stderr.setEncoding("utf8");
+  child.stderr.on("data", (chunk) => { stderr = (stderr + chunk).slice(-20_000); });
+  child.stdout.setEncoding("utf8");
+  child.stdout.on("data", (chunk) => {
+    stdoutBuffer += chunk;
+    for (;;) {
+      const newline = stdoutBuffer.indexOf("\n");
+      if (newline < 0) break;
+      const line = stdoutBuffer.slice(0, newline).trim();
+      stdoutBuffer = stdoutBuffer.slice(newline + 1);
+      if (!line) continue;
+      let record;
+      try { record = JSON.parse(line); }
+      catch { continue; }
+      records.push(record);
+      if (record.type === "response" && typeof record.id === "string") {
+        const waiter = pending.get(record.id);
+        if (waiter) {
+          pending.delete(record.id);
+          clearTimeout(waiter.timeout);
+          waiter.resolve(record);
+        }
+      }
+    }
+  });
+  child.on("exit", (code, signal) => {
+    const error = new Error(`RPC host exited before responding (${code ?? signal}): ${stderr}`);
+    for (const waiter of pending.values()) {
+      clearTimeout(waiter.timeout);
+      waiter.reject(error);
+    }
+    pending.clear();
+  });
+  let closePromise;
+  async function joinExit(graceMs) {
+    let timeout;
+    const result = await Promise.race([
+      exited,
+      new Promise((resolveTimeout) => { timeout = setTimeout(() => resolveTimeout(undefined), graceMs); }),
+    ]);
+    clearTimeout(timeout);
+    return result;
+  }
+  async function terminate() {
+    if (child.exitCode === null && child.signalCode === null) child.stdin.end();
+    let result = await joinExit(2_000);
+    if (!result && child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
+    result ??= await exited;
+    return result;
+  }
+  return {
+    records,
+    async send(message, timeoutMs = 15_000) {
+      if (child.exitCode !== null || child.signalCode !== null) {
+        throw new Error(`RPC host is not running: ${stderr}`);
+      }
+      const response = new Promise((resolve, reject) => {
+        const timeout = setTimeout(() => {
+          pending.delete(message.id);
+          reject(new Error(`RPC command ${message.id} timed out: ${stderr}`));
+        }, timeoutMs);
+        pending.set(message.id, { resolve, reject, timeout });
+      });
+      child.stdin.write(`${JSON.stringify(message)}\n`);
+      return response;
+    },
+    async close() {
+      closePromise ??= terminate();
+      const { code, signal } = await closePromise;
+      if (code !== 0) throw new Error(`RPC host exited with ${code ?? signal}: ${stderr}`);
+    },
+    async terminate() {
+      closePromise ??= terminate();
+      await closePromise;
+    },
+  };
 }
 
 try {
@@ -153,11 +239,22 @@ try {
     const extensionRoot = join(project, "node_modules", "pi-parley");
     const extensionManifest = JSON.parse(readFileSync(join(extensionRoot, "package.json"), "utf8"));
     assert.deepEqual(extensionManifest.dependencies, { "fs-native-extensions": "^1.5.1", tsx: "^4.23.13" });
-    const extensionPath = join(extensionRoot, "extension.ts");
     const wrapperPath = join(project, "flightdeck-wrapper.mjs");
+    const resolverTracePath = join(project, "presence-resolver.jsonl");
     writeFileSync(wrapperPath, [
+      'import { appendFileSync } from "node:fs";',
       'import { registerParleyExtension } from "pi-parley/extension";',
-      'export default function flightdeck(pi) { registerParleyExtension(pi); }',
+      `const tracePath = ${JSON.stringify(resolverTracePath)};`,
+      'export default function flightdeck(pi) {',
+      '  registerParleyExtension(pi, {',
+      '    resolvePresenceName(candidate, context) {',
+      '      appendFileSync(tracePath, JSON.stringify({ candidate, kind: context.kind }) + "\\n");',
+      '      return context.kind === "advertised"',
+      '        ? `embedded:advertised:${candidate ?? "child"}`',
+      '        : `embedded:${candidate ?? "session"}`;',
+      '    },',
+      '  });',
+      '}',
       '',
     ].join("\n"));
     const ambientExtensionRoot = join(project, "ambient-copy", "pi-parley");
@@ -170,12 +267,10 @@ try {
       import { spawnBrokerIfNeeded } from ${JSON.stringify(pathToFileURL(join(extensionRoot, "broker/spawn.ts")).href)};
       await spawnBrokerIfNeeded('npx', ['--no-install', 'tsx']);
     `], { cwd: project, timeout: 15000, env: { ...process.env, PI_CODING_AGENT_DIR: agentDir } });
-    const input = [
-      { id: "commands", type: "get_commands" },
-      { id: "alias", type: "prompt", message: `/alias ${host.label}-compatible` },
-      { id: "state", type: "get_state" },
-    ].map((command) => JSON.stringify(command)).join("\n") + "\n";
-    const pi = run(
+
+    // Load the physical ambient copy first. The required wrapper must configure
+    // that already-claimed actor across distinct Pi API facades and module realms.
+    const rpc = await startRpc(
       process.execPath,
       [
         join(hostPackage, hostManifest.bin.pi),
@@ -186,21 +281,47 @@ try {
         "--model", "gpt-4o-mini",
         "--api-key", "host-compat-smoke-only",
         "--no-extensions",
-        "-e", wrapperPath,
         "-e", ambientExtensionPath,
+        "-e", wrapperPath,
       ],
       {
         cwd: project,
-        input,
         env: { ...process.env, PI_CODING_AGENT_DIR: agentDir, PI_OFFLINE: "1" },
       },
     );
+    try {
+      const commands = await rpc.send({ id: "commands", type: "get_commands" });
+      const rename = await rpc.send({ id: "rename", type: "set_session_name", name: `${host.label}-compatible` });
+      // Upstream 0.73.1 reports set_session_name to RPC consumers but not
+      // ExtensionAPI.on(). Keep stdin open across the compatibility poll, then
+      // inspect the real broker.
+    await new Promise((resolveDelay) => setTimeout(resolveDelay, 1_300));
+    const expectedPresenceName = `embedded:${host.label}-compatible`;
+    const observerCheck = `
+      import assert from 'node:assert/strict';
+      import { ParleyClient } from ${JSON.stringify(pathToFileURL(join(extensionRoot, "broker/client.ts")).href)};
+      const client = new ParleyClient();
+      try {
+        await client.connect({ name: 'packed-observer', cwd: process.cwd(), model: 'packed-smoke', pid: process.pid, startedAt: Date.now(), lastActivity: Date.now() }, ${JSON.stringify(`${host.label}-packed-observer`)});
+        const deadline = Date.now() + 5000;
+        let sessions = [];
+        while (Date.now() < deadline) {
+          sessions = await client.listSessions();
+          if (sessions.some(session => session.name === ${JSON.stringify(expectedPresenceName)})) break;
+          await new Promise(resolve => setTimeout(resolve, 25));
+        }
+        assert.ok(sessions.some(session => session.name === ${JSON.stringify(expectedPresenceName)}), JSON.stringify(sessions.map(session => session.name)));
+      } finally { await client.disconnect(); }
+    `;
+    run(process.execPath, ["--import", "tsx", "--input-type=module", "-e", observerCheck], {
+      cwd: project,
+      timeout: 15000,
+      env: { ...process.env, PI_CODING_AGENT_DIR: agentDir },
+    });
+    const state = await rpc.send({ id: "state", type: "get_state" });
+    await rpc.close();
 
-    const records = pi.stdout.trim().split("\n").filter(Boolean).map((line) => JSON.parse(line));
-    const commands = records.find((record) => record.type === "response" && record.id === "commands");
-    const alias = records.find((record) => record.type === "response" && record.id === "alias");
-    const state = records.find((record) => record.type === "response" && record.id === "state");
-    const nameEvent = records.find(
+    const nameEvent = rpc.records.find(
       (record) => record.type === "session_info_changed" && record.name === `${host.label}-compatible`,
     );
     const availableCommands = commands?.data?.commands ?? commands?.data ?? [];
@@ -208,10 +329,15 @@ try {
     if (!commands?.success || parleyCommands.length !== 1) {
       throw new Error(`${host.label}: bundled wrapper and ambient physical copy did not deduplicate Parley registration`);
     }
-    if (!alias?.success || !nameEvent || !state?.success || state.data?.sessionName !== `${host.label}-compatible`) {
-      throw new Error(`${host.label}: extension command or host session-name event failed`);
+    const resolverCalls = readFileSync(resolverTracePath, "utf8").trim().split("\n").filter(Boolean).map((line) => JSON.parse(line));
+    if (!rename?.success || !nameEvent || !state?.success || state.data?.sessionName !== `${host.label}-compatible`
+      || !resolverCalls.some((call) => call.kind === "session" && call.candidate === `${host.label}-compatible`)) {
+      throw new Error(`${host.label}: real host rename did not publish through packed presence-name policy`);
     }
-    console.log(`✓ ${host.label} ${hostManifest.version}: extension loaded without the other Pi distribution`);
+      console.log(`✓ ${host.label} ${hostManifest.version}: packed ambient-first actor resolved real host rename presence`);
+    } finally {
+      await rpc.terminate();
+    }
   }
 } finally {
   const brokerPids = agentDirs.flatMap((agentDir) => {
