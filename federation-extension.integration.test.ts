@@ -51,13 +51,21 @@ async function stopBroker(child: ChildProcess): Promise<void> {
   child.kill("SIGTERM");
   await exited;
 }
-async function inAgentDir<T>(dir: string, work: () => Promise<T>): Promise<T> {
+async function inAgentDir<T>(
+  dir: string,
+  work: () => Promise<T>,
+  transport?: "socket" | "tcp",
+): Promise<T> {
   const previous = process.env.PI_CODING_AGENT_DIR;
+  const previousTransport = process.env.PI_PARLEY_TRANSPORT;
   process.env.PI_CODING_AGENT_DIR = dir;
+  if (transport) process.env.PI_PARLEY_TRANSPORT = transport;
   try { return await work(); }
   finally {
     if (previous === undefined) delete process.env.PI_CODING_AGENT_DIR;
     else process.env.PI_CODING_AGENT_DIR = previous;
+    if (previousTransport === undefined) delete process.env.PI_PARLEY_TRANSPORT;
+    else process.env.PI_PARLEY_TRANSPORT = previousTransport;
   }
 }
 function caller(harness: ReturnType<typeof createExtensionHarness>) {
@@ -140,7 +148,7 @@ test("neutral registered provider delivers bidirectional extension asks, fast an
         } finally {
           for (const key of Object.keys(childMetadata)) delete process.env[key];
         }
-      });
+      }, "socket");
     }
     let acquisitions = 0;
     let faults: ReturnType<typeof lossyProvider> | undefined;
