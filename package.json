@@ -39,6 +39,7 @@
     "dist/**",
     "scripts/smoke-host-compat.mjs",
     "scripts/smoke-federation-package.mjs",
+    "scripts/broker-health.mjs",
     "broker/broker.ts",
     "broker/build.ts",
     "broker/client.ts",
