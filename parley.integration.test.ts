@@ -1044,7 +1044,7 @@ test("broker rejects unknown replyTo values instead of delivering forged replies
       replyTo: "not-a-pending-ask",
     });
     assert.equal(result.delivered, false);
-    assert.match(result.reason ?? "", /previous message/i);
+    assert.match(result.reason ?? "", /no thread for that message.*send a new message instead/i);
   } finally {
     await cleanup();
   }

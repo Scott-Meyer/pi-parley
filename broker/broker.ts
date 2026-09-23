@@ -82,6 +82,14 @@ const PORT_PATH = getBrokerPortFilePath(PARLEY_DIR);
 const PENDING_ASKS_DIR = join(PARLEY_DIR, "pending-asks");
 const BROKER_STATE_ID = randomUUID();
 const BROKER_BUILD = getBrokerBuildIdentity();
+const BROKER_STARTED_AT = new Date().toISOString();
+/** Threads live in broker memory, so a reply to a message this broker never saw
+ * usually means the broker restarted after that message was delivered. */
+function replyTargetReason(routeKnown: boolean): string {
+  return routeKnown
+    ? "Reply target does not match a previous message from this recipient"
+    : `This broker has no thread for that message. It started at ${BROKER_STARTED_AT}, and threads don't survive a broker restart; send a new message instead of a reply`;
+}
 const MAX_SESSIONS = 128;
 const MAX_UNREGISTERED_CONNECTIONS = 32;
 const REGISTRATION_TIMEOUT_MS = 1000;
@@ -1352,7 +1360,7 @@ class ParleyBroker {
         reject("Conversation preparation does not match these author and recipient incarnations", "E_CONVERSATION_TARGET"); return;
       }
       if (message.replyTo && !this.federationConversations.permitsReply(message.replyTo, endpoints.local, endpoints.remote)) {
-        reject("Reply does not reverse a recorded conversation edge at these endpoint incarnations", "E_REPLY_TARGET"); return;
+        reject(`No thread for that message between these sessions as they are now connected. A broker restart (this one started at ${BROKER_STARTED_AT}) or either session reconnecting ends earlier threads; send a new message instead of a reply`, "E_REPLY_TARGET"); return;
       }
       targetEndpointEpoch = endpoints.remote.endpointEpoch;
     }
@@ -1983,7 +1991,7 @@ class ParleyBroker {
             }
           }
           if (message.replyTo && (!replyRoute || replyRoute.to !== currentKey || replyRoute.from !== target.key)) {
-            this.writeDeliveryFailure(socket, message.id, "Reply target does not match a previous message from this recipient", "E_REPLY_TARGET");
+            this.writeDeliveryFailure(socket, message.id, replyTargetReason(Boolean(replyRoute)), "E_REPLY_TARGET");
             break;
           }
           const senderContact = contactKind === "direct" && this.supportsCompactionAwareness(fromSession)
@@ -2096,7 +2104,7 @@ class ParleyBroker {
             break;
           }
           if (message.replyTo && (!replyRoute || replyRoute.to !== currentKey || replyRoute.from !== disconnectedTarget.key)) {
-            this.writeDeliveryFailure(socket, message.id, "Reply target does not match a previous message from this recipient", "E_REPLY_TARGET");
+            this.writeDeliveryFailure(socket, message.id, replyTargetReason(Boolean(replyRoute)), "E_REPLY_TARGET");
             break;
           }
           if (message.expectsReply) {

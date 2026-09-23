@@ -35,7 +35,7 @@ export function formatDeliveryResult(result: SendResult, context: {
   if (result.reason) lines.push(`Reason: ${result.reason}`);
   if (result.code) lines.push(`Outcome code: ${result.code}`);
   if (result.code === "E_REPLY_TARGET") {
-    lines.push("The broker cannot authorize this thread. Its relationship may have expired or been lost on restart; the local message can still be retained.");
+    lines.push("Parley no longer knows that thread, usually because a broker restarted or a session reconnected after the original message. Send a new message instead of a reply; nothing was delivered.");
   }
   if (result.peerCompaction) {
     lines.push(formatPeerCompactionNotice(context.target, result.peerCompaction, recipient?.id, context.sessionName));

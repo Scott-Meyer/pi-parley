@@ -661,7 +661,10 @@ test("exact identities retain authorized offline mail and refuse all selector fa
     assert.equal(rebound.recipient?.id, replacement.sessionId, "existing unique same-name/cwd mail rebinding stays observable");
     await replacement.listSessions();
     assert.equal(replacementMessages.length, 1);
-    assert.equal((await sender.send(replacement.sessionId!, { text: "Forged thread", exactIdentity: true, replyTo: "unowned-question" })).code, "E_REPLY_TARGET");
+    const unknownThread = await sender.send(replacement.sessionId!, { text: "Forged thread", exactIdentity: true, replyTo: "unowned-question" });
+    assert.equal(unknownThread.code, "E_REPLY_TARGET");
+    assert.match(unknownThread.reason ?? "", /no thread for that message.*broker restart.*send a new message instead/i,
+      "a reply this broker has no thread for says why and what still works");
 
     // An expired or never-observed exact identity has no disconnected entry.
     // Neither an overlapping disconnected name nor prefix can stand in for it.
