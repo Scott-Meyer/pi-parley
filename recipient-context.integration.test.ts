@@ -270,7 +270,7 @@ test("replying to a persisted request before its first model boundary does not r
     const original = messages.find((item) => item.customType === "parley_message")!;
     assert.match(original.content, /Parley history/);
     assert.match(original.content, /Status: answered/);
-    assert.match(original.content, /Previously received/);
+    assert.match(original.content, /not a new delivery/);
     assert.match(original.content, /Review the rollout before launch/);
     assert.doesNotMatch(original.content, /Reply requested/);
     assert.match(text(await call(harness, { action: "pending" })), /No unresolved inbound asks/);
@@ -295,7 +295,7 @@ test("a withdrawal before the first model boundary gives persisted original text
     const original = messages.find((item) => item.customType === "parley_message")!;
     assert.match(original.content, /Parley history/);
     assert.match(original.content, /Status: withdrawn/);
-    assert.match(original.content, /Previously received/);
+    assert.match(original.content, /not a new delivery/);
     assert.doesNotMatch(original.content, /Previously delivered/);
     assert.match(original.content, /Start the superseded rollout/);
     assert.doesNotMatch(original.content, /Reply requested/);

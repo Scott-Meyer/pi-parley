@@ -2463,6 +2463,45 @@ test("extension outbox sends notify-only messages with trace and provenance", { 
   }
 });
 
+test("a message the person typed is labelled for its reader and arrives plain to older receivers", { concurrency: false }, async () => {
+  const { default: piParleyExtension } = await import("./index.ts");
+  const { planner, cleanup } = await setupClients();
+  const harness = createExtensionHarness("person-reader");
+  const { createMessageReader } = await import("./broker/framing.ts");
+  const legacy = await connectRawRegistered("legacy-reader-id", "legacy-reader");
+  const legacyFrames: Array<Record<string, unknown>> = [];
+  legacy.socket.on("data", createMessageReader((frame) => { legacyFrames.push(frame as Record<string, unknown>); }, () => undefined));
+
+  try {
+    piParleyExtension(harness.pi as never);
+    await harness.emitLifecycle("session_start");
+    const reader = await waitForSessionByName(planner, "person-reader");
+    const person = { type: "session_person" as const };
+
+    assert.equal((await planner.send(reader.id, { text: "Scott here: hold the deploy.", provenance: person })).delivered, true);
+    await waitForVisibleText(harness, "hold the deploy");
+    const shown = harness.sentMessages.find((entry) => entry.message.content?.includes("hold the deploy"))!;
+    assert.match(shown.message.content, /Written by the person at the sending session, not its agent/);
+
+    assert.equal((await planner.send(reader.id, { text: "Agent summary: Scott wants the deploy held." })).delivered, true);
+    await waitForVisibleText(harness, "Agent summary");
+    const relayed = harness.sentMessages.find((entry) => entry.message.content?.includes("Agent summary"))!;
+    assert.doesNotMatch(relayed.message.content, /Written by the person/);
+
+    const older = await planner.send("legacy-reader", { text: "Also for the older session.", provenance: person });
+    assert.equal(older.delivered, true);
+    const deadline = Date.now() + 3000;
+    while (!legacyFrames.some((frame) => frame.type === "message") && Date.now() < deadline) await new Promise((r) => setTimeout(r, 20));
+    const frame = legacyFrames.find((item) => item.type === "message") as { message: Message } | undefined;
+    assert.equal(frame?.message.content.text, "Also for the older session.");
+    assert.equal(frame?.message.provenance, undefined, "a receiver that never negotiated the label still gets the message");
+  } finally {
+    legacy.socket.destroy();
+    await harness.emitLifecycle("session_shutdown");
+    await cleanup();
+  }
+});
+
 test("extension outbox rejects duplicate request ids without duplicate delivery", { concurrency: false }, async () => {
   const { planner, cleanup } = await setupClients();
   const { default: piParleyExtension } = await import("./index.ts");

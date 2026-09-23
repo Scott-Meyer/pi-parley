@@ -82,6 +82,7 @@ test("compose overlay returns the contact token without acknowledging before the
         },
       }),
       acknowledgeSendContact: () => { acknowledged += 1; },
+      supportsFeature: () => false,
     } as any,
     (result) => { completed = result; },
   );

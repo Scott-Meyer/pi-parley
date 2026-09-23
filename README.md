@@ -71,6 +71,8 @@ Any parley action accepts an optional `profile` with `name` and/or `description`
 
 Messages carry the sender, the text, and related conversation context. Receipts include the message reference and observed delivery state. Endpoint acceptance, a colleague's answer, and completed work are different events. Unknown delivery may mean the message arrived but its acknowledgement did not.
 
+A message the person typed in the `/parley` composer is labelled as written by the person at the sending session, not its agent. The label is the sending session's own claim. It reaches local readers that understand it. Older local readers get the plain message, and remote peers currently receive text only.
+
 ### References
 
 Models, like people, work with names. Everything a model reads or types names a session by its name (`pi:parley`, `build-vm:parley`) and a message by a local number (`#12`). Canonical session and message IDs, including origin-qualified federation handles, stay on the wire and in result `details`, and parley translates in both directions.
@@ -354,6 +356,8 @@ await link.close();
 
 A `BrokerHostAccess` is rooted at one Pi agent directory. It offers bounded reads relative to that root and opens only exact host-local Unix sockets, named pipes, or loopback TCP endpoints requested by Parley. `createLocalBrokerAccess()` provides this capability for the current machine; remote-management applications can adapt their existing authenticated host streams. TCP state credentials never leave the facade in endpoints, handles, JSON, or errors.
 
+Authority is reachability of a broker's local endpoint. Opt-in TCP brokers require their state credential, but Unix sockets and named pipes rely only on OS permissions. Whatever can open one can register sessions and prepare peer links. A carrier should give the controller a path to the remote broker. It should not publish a broker's socket as a port other processes can reach.
+
 `inspectBroker()` returns a frozen, runtime-opaque handle containing the canonical Parley installation origin and an immutable live-scope snapshot. It owns no persistent stream. Inspection may mint the installation's first federation origin, so caller consent belongs before inspection. A TCP handle becomes stale after broker restart.
 
 `attachBrokers()` validates both handles and independently supplied scope mappings before opening either endpoint. It opens both streams concurrently under one deadline, aborts a sibling acquisition after failure, joins late streams, and transfers ownership to the brokers only after both opens succeed. It never rediscovers, retries, reconnects, or replays. Readiness means both brokers accepted the handshake. The returned attachment has a non-rejecting `completion` and idempotent `close()`; both join admitted writes and owned stream cleanup. Sanitized `BrokerInspectionError` and `BrokerAttachmentError` codes contain no provider diagnostics, paths, credentials, or raw frames.
@@ -440,6 +444,14 @@ Supported `config.json` keys include `stableId` for restart-stable addressing, `
 | **Persistence** | In Pi session history | Shared coordination files |
 
 Pi-messenger centers a shared room; pi-parley centers conversations with chosen recipients. Its broadcast is host-local and still visibility-filtered.
+
+## pi-parley vs Threadroom
+
+Parley is live conversation between working AI sessions. [Threadroom](https://github.com/Scott-Meyer/threadroom) is where an AI asks a person something and where discussions and decisions are kept after the sessions end. The two work well together without depending on each other.
+
+- A question for a person belongs in the person's question tool (Threadroom or `ask_user_question`), not in a Parley message to a session that happens to be near them.
+- If a Parley conversation produces something that should outlive the sessions in it, such as a decision, a discussion, or a work item, it belongs in Threadroom or the project's tracker. The Parley message can carry the link.
+- Parley retains message text in each session's history, but that is conversational context, not a shared record.
 
 ## File Structure
 

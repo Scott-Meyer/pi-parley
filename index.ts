@@ -761,8 +761,10 @@ function formatInboundDeliveryMetadata(message: Message, messageRef: (id: string
   if (message.replyTo) parts.push(`Reply to: ${messageRef(message.replyTo)}`);
   if (message.supersedes) parts.push(`Supersedes: ${messageRef(message.supersedes)}`);
   if (message.retryOf) parts.push(`Retry of: ${messageRef(message.retryOf)}`);
-  if (message.provenance) {
+  if (message.provenance?.type === "extension_outbox") {
     parts.push(`Via extension ${message.provenance.extensionName} (${message.provenance.extensionId}); request ${message.provenance.requestId}`);
+  } else if (message.provenance?.type === "session_person") {
+    parts.push("Written by the person at the sending session, not its agent (as reported by that session)");
   }
   // Transport timestamps remain in details. A long mailbox delay changes the meaning of the text.
   if (Date.now() - message.timestamp > 60_000) parts.push(`Originally sent: ${formatMessageTimestamp(message.timestamp)}`);
@@ -1303,7 +1305,7 @@ function installParleyExtension(
     const compaction = message.peerCompaction
       ? `\n\n${describeCompaction(references.current.sessionRef(from), message.peerCompaction, from.id)}` : "";
     const body = entry.bodyText ?? message.content.text + (message.content.attachments?.length ? formatAttachments(message.content.attachments) : "");
-    return presentForModel(`**Parley history — from ${references.current.sessionRef(from)}**${from.description ? ` — ${from.description}` : ""}\nReceived: ${formatMessageTimestamp(envelope.timestamp)}\nStatus: ${status}\nPreviously received context, not a new delivery or active conversation.${verbatim(entry.replyTopic ?? "")}\n\n${verbatim(body)}\n\n${formatInboundDeliveryMetadata(message, messageRef)}\nSession: ${from.cwd}${origin}${compaction}`, { from, message });
+    return presentForModel(`**Parley history — from ${references.current.sessionRef(from)}**${from.description ? ` — ${from.description}` : ""}\nReceived: ${formatMessageTimestamp(envelope.timestamp)}\nStatus: ${status}\nShown again from earlier in this conversation, not a new delivery; the status above is current.${verbatim(entry.replyTopic ?? "")}\n\n${verbatim(body)}\n\n${formatInboundDeliveryMetadata(message, messageRef)}\nSession: ${from.cwd}${origin}${compaction}`, { from, message });
   }
 
   function settleOutgoingReply(from: SessionInfo, message: Message): void {

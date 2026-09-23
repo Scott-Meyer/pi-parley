@@ -94,6 +94,7 @@ function isMessageProvenance(value: unknown): value is MessageProvenance {
   if (!isRecord(value)) {
     return false;
   }
+  if (value.type === "session_person") return Object.keys(value).length === 1;
   return value.type === "extension_outbox"
     && typeof value.extensionId === "string"
     && typeof value.extensionName === "string"

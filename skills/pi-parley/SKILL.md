@@ -9,6 +9,8 @@ description: |
 
 Parley connects Pi sessions so they can work together like colleagues. Each has its own conversation and working context; messages carry the information they share, not everything the sender knows.
 
+Parley is for live exchanges between working sessions. A question for a person goes through the person's question tool instead. Decisions, discussions, and work items that should outlast the sessions belong wherever the project keeps them, and a message can point there.
+
 `send` shares information. `ask` requests an answer and can wait for it or receive it later while work continues. `reply` communicates back to the colleague and answers a question when applicable. An update can remain an update even while a question is outstanding.
 
 Sessions are named by their names and messages by local numbers like `#12`; use them as shown, and parley keeps each attached to what it first named (a newcomer reusing a name you know appears as `name~2`). Messages and receipts carry these references, related questions, and delivery state. Acceptance by a session, an answer from a colleague, and completion of work are different events. Missing acknowledgements and withdrawn requests appear as context where they matter.

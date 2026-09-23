@@ -84,6 +84,7 @@ export class InlineMessageComponent implements Component {
         meta.push(`${count} attachment${count === 1 ? "" : "s"}`);
       }
       if (this.message.provenance?.type === "extension_outbox") meta.push(`Via ${this.message.provenance.extensionName}`);
+      if (this.message.provenance?.type === "session_person") meta.push("Written by the person there");
       if (this.message.replyTo && !this.message.expectsReply) meta.push(`Reply to ${replyToLabel}`);
       if (this.message.peerCompaction) meta.push("Sender compacted since prior direct contact");
       meta.push("Ctrl+O to expand");
@@ -136,6 +137,10 @@ export class InlineMessageComponent implements Component {
     if (this.message.provenance?.type === "extension_outbox") {
       lines.push(frameLine(""));
       lines.push(frameLine(this.theme.fg("dim", ` Via extension: ${this.message.provenance.extensionName}`)));
+    }
+    if (this.message.provenance?.type === "session_person") {
+      lines.push(frameLine(""));
+      lines.push(frameLine(this.theme.fg("dim", " Written by the person at the sending session")));
     }
 
     lines.push(this.theme.fg("muted", `╰${borderChar.repeat(bodyWidth)}╯`));

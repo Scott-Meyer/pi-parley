@@ -9,6 +9,8 @@ export const FEDERATED_CONVERSATION_FEATURE = "federated-conversation-text-v1";
 /** Explicit ask completion, historical reply threading, supersession cleanup,
  * and requestId-correlated cancellation acknowledgements. */
 export const CONVERSATION_CONTRACT_FEATURE = "conversation-contract-v1";
+/** Messages may say the person at the sending session wrote them (`session_person` provenance). */
+export const PERSON_PROVENANCE_FEATURE = "person-provenance-v1";
 
 /** Broker preflight for a retained conversation identity; no delivery has occurred. */
 export interface PreparedConversation {
@@ -157,12 +159,16 @@ export interface Message {
   };
 }
 
-export interface MessageProvenance {
-  type: "extension_outbox";
-  extensionId: string;
-  extensionName: string;
-  requestId: string;
-}
+export type MessageProvenance =
+  | {
+      type: "extension_outbox";
+      extensionId: string;
+      extensionName: string;
+      requestId: string;
+    }
+  /** The person at the sending session wrote the text (the /parley composer),
+   * not that session's agent. Asserted by the sending client. */
+  | { type: "session_person" };
 
 export interface Attachment {
   type: "file" | "snippet" | "context";

@@ -17,7 +17,7 @@ import {
 } from "./paths.ts";
 import { getAskTimeoutMs } from "../config.ts";
 import { sameCwd } from "../cwd.ts";
-import { COMPACTION_AWARENESS_FEATURE, CONVERSATION_CONTRACT_FEATURE, FEDERATED_CONVERSATION_FEATURE, EXACT_SEND_FEATURE, EXACT_IDENTITY_SEND_FEATURE, EXTENSION_BUS_FEATURE, SESSION_PROFILE_FEATURE } from "../types.ts";
+import { COMPACTION_AWARENESS_FEATURE, CONVERSATION_CONTRACT_FEATURE, FEDERATED_CONVERSATION_FEATURE, EXACT_SEND_FEATURE, EXACT_IDENTITY_SEND_FEATURE, EXTENSION_BUS_FEATURE, PERSON_PROVENANCE_FEATURE, SESSION_PROFILE_FEATURE } from "../types.ts";
 import type { CancellationState, DeliveryDetails, DeliveryState, SessionInfo, Message, BrokerMessage, ExtensionCapability, MessageControl, PeerCompactionNotice } from "../types.ts";
 import { ExtensionStateManager } from "./extension-state.ts";
 import { BROKER_RUNTIME_OCCUPIED_EXIT_CODE, BrokerRuntimeOccupiedError, claimBrokerRuntime } from "./runtime-claim.ts";
@@ -417,6 +417,12 @@ class ParleyBroker {
    * carry these local projection fields. */
   private writeBrokerFrame(socket: net.Socket, value: unknown): void {
     const client = [...this.sessions.values()].find(session => session.socket === socket);
+    // Older receivers reject unknown provenance outright; they get the plain message.
+    if (client && !client.clientFeatures.has(PERSON_PROVENANCE_FEATURE) && isRecord(value)
+      && isRecord(value.message) && isRecord(value.message.provenance) && value.message.provenance.type === "session_person") {
+      const { provenance: _provenance, ...message } = value.message;
+      value = { ...value, message };
+    }
     if (client && !client.clientFeatures.has(FEDERATED_CONVERSATION_FEATURE) && isRecord(value)) {
       const project = (session: unknown): unknown => {
         if (!isRecord(session) || !isRecord(session.federation)) return session;
@@ -1654,7 +1660,7 @@ class ParleyBroker {
         this.writeBrokerFrame(socket, {
           type: "registered",
           sessionId: id,
-          features: [EXTENSION_BUS_FEATURE, EXACT_SEND_FEATURE, EXACT_IDENTITY_SEND_FEATURE, COMPACTION_AWARENESS_FEATURE, SESSION_PROFILE_FEATURE, CONVERSATION_CONTRACT_FEATURE, FEDERATED_CONVERSATION_FEATURE],
+          features: [EXTENSION_BUS_FEATURE, EXACT_SEND_FEATURE, EXACT_IDENTITY_SEND_FEATURE, COMPACTION_AWARENESS_FEATURE, SESSION_PROFILE_FEATURE, CONVERSATION_CONTRACT_FEATURE, FEDERATED_CONVERSATION_FEATURE, PERSON_PROVENANCE_FEATURE],
           session: info,
         });
         this.broadcastScoped({ type: "session_joined", session: info }, info, key, scopeId);

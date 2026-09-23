@@ -2,7 +2,7 @@ import type { Component, TUI } from "@mariozechner/pi-tui";
 import { truncateToWidth, visibleWidth } from "@mariozechner/pi-tui";
 import type { KeybindingsManager, Theme } from "@mariozechner/pi-coding-agent";
 import type { ParleyClient } from "../broker/client.ts";
-import type { PeerCompactionNotice, SessionInfo } from "../types.ts";
+import { PERSON_PROVENANCE_FEATURE, type PeerCompactionNotice, type SessionInfo } from "../types.ts";
 
 export interface ComposeResult {
   sent: boolean;
@@ -84,6 +84,8 @@ export class ComposeOverlay implements Component {
     try {
       const result = await this.client.send(this.target.id, {
         text: this.inputBuffer.trim(),
+        // The person typed this, not the agent. Older brokers would refuse the field.
+        ...(this.client.supportsFeature(PERSON_PROVENANCE_FEATURE) ? { provenance: { type: "session_person" as const } } : {}),
       });
       
       if (!result.delivered) {
