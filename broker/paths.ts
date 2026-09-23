@@ -56,7 +56,7 @@ export function shouldUseTcpTransport(
   platform: NodeJS.Platform = process.platform,
 ): boolean {
   // One Windows installation uses one default endpoint for every client.
-  // Authenticated loopback can also be carried by FlightDeck; named pipes cannot.
+  // Authenticated loopback can also be carried by an application tunnel; named pipes cannot.
   // Choosing by terminal context would split clients sharing the same broker.
   const transport = env.PI_PARLEY_TRANSPORT?.trim().toLowerCase();
   if (transport === "tcp") return true;

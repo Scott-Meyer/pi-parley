@@ -73,7 +73,7 @@ Messages carry the sender, the text, and related conversation context. Receipts 
 
 ### References
 
-Models, like people, work with names. Everything a model reads or types names a session by its name (`pi:parley`, `FlightDeck VM:parley`) and a message by a local number (`#12`). Canonical session and message IDs, including origin-qualified federation handles, stay on the wire and in result `details`, and parley translates in both directions.
+Models, like people, work with names. Everything a model reads or types names a session by its name (`pi:parley`, `build-vm:parley`) and a message by a local number (`#12`). Canonical session and message IDs, including origin-qualified federation handles, stay on the wire and in result `details`, and parley translates in both directions.
 
 A reference stays attached to what it first named. It is never recycled, whether through a rename, a reconnect, a reload, or a different session later taking the same name. That newcomer gets `name~2` instead. Unnamed sessions appear as `unnamed`, `unnamed~2`, and hosts without a label as `remote-1`, never as ID fragments.
 
@@ -314,7 +314,7 @@ The optional synchronous `resolvePresenceName(candidate, context)` policy contro
 
 Call `registerParleyExtension()` once as the wrapper factory's final potentially throwing operation, not from `session_start`, and load the required wrapper before optional user packages. Register the application's own resources first and do not throw after Parley returns: older supported Pi hosts do not retract event subscriptions when an outer extension factory later fails. Registration is idempotent across physical copies that implement this v1 actor entrypoint in one Pi runtime; an ambient-first v1 owner accepts a later wrapper's resolver before its first identity publication, while conflicting or late configuration fails closed. Shutdown releases that runtime claim so reload and session replacement bind fresh handlers. An older ambient pi-parley release cannot participate in the claim protocol and must be updated or excluded before an application forces its bundled actor. The factory starts no process, socket, watcher, or timer. Session-scoped work starts from lifecycle events or the first operation and is joined by Parley's `session_shutdown` handler; the wrapper owns no Parley teardown.
 
-Install the bundled tarball as the wrapper's private ordinary dependency rather than as another Pi package. The complete tarball and its production dependencies are required because the actor uses Parley's TypeScript extension, UI, client, broker, and spawn modules. Pi supplies the peer extension-runtime, TUI, and TypeBox modules. The application must set generic routing such as `PI_PARLEY_SCOPE_ID` before Pi loads extensions. A temporary FlightDeck launch-context bridge remains during rollout of that generic variable and version-matched remote actor enrollment; it is compatibility behavior, not part of the public embedding contract.
+Install the bundled tarball as the wrapper's private ordinary dependency rather than as another Pi package. The complete tarball and its production dependencies are required because the actor uses Parley's TypeScript extension, UI, client, broker, and spawn modules. Pi supplies the peer extension-runtime, TUI, and TypeBox modules. The application must set generic routing such as `PI_PARLEY_SCOPE_ID` before Pi loads extensions.
 
 ### Broker federation facade
 
