@@ -688,7 +688,6 @@ function resolveParleyPresenceName(sessionName: string | undefined, sessionId: s
   return `${DEFAULT_UNNAMED_SESSION_ALIAS_PREFIX}-${normalizedSessionId.slice(0, 18)}`;
 }
 const SESSION_PRESENCE_NAME_CONTEXT: ParleyPresenceNameContext = Object.freeze({ kind: "session" });
-const ADVERTISED_PRESENCE_NAME_CONTEXT: ParleyPresenceNameContext = Object.freeze({ kind: "advertised" });
 function resolveEmbeddedPresenceName(
   configuration: ParleyExtensionConfiguration,
   candidate: string | undefined,
@@ -883,10 +882,6 @@ function installParleyExtension(
   let runtimeContext: ExtensionContext | null = null;
   let currentSessionId: string | null = null;
   let currentParleySessionId: string | null = null;
-  // ACL fork: fires the quiet, one-time supervisor notice the first time this
-  // subagent successfully advertises itself. Re-advertising under a new name
-  // later in the same session does not repeat the notice.
-  let hasNotifiedSupervisorOfAdvertise = false;
   let currentModel = "unknown";
   let sessionStartedAt: number | null = null;
   let reconnectTimer: NodeJS.Timeout | null = null;
@@ -898,7 +893,6 @@ function installParleyExtension(
   let observedSessionName: string | undefined;
   let currentSessionDescription: string | undefined;
   let profileManagedName: string | undefined;
-  let currentAdvertisedName: string | undefined;
   let lastPresenceRequestedName: string | undefined;
   let profileNameMutationTarget: string | undefined;
   let profileOwnershipRevocationPending = false;
@@ -1714,7 +1708,6 @@ function installParleyExtension(
     pendingReceiverBaselineTokens.clear();
     currentSessionDescription = undefined;
     profileManagedName = undefined;
-    currentAdvertisedName = undefined;
     lastPresenceRequestedName = undefined;
     profileNameMutationTarget = undefined;
     profileOwnershipRevocationPending = false;
@@ -2450,7 +2443,6 @@ function installParleyExtension(
         emitLocalExtensionEvent(namespace, { type: "connection", connected: false, supported: false });
         emitLocalExtensionEvent(namespace, { type: "owner" });
       }
-      currentAdvertisedName = undefined;
       lastPresenceRequestedName = undefined;
       client = null;
       if (!shuttingDown && !disposed) {
@@ -2877,10 +2869,11 @@ function installParleyExtension(
   function startSessionRuntime(ctx: ExtensionContext): void {
     const nextSessionId = ctx.sessionManager.getSessionId();
     const nextParleySessionId = resolveConfiguredParleySessionId(nextSessionId, config);
-    // Resolve policy synchronously at the lifecycle boundary. An invalid or
-    // throwing embedding policy fails session startup before timers, sockets,
-    // or an unqualified broker registration can begin.
-    buildPresenceIdentity(pi, nextParleySessionId, configuration);
+    try {
+      buildPresenceIdentity(pi, nextParleySessionId, configuration);
+    } catch (error) {
+      console.warn(`Parley presence name resolution deferred on session start: ${failureText(error)}`);
+    }
 
     const previousClient = client;
     failPendingOutboxRequests(runtimeGeneration, "session_ended", "Session replaced");
@@ -2917,6 +2910,12 @@ function installParleyExtension(
     startupConnectTimer = setTimeout(() => {
       startupConnectTimer = null;
       if (!getLiveContext(ctx, startupGeneration)) {
+        return;
+      }
+      try {
+        buildPresenceIdentity(pi, nextParleySessionId, configuration);
+      } catch (error) {
+        console.warn(`Parley broker connection deferred: presence name resolution failed (${failureText(error)})`);
         return;
       }
       void ensureConnected("startup").catch(() => {
@@ -3077,7 +3076,6 @@ function installParleyExtension(
     currentParleySessionId = null;
     currentSessionDescription = undefined;
     profileManagedName = undefined;
-    currentAdvertisedName = undefined;
     lastPresenceRequestedName = undefined;
     profileNameMutationTarget = undefined;
     profileOwnershipRevocationPending = false;
@@ -3267,7 +3265,11 @@ function installParleyExtension(
     if (!getLiveContext(ctx)) {
       return;
     }
-    syncPresenceIdentity(sessionId);
+    try {
+      syncPresenceIdentity(sessionId);
+    } catch (error) {
+      console.warn(`Parley presence sync on turn start failed: ${failureText(error)}`);
+    }
   });
   pi.on("model_select", (event, ctx) => {
     if (!getLiveContext(ctx)) {
@@ -3275,11 +3277,15 @@ function installParleyExtension(
     }
     currentModel = event.model.id;
     if (client) {
-      client.updatePresence({
-        ...buildPresenceIdentity(pi, currentParleySessionId ?? ctx.sessionManager.getSessionId(), configuration),
-        model: event.model.id,
-        status: currentStatus(),
-      });
+      try {
+        client.updatePresence({
+          ...buildPresenceIdentity(pi, currentParleySessionId ?? ctx.sessionManager.getSessionId(), configuration),
+          model: event.model.id,
+          status: currentStatus(),
+        });
+      } catch (error) {
+        console.warn(`Parley presence update on model select failed: ${failureText(error)}`);
+      }
     }
   });
 
@@ -3700,13 +3706,6 @@ function installParleyExtension(
       }
     }
     if (requestedName !== undefined) {
-      const effectiveSession = client?.getSelfSession();
-      if (
-        nameChanges
-        && (currentAdvertisedName !== undefined || effectiveSession?.advertised === true)
-      ) {
-        return `profile.name cannot rename an advertised subagent (current parley name: "${currentAdvertisedName ?? effectiveSession?.name ?? currentName ?? "unknown"}").`;
-      }
       if (currentName && nameChanges && currentName !== profileManagedName) {
         return `profile.name cannot replace the explicit session name "${currentName}". Omit it and update only the description.`;
       }
@@ -3798,7 +3797,7 @@ function installParleyExtension(
     const requestedName = pi.getSessionName()?.trim() || observedSessionName;
     const fallbackId = currentParleySessionId ?? currentSessionId;
     const name = requestedName || (fallbackId ? resolveParleyPresenceName(undefined, fallbackId) : "unnamed");
-    const effectiveName = currentAdvertisedName ?? client?.getSelfSession()?.name;
+    const effectiveName = client?.getSelfSession()?.name;
     return {
       name,
       ...(currentSessionDescription ? { description: currentSessionDescription } : {}),
@@ -3980,9 +3979,8 @@ function installParleyExtension(
 • status: Connection state and outstanding questions.
 • cancel: Removes offline mail or communicates withdrawal; work already done is unchanged.
 • broadcast: Independent messages to visible local peers, not remote peers.
-• advertise: Subagent public visibility within the current scope.
 • rename: Changes this session's name.
-• label: Gives a message a local name, like release-approval, usable wherever a message reference is.
+• label: Gives a message a local name, like review or notes, usable wherever a message reference is.
 
 Sessions and messages are named the way people would name them: a session by its name (name~2 when a different session later took a name you've already seen), a message by its number here, like #12. Use references as shown; parley keeps each one attached to what it first named. Receipts include sender and recipient, the message reference, delivery state, and nearby conversation context. Endpoint acceptance is not an acknowledgement from the colleague.`,
     promptSnippet: "Communicate with other Pi sessions.",
@@ -3991,7 +3989,7 @@ Sessions and messages are named the way people would name them: a session by its
     ],
 
     parameters: Type.Object({
-      action: StringEnum(["list", "list-cwd", "send", "broadcast", "ask", "reply", "pending", "status", "cancel", "advertise", "rename", "read", "label"] as const, {
+      action: StringEnum(["list", "list-cwd", "send", "broadcast", "ask", "reply", "pending", "status", "cancel", "rename", "read", "label"] as const, {
         description: "Parley operation.",
       }),
       profile: Type.Optional(Type.Object({
@@ -4031,7 +4029,7 @@ Sessions and messages are named the way people would name them: a session by its
         description: "Message reference (like #12) for read, cancel, or label.",
       })),
       label: Type.Optional(Type.String({
-        description: "A one-word local name for a message, like release-approval. With 'label', names the existing message in messageId; with send or ask, names the new message. Usable anywhere a message reference is.",
+        description: "A one-word local name for a message, like review or notes. With 'label', names the existing message in messageId; with send or ask, names the new message. Usable anywhere a message reference is.",
       })),
       supersedes: Type.Optional(Type.String({
         description: "Reference of your earlier send/ask that this one replaces. Only works for the same sender and receiver.",
@@ -4052,7 +4050,7 @@ Sessions and messages are named the way people would name them: a session by its
         description: "For openProjectPaneIfMissing, focus the new terminal when the launcher supports it. Defaults to true.",
       })),
       name: Type.Optional(Type.String({
-        description: "For 'advertise': the public name this subagent claims. For 'rename': the new canonical name for this session.",
+        description: "Canonical self-name for 'rename'.",
       })),
     }),
 
@@ -4151,8 +4149,7 @@ Sessions and messages are named the way people would name them: a session by its
         };
       }
       const selfProjection = connectedClient.getSelfSession();
-      const projectionMayChange = currentAdvertisedName === undefined
-        && (selfProjection === undefined || selfProjection.name !== requestedPresenceName);
+      const projectionMayChange = selfProjection === undefined || selfProjection.name !== requestedPresenceName;
       if (profile?.name !== undefined || projectionMayChange) {
         try {
           // Presence and list share one ordered local socket. The response gives
@@ -4202,6 +4199,15 @@ Sessions and messages are named the way people would name them: a session by its
         ? undefined
         : params.targets;
 
+      // Retired action: older prompts and models may still request it, so
+      // answer with the reason rather than a generic unknown-action error.
+      if ((action as string) === "advertise") {
+        return {
+          content: [{ type: "text", text: "Action advertise is retired. Subagents are scoped to their supervisor tree." }],
+          details: { error: true },
+        };
+      }
+
       if (messageId && action !== "cancel" && action !== "read" && action !== "label") {
         return {
           content: [{ type: "text", text: "messageId identifies a retained message for read or cancel; sends and asks create a new message." }],
@@ -4210,73 +4216,6 @@ Sessions and messages are named the way people would name them: a session by its
       }
 
       switch (action) {
-        case "advertise": {
-          const requestedName = name?.trim();
-          if (!requestedName) {
-            return {
-              content: [{ type: "text", text: "advertise requires a non-empty 'name'." }],
-              details: { error: true },
-            };
-          }
-
-          const metadata = readChildOrchestratorMetadata();
-          let result;
-          try {
-            const resolvedName = resolveEmbeddedPresenceName(
-              configuration,
-              requestedName,
-              ADVERTISED_PRESENCE_NAME_CONTEXT,
-            );
-            // A configured resolver always returns a non-empty value; without
-            // one, requestedName was validated above.
-            result = await connectedClient.advertise(resolvedName ?? requestedName);
-          } catch (error) {
-            return {
-              content: [{ type: "text", text: `Advertise failed: ${failureText(error)}` }],
-              details: { error: true },
-            };
-          }
-
-          if (!result.ok) {
-            return {
-              content: [{ type: "text", text: `Advertise failed: ${result.error ?? "unknown error"}` }],
-              details: { error: true },
-            };
-          }
-          currentAdvertisedName = result.name;
-
-          // Best-effort, non-blocking notice to the supervisor -- same ordinary
-          // message pipeline as any other parley send, delivered exactly once
-          // per session regardless of how many times this child re-advertises
-          // under a different name afterward.
-          if (metadata && !hasNotifiedSupervisorOfAdvertise) {
-            hasNotifiedSupervisorOfAdvertise = true;
-            try {
-              const resolvedSupervisor = await resolveSupervisorTarget(connectedClient, metadata);
-              const sendTarget = resolvedSupervisor?.id ?? metadata.orchestratorTarget;
-              const advertiseNotice = await connectedClient.send(sendTarget, {
-                text: formatChildOrchestratorMessage(
-                  "update",
-                  metadata,
-                  `This subagent has advertised itself as "${result.name}" and is now discoverable by other eligible peers within its Parley scope.`,
-                ),
-                expectsReply: false,
-              });
-              if (advertiseNotice.delivered) {
-                surfaceBackgroundPeerCompaction(connectedClient, metadata.orchestratorTarget, advertiseNotice, runtimeGeneration, sendTarget);
-              }
-            } catch {
-              // Best-effort only -- a failed notice must never fail the advertise
-              // call itself; the promotion already succeeded on the broker.
-            }
-          }
-
-          return {
-            content: [{ type: "text", text: `Advertised as "${result.name}" within this session's scope.` }],
-            details: {},
-          };
-        }
-
         case "list": {
           try {
             const mySessionId = connectedClient.sessionId;

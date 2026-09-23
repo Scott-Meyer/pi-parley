@@ -19,15 +19,16 @@ for (const key of Object.keys(process.env)) {
   }
 }
 
-test("presence-name resolver failures synchronously fail session startup", async (t) => {
+test("presence-name resolver failures do not crash session startup and suppress registration", async (t) => {
   for (const failure of [
-    { name: "throw", resolver: () => { throw new Error("policy unavailable"); }, pattern: /policy unavailable/ },
-    { name: "empty", resolver: () => "   ", pattern: /must return a non-empty string/ },
+    { name: "throw", resolver: () => { throw new Error("policy unavailable"); } },
+    { name: "empty", resolver: () => "   " },
   ]) {
     await t.test(failure.name, async () => {
       const harness = createExtensionHarness("raw-name", { sessionId: `resolver-${failure.name}` });
       registerParleyExtension(harness.pi as never, { resolvePresenceName: failure.resolver });
-      await assert.rejects(harness.emitLifecycle("session_start"), failure.pattern);
+      await harness.emitLifecycle("session_start");
+      assert.equal(harness.pi.getSessionName(), "raw-name");
       await harness.emitLifecycle("session_shutdown");
     });
   }

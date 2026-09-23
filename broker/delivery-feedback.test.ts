@@ -204,7 +204,7 @@ test("mailbox undelivered receipt: sender is notified when a queued message can 
 });
 
 
-async function withConversationBroker(run: (agentDir: string, connect: (name: string, id?: string, beforeConnect?: (client: ParleyClient) => void) => Promise<ParleyClient>) => Promise<void>) {
+async function withConversationBroker(run: (agentDir: string, connect: (name: string, id?: string, beforeConnect?: (client: ParleyClient) => void, reg?: SessionRegistration) => Promise<ParleyClient>) => Promise<void>) {
   const agentDir = mkdtempSync(path.join(process.platform === "win32" ? tmpdir() : "/tmp", "pi-conv-"));
   const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
   const previousTransport = process.env.PI_PARLEY_TRANSPORT;
@@ -213,11 +213,11 @@ async function withConversationBroker(run: (agentDir: string, connect: (name: st
   const clients: ParleyClient[] = [];
   const broker = await startBroker(agentDir);
   try {
-    await run(agentDir, async (name, id = randomUUID(), beforeConnect) => {
+    await run(agentDir, async (name, id = randomUUID(), beforeConnect, reg = baseRegistration(name)) => {
       const client = new ParleyClient();
       clients.push(client);
       beforeConnect?.(client);
-      await client.connect(baseRegistration(name), id);
+      await client.connect(reg, id);
       return client;
     });
   } finally {
@@ -710,7 +710,11 @@ test("offline mailbox identity never transfers delivery or recipient identity to
 test("accepted offline mail keeps its author's granted authority when that actor later reconnects privately", { timeout: 30_000 }, async () => {
   await withConversationBroker(async (_agentDir, connect) => {
     const supervisor = await connect("mail-author-supervisor");
-    const original = await connect("mail-recipient", "mail-recipient-id");
+    const recipientRegistration = {
+      ...baseRegistration("mail-recipient"), isSubagent: true,
+      supervisorSessionId: supervisor.sessionId!, supervisorName: "mail-author-supervisor",
+    };
+    const original = await connect("mail-recipient", "mail-recipient-id", undefined, recipientRegistration);
     const registration = {
       ...baseRegistration("mail-author"), isSubagent: true,
       supervisorSessionId: supervisor.sessionId!, supervisorName: "mail-author-supervisor",
@@ -719,21 +723,19 @@ test("accepted offline mail keeps its author's granted authority when that actor
     const privateReconnect = new ParleyClient();
     try {
       await author.connect(registration, "mail-author-id");
-      await author.advertise("mail-author");
       await original.disconnect();
-      const queued = await author.send("mail-recipient-id", { text: "Accepted while publicly discoverable", exactIdentity: true });
+      const queued = await author.send("mail-recipient-id", { text: "Accepted between siblings", exactIdentity: true });
       assert.equal(queued.delivery, "queued");
       await author.disconnect();
       await privateReconnect.connect(registration, "mail-author-id");
-      assert.equal((await privateReconnect.listSessions()).some(session => session.id === "mail-recipient-id"), false);
       const received: Message[] = [];
       const recipient = await connect("mail-recipient", "mail-recipient-id", client => {
         client.on("message", (_from, message) => received.push(message));
-      });
+      }, recipientRegistration);
       await recipient.listSessions();
-      assert.equal(received.length, 1, "already accepted mail retains its creation-time authority; reconnect is not withdrawal");
+      assert.equal(received.length, 1, "sibling subagent receives queued mail across reconnect");
       assert.equal(received[0].id, queued.id);
-      assert.equal(received[0].content.text, "Accepted while publicly discoverable");
+      assert.equal(received[0].content.text, "Accepted between siblings");
     } finally {
       await author.disconnect();
       await privateReconnect.disconnect();

@@ -103,12 +103,9 @@ export interface SessionInfo {
    *  (PI_SUBAGENT_ORCHESTRATOR_TARGET), used to match a supervisor when the
    *  child does not have the supervisor's session ID yet. */
   supervisorName?: string;
-  /** ACL fork: true once a subagent has explicitly self-promoted via the
-   *  `advertise` action. An advertised child is treated as an ordinary main
-   *  for visibility in both directions (everyone sees it, it sees everyone),
-   *  while isSubagent/supervisorSessionId/supervisorName are preserved as
-   *  provenance rather than erased. Broker-authoritative; never set directly
-   *  by a presence update. */
+  /** Legacy wire field from brokers that supported the retired `advertise`
+   *  action, which promoted a subagent to main-like visibility. Current
+   *  brokers never set it; it remains so older peers' frames still parse. */
   advertised?: boolean;
   /** Generic capabilities this session offers to other sessions through the
    *  roster (e.g. the pi-parley/project-launch-v1 provider namespace).

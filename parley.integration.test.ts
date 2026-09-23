@@ -2934,25 +2934,11 @@ test("embedded presence-name policy covers ambient-first session publication, ol
       await ambient.emitLifecycle("session_start");
       await waitForSessionByName(orchestrator, "computer:workspace:tool-renamed");
       const rejected = await parleyTool.execute("presence-policy-advertise-rejected", {
-        action: "advertise",
+        action: "advertise" as never,
         name: "rejected",
       }, new AbortController().signal, undefined, ambient.ctx);
       assert.equal(rejected.details?.error, true);
-      assert.match(rejected.content[0]?.text ?? "", /advertised identity rejected by embedding policy/);
-      assert.equal((await orchestrator.listSessions()).some((session) => session.name === "rejected"), false);
-
-      const advertised = await parleyTool.execute("presence-policy-advertise", {
-        action: "advertise",
-        name: "child",
-      }, new AbortController().signal, undefined, ambient.ctx);
-      assert.match(advertised.content[0]?.text ?? "", /Advertised as "computer:workspace:tab:child"/);
-      await waitForSessionByName(orchestrator, "computer:workspace:tab:child");
-
-      const listed = await parleyTool.execute("presence-policy-list", {
-        action: "list",
-      }, new AbortController().signal, undefined, ambient.ctx);
-      assert.match(listed.content[0]?.text ?? "", /computer:workspace:tab:child/);
-      assert.ok(resolutions.some((entry) => entry.kind === "advertised" && entry.candidate === "child"));
+      assert.match(rejected.content[0]?.text ?? "", /Action advertise is retired/);
     });
   } finally {
     await ambient.emitLifecycle("session_shutdown");
@@ -3152,18 +3138,18 @@ test("profile names fill unnamed sessions but never replace an explicit Pi name"
   }
 });
 
-test("profile naming cannot diverge an advertised subagent from its broker identity", { concurrency: false }, async () => {
+test("subagent advertising is retired and rejected", { concurrency: false }, async () => {
   const { orchestrator, cleanup } = await setupClients();
   const harness = createExtensionHarness("child-canonical", {
     hasUI: true,
-    sessionId: "profile-advertised-child",
+    sessionId: "profile-subagent-child",
   });
 
   try {
     await withChildOrchestratorEnv({
       orchestratorTarget: "orchestrator",
       orchestratorSessionId: orchestrator.sessionId ?? undefined,
-      runId: "profile-advertise-run",
+      runId: "profile-subagent-run",
       agent: "reviewer",
       index: "0",
     }, async () => {
@@ -3173,19 +3159,12 @@ test("profile naming cannot diverge an advertised subagent from its broker ident
       const parleyTool = harness.tools.find((tool) => tool.name === "parley");
       assert.ok(parleyTool);
 
-      const advertised = await parleyTool.execute("profile-advertise", {
-        action: "advertise",
+      const advertised = await parleyTool.execute("subagent-advertise", {
+        action: "advertise" as never,
         name: "public-reviewer",
       }, new AbortController().signal, undefined, harness.ctx);
-      assert.match(advertised.content[0]?.text ?? "", /Advertised as \"public-reviewer\"/);
-
-      const refused = await parleyTool.execute("profile-advertised-rename", {
-        action: "status",
-        profile: { name: "different-canonical" },
-      }, new AbortController().signal, undefined, harness.ctx);
-      assert.match(refused.content[0]?.text ?? "", /cannot rename an advertised subagent/);
-      assert.equal(harness.pi.getSessionName(), "child-canonical");
-      assert.equal((refused.details?.selfProfile as { parleyName?: string }).parleyName, "public-reviewer");
+      assert.equal(advertised.details?.error, true);
+      assert.match(advertised.content[0]?.text ?? "", /Action advertise is retired/);
     });
   } finally {
     await harness.emitLifecycle("session_shutdown");

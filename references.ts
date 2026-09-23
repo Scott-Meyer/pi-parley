@@ -271,7 +271,7 @@ export class ReferenceBook {
   /** Why a label cannot name a message, or undefined when it can. */
   private labelProblem(label: string, id?: string): string | undefined {
     const trimmed = label.trim();
-    if (!trimmed || trimmed !== label || /\s/.test(trimmed)) return "Labels are one word without spaces, like release-approval.";
+    if (!trimmed || trimmed !== label || /\s/.test(trimmed)) return "Labels are one word without spaces, like review or notes.";
     if (/[\p{Cc}\p{Cf}]/u.test(trimmed)) return "Labels cannot contain control or formatting characters.";
     if (trimmed.length > 64) return "Labels are at most 64 characters.";
     if (/^#?\d+$/.test(trimmed) || CANONICAL_SHAPE.test(trimmed) || trimmed.startsWith("oq")) return `"${trimmed}" looks like a message number or identity; choose a word.`;

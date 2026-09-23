@@ -91,11 +91,21 @@ test("subagent ACL: list/send scoping by supervisorSessionId and supervisorName 
     await mainA.connect(baseRegistration("main-a"), mainAId);
     await mainB.connect(baseRegistration("main-b"), mainBId);
 
-    // childOfA matches its supervisor by session ID.
-    const childOfA = new ParleyClient();
-    clients.push(childOfA);
-    await childOfA.connect({
-      ...baseRegistration("child-of-a"),
+    // child1OfA matches its supervisor by session ID.
+    const child1OfA = new ParleyClient();
+    clients.push(child1OfA);
+    await child1OfA.connect({
+      ...baseRegistration("child-1-of-a"),
+      isSubagent: true,
+      supervisorSessionId: mainAId,
+      supervisorName: "main-a",
+    });
+
+    // child2OfA is a sibling of child1OfA under the same supervisor mainA.
+    const child2OfA = new ParleyClient();
+    clients.push(child2OfA);
+    await child2OfA.connect({
+      ...baseRegistration("child-2-of-a"),
       isSubagent: true,
       supervisorSessionId: mainAId,
       supervisorName: "main-a",
@@ -117,19 +127,23 @@ test("subagent ACL: list/send scoping by supervisorSessionId and supervisorName 
     // --- list scoping ---
     const mainASees = idsOf(await mainA.listSessions());
     const mainBSees = idsOf(await mainB.listSessions());
-    const childASees = idsOf(await childOfA.listSessions());
+    const child1ASees = idsOf(await child1OfA.listSessions());
+    const child2ASees = idsOf(await child2OfA.listSessions());
     const childBSees = idsOf(await childOfB.listSessions());
 
     assert.ok(mainASees.has(mainA.sessionId!), "main A sees itself");
     assert.ok(mainASees.has(mainB.sessionId!), "main A sees main B");
-    assert.ok(mainASees.has(childOfA.sessionId!), "main A sees its own child");
+    assert.ok(mainASees.has(child1OfA.sessionId!), "main A sees its child 1");
+    assert.ok(mainASees.has(child2OfA.sessionId!), "main A sees its child 2");
     assert.ok(!mainASees.has(childOfB.sessionId!), "main A does NOT see main B's child");
 
     assert.ok(mainBSees.has(mainA.sessionId!), "main B sees main A");
     assert.ok(mainBSees.has(childOfB.sessionId!), "main B sees its own child (via name fallback)");
-    assert.ok(!mainBSees.has(childOfA.sessionId!), "main B does NOT see main A's child");
+    assert.ok(!mainBSees.has(child1OfA.sessionId!), "main B does NOT see main A's child 1");
+    assert.ok(!mainBSees.has(child2OfA.sessionId!), "main B does NOT see main A's child 2");
 
-    assert.deepEqual(childASees, new Set([childOfA.sessionId!, mainA.sessionId!]), "child of A sees only itself + its supervisor");
+    assert.deepEqual(child1ASees, new Set([child1OfA.sessionId!, child2OfA.sessionId!, mainA.sessionId!]), "child 1 of A sees itself, its sibling, and its supervisor");
+    assert.deepEqual(child2ASees, new Set([child1OfA.sessionId!, child2OfA.sessionId!, mainA.sessionId!]), "child 2 of A sees itself, its sibling, and its supervisor");
     assert.deepEqual(childBSees, new Set([childOfB.sessionId!, mainB.sessionId!]), "child of B sees only itself + its supervisor (name-fallback matched)");
 
     // --- send-path enforcement (not just list) ---
@@ -138,10 +152,20 @@ test("subagent ACL: list/send scoping by supervisorSessionId and supervisorName 
     // must fail exactly like a nonexistent one ("Session not found"), never
     // with a distinguishable ACL-denied reason.
 
-    // Sibling children cannot reach each other, even by exact session ID.
-    const siblingSend = await childOfA.send(childOfB.sessionId!, { text: "hi sibling" });
-    assert.equal(siblingSend.delivered, false, "child of A cannot send to child of B by ID");
-    assert.match(siblingSend.reason ?? "", /not found/i);
+    // Sibling children CAN reach each other within the same supervisor tree.
+    const siblingSend = await child1OfA.send(child2OfA.sessionId!, { text: "hi sibling" });
+    assert.equal(siblingSend.delivered, true, "child 1 of A can send to sibling child 2 of A");
+    assert.equal(siblingSend.delivery, "socket_delivered");
+
+    // Children of different parents CANNOT reach each other.
+    const crossTreeSend = await child1OfA.send(childOfB.sessionId!, { text: "hi stranger" });
+    assert.equal(crossTreeSend.delivered, false, "child of A cannot send to child of B by ID");
+    assert.match(crossTreeSend.reason ?? "", /not found/i);
+
+    // A child cannot reach another main.
+    const childToOtherMain = await child1OfA.send(mainB.sessionId!, { text: "hi other main" });
+    assert.equal(childToOtherMain.delivered, false, "child of A cannot send to main B by ID");
+    assert.match(childToOtherMain.reason ?? "", /not found/i);
 
     // A main cannot reach another main's child, even by exact session ID.
     const crossMainSend = await mainA.send(childOfB.sessionId!, { text: "hi other child" });
@@ -149,7 +173,7 @@ test("subagent ACL: list/send scoping by supervisorSessionId and supervisorName 
     assert.match(crossMainSend.reason ?? "", /not found/i);
 
     // A child can reach its own supervisor.
-    const toSupervisor = await childOfA.send(mainA.sessionId!, { text: "status update" });
+    const toSupervisor = await child1OfA.send(mainA.sessionId!, { text: "status update" });
     assert.equal(toSupervisor.delivered, true);
     assert.equal(toSupervisor.delivery, "socket_delivered");
 
@@ -163,87 +187,14 @@ test("subagent ACL: list/send scoping by supervisorSessionId and supervisorName 
     assert.equal(mainToMain.delivered, true);
     assert.equal(mainToMain.delivery, "socket_delivered");
 
-    // --- advertise: self-promotion to full main-level visibility ---
+    // --- advertise retirement: subagents cannot advertise ---
+    const childAdvertise = await child1OfA.advertise("child-public");
+    assert.equal(childAdvertise.ok, false);
+    assert.equal(childAdvertise.code, "E_NOT_ELIGIBLE");
 
-    // A main has nothing to gain from advertising; reject rather than no-op.
-    const mainAdvertiseRejected = await mainA.advertise("main-a-public");
-    assert.equal(mainAdvertiseRejected.ok, false);
-    assert.equal(mainAdvertiseRejected.code, "E_NOT_ELIGIBLE");
-
-    // Name collisions are rejected: against another live session's name...
-    const nameCollision = await childOfA.advertise("main-b");
-    assert.equal(nameCollision.ok, false);
-    assert.equal(nameCollision.code, "E_NAME_TAKEN");
-    // ...and against another live session's raw ID (findSessions resolves an
-    // exact ID before it ever checks names, so this name would be unreachable).
-    const idCollision = await childOfA.advertise(mainB.sessionId!);
-    assert.equal(idCollision.ok, false);
-    assert.equal(idCollision.code, "E_NAME_TAKEN");
-    // Control characters are rejected (roster-row / rendering injection guard).
-    const controlCharRejected = await childOfA.advertise("good\n\u2022 fake-main");
-    assert.equal(controlCharRejected.ok, false);
-    assert.equal(controlCharRejected.code, "E_INVALID_NAME");
-
-    // Reserved federation identities are invalid public names, including
-    // after advertise's trimming. Rejection must not poison any live roster.
-    const reservedRejected = await childOfA.advertise("  oqs1.claimed-remote  ");
-    assert.equal(reservedRejected.ok, false);
-    assert.equal(reservedRejected.code, "E_INVALID_NAME");
-    assert.equal((await mainA.listSessions()).find((session) => session.id === childOfA.sessionId)?.advertised, undefined);
-    assert.ok(idsOf(await mainB.listSessions()).has(mainAId), "unrelated clients remain connected after rejected advertise");
-
-    // Successful advertise: childOfA self-promotes.
-    const advertised = await childOfA.advertise("child-a-public");
-    assert.equal(advertised.ok, true);
-    assert.equal(advertised.name, "child-a-public");
-
-    // Re-advertising (not eligible a second time) is rejected, not a silent no-op.
-    const reAdvertise = await childOfA.advertise("child-a-public-2");
-    assert.equal(reAdvertise.ok, false);
-    assert.equal(reAdvertise.code, "E_NOT_ELIGIBLE");
-
-    // Two-way promotion: mainB (previously blind to childOfA) now sees it...
-    const mainBSeesAfter = idsOf(await mainB.listSessions());
-    assert.ok(mainBSeesAfter.has(childOfA.sessionId!), "main B now sees the advertised former-child");
-    // ...and childOfA (previously blind to everyone but mainA) now sees mainB too.
-    const childASeesAfter = idsOf(await childOfA.listSessions());
-    assert.ok(childASeesAfter.has(mainB.sessionId!), "advertised child now sees main B");
-    assert.ok(childASeesAfter.has(childOfB.sessionId!) === false, "still does not see main B's un-advertised child");
-
-    // Reachable both ways post-promotion, and specifically by the newly
-    // claimed public NAME (not just the underlying session ID) -- that's the
-    // whole point of advertising under a chosen name.
-    const toAdvertisedById = await mainB.send(childOfA.sessionId!, { text: "hi, saw you on the roster" });
-    assert.equal(toAdvertisedById.delivered, true);
-    const toAdvertisedByName = await mainB.send("child-a-public", { text: "hi by your new public name" });
-    assert.equal(toAdvertisedByName.delivered, true, "reachable by the advertised public name while still live");
-    const fromAdvertised = await childOfA.send(mainB.sessionId!, { text: "hi back" });
-    assert.equal(fromAdvertised.delivered, true);
-
-    // Ordinary presence sync (fired on every real parley tool call) must
-    // never silently revert the advertised identity back toward a fallback
-    // name/alias while `advertised` stays true.
-    (childOfA as any).updatePresence({ name: "subagent-chat-fallback-should-not-apply", runtimeFallbackAlias: true });
-    await new Promise((resolve) => setTimeout(resolve, 50));
-    const afterPresenceSpoof = (await mainB.listSessions()).find((s) => s.id === childOfA.sessionId);
-    assert.equal(afterPresenceSpoof?.name, "child-a-public", "advertised name survives a routine presence sync");
-    assert.equal(afterPresenceSpoof?.runtimeFallbackAlias, false, "advertised runtimeFallbackAlias survives a routine presence sync");
-
-    // Advertising is a live-connection promotion only. Once the advertised
-    // child disconnects, an unrelated main must lose the ability to
-    // list/send/queue to it under its former public name -- the promotion
-    // must not survive into the disconnected-mailbox snapshot.
-    const advertisedChildId = childOfA.sessionId!;
-    await childOfA.disconnect();
-    clients.splice(clients.indexOf(childOfA), 1);
-    await new Promise((resolve) => setTimeout(resolve, 100));
-
-    const mainBAfterDisconnect = idsOf(await mainB.listSessions());
-    assert.ok(!mainBAfterDisconnect.has(advertisedChildId), "main B no longer sees the disconnected former child at all");
-
-    const queueToFormerPublicName = await mainB.send("child-a-public", { text: "are you still there?" });
-    assert.equal(queueToFormerPublicName.delivered, false, "unrelated main cannot queue mail to the former public name after disconnect");
-    assert.match(queueToFormerPublicName.reason ?? "", /not found/i);
+    const mainAdvertise = await mainA.advertise("main-public");
+    assert.equal(mainAdvertise.ok, false);
+    assert.equal(mainAdvertise.code, "E_NOT_ELIGIBLE");
   } finally {
     for (const client of clients) {
       try {

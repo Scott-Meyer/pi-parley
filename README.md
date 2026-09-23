@@ -79,7 +79,7 @@ A reference stays attached to what it first named. It is never recycled, whether
 
 Parley routes a reference only to the identity it names, never back through a name or ID prefix that could match someone else. A live target is addressed by its exact endpoint. An absent local target uses the broker's exact-identity mode (`exact-identity-send-v1`), which looks up only that identity's disconnected entry. A broker that predates the mode refuses before anything is sent (`E_EXACT_IDENTITY_UNSUPPORTED`) rather than falling back to a looser lookup. Federated targets are already addressed exactly. Delivery to an absent session still follows the broker's offline-mail rule: queued mail may be handed to the one live session using the same name in the same directory, as it always has. When that happens the result says so. When a session you address is unreachable and another session uses its name, the result names that session as a choice and, if your message was queued, tells you how to withdraw it. An unknown outcome is reported as unknown. A project launch that chooses a new session says it was a project launch.
 
-Message numbers are local to a session, so your `#12` is not your colleague's `#12`. Threading still crosses the wire exactly, through `replyTo`. A message can also carry local labels: `label` names an existing message (sent or received), and `label` on `send` or `ask` names the new one. Labels appear next to the number (`#12 · release-approval`) and work wherever a message reference does.
+Message numbers are local to a session, so your `#12` is not your colleague's `#12`. Threading still crosses the wire exactly, through `replyTo`. A message can also carry local labels: `label` names an existing message (sent or received), and `label` on `send` or `ask` names the new one. Labels appear next to the number (`#12 · review`) and work wherever a message reference does.
 
 An earlier request whose reply window has elapsed, or whose sender is currently unreachable, is mentioned once in automatic conversation context and then only counted. `pending` and `status` always list everything. Waiting is not settlement: a request absent from a flapping roster is unreachable, not ended.
 
@@ -99,7 +99,7 @@ Local history and broker routing have different lifetimes. Thread relationships 
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
-| `action` | string | `"list"`, `"list-cwd"`, `"send"`, `"broadcast"`, `"ask"`, `"reply"`, `"pending"`, `"read"`, `"status"`, `"cancel"`, `"advertise"`, or `"rename"` |
+| `action` | string | `"list"`, `"list-cwd"`, `"send"`, `"broadcast"`, `"ask"`, `"reply"`, `"pending"`, `"read"`, `"status"`, `"cancel"`, or `"rename"` |
 | `to` | string | One session reference, as shown by `list`, receipts, or messages. Without `cwd`, send/ask resolve it within the visible roster. With `cwd`, send/ask require the target to be in that directory. Also narrows reply. |
 | `targets` | string[] | For `send`, 1–32 session references. Each recipient gets an independent message and delivery outcome. Cannot be combined with `to`, cwd targeting, or conversation-specific reply/retry/supersede fields. |
 | `message` | string | Message text (for send/broadcast/ask/reply) |
@@ -113,7 +113,7 @@ Local history and broker routing have different lifetimes. Thread relationships 
 | `blocking` | boolean | For `ask`, `true` waits for the answer (default); `false` returns the initial delivery outcome and receives the answer later in the conversation |
 | `openProjectPaneIfMissing` | boolean | For `send`/`ask` with `cwd`, launch Pi in that project through a registered generic project launcher when no matching live session exists |
 | `focus` | boolean | For `openProjectPaneIfMissing`, focus the new terminal when the launcher supports it. Defaults to true |
-| `name` | string | Canonical self-name for `rename`, or public subagent name for `advertise` |
+| `name` | string | Canonical self-name for `rename` |
 | `profile` | object | Optional self-profile update: `{ name?, description? }`; `description: null` clears focus |
 
 ### contact_supervisor
@@ -146,13 +146,13 @@ Registered only with the required pi-subagents child bridge metadata and no nati
 
 **`pending` / `read`** — `pending` shows every unanswered request, with message references and reply-window state. `read` returns one retained incoming message's full text and attachment snapshots by `messageId`; it is not an archive search or remote-file read.
 
-**`label`** — Gives a message a session-local name, like `release-approval`, usable anywhere a message reference is. Labels persist with the session and never replace the message's number.
+**`label`** — Gives a message a session-local name, like `review`, usable anywhere a message reference is. Labels persist with the session and never replace the message's number.
 
 **`cancel`** — Operates on a message this session previously sent. It distinguishes offline removal, known nondelivery, and withdrawal requested from a live recipient. Unknown outcomes remain unknown. A visible withdrawal or supersession notice does not erase earlier messages or undo work.
 
 **`status`** — Reports connectivity, the current session's reference, visible connected-session count, and locally tracked outstanding questions, including requests whose local wait has ended. Local age is not an authoritative broker completion signal.
 
-**`rename` / `advertise`** — `rename` sets this session's canonical Pi name through `name`. `advertise` is the subagent-only public-discovery action; changing a canonical name alone does not widen visibility permissions.
+**`rename`** — `rename` sets this session's canonical Pi name through `name`. Subagents are scoped to their supervisor tree.
 
 ### Directory targeting and project launch
 
@@ -303,16 +303,14 @@ import { registerParleyExtension } from "pi-parley/extension";
 export default function applicationExtension(pi: ExtensionAPI) {
   registerApplicationStatus(pi);
   registerParleyExtension(pi, {
-    resolvePresenceName(candidate, context) {
-      return context.kind === "advertised"
-        ? `application:child:${candidate ?? "child"}`
-        : `application:${candidate ?? "session"}`;
+    resolvePresenceName(candidate) {
+      return `application:${candidate ?? "session"}`;
     },
   });
 }
 ```
 
-The optional synchronous `resolvePresenceName(candidate, context)` policy controls every broker-visible name while leaving Parley unaware of the application's naming scheme. `candidate` is the canonical Pi session name or `undefined`; `context.kind` is `"session"` for initial connection, reconnect, compatibility-polled host renames, `/alias`, self rename, and ordinary presence updates, or `"advertised"` for the explicit `advertise` name. The trimmed nonempty result becomes the broker/client name. Throws, non-string results, and empty results fail the triggering startup or operation and never fall back to publishing the raw candidate. Keep the resolver deterministic and side-effect-free.
+The optional synchronous `resolvePresenceName(candidate, context)` policy controls every broker-visible name while leaving Parley unaware of the application's naming scheme. `candidate` is the canonical Pi session name or `undefined`; `context.kind` is `"session"` for initial connection, reconnect, compatibility-polled host renames, `/alias`, self rename, and ordinary presence updates. The trimmed nonempty result becomes the broker/client name. Keep the resolver deterministic and side-effect-free.
 
 Call `registerParleyExtension()` once as the wrapper factory's final potentially throwing operation, not from `session_start`, and load the required wrapper before optional user packages. Register the application's own resources first and do not throw after Parley returns: older supported Pi hosts do not retract event subscriptions when an outer extension factory later fails. Registration is idempotent across physical copies that implement this v1 actor entrypoint in one Pi runtime; an ambient-first v1 owner accepts a later wrapper's resolver before its first identity publication, while conflicting or late configuration fails closed. Shutdown releases that runtime claim so reload and session replacement bind fresh handlers. An older ambient pi-parley release cannot participate in the claim protocol and must be updated or excluded before an application forces its bundled actor. The factory starts no process, socket, watcher, or timer. Session-scoped work starts from lifecycle events or the first operation and is joined by Parley's `session_shutdown` handler; the wrapper owns no Parley teardown.
 
@@ -394,7 +392,7 @@ Messages use length-prefixed JSON over a local socket/pipe transport (4-byte len
 
 **Experimental broker federation.** A caller-owned authenticated stream attaches two brokers without making either broker network-addressable. The neutral attachment controller handles the single-use `bridge_attach` preface and independently authorized `broker_accept_peer` preparation; that exact prepared destination connection becomes the opaque pipe. Readiness requires the brokers' strict `peer_hello` / `peer_hello_ack` handshake. Public scope aliases never expose private local scope IDs, and peer links never impersonate ordinary local clients.
 
-When both brokers negotiate `peer-roster-v1`, each link exchanges an authoritative bounded snapshot followed by monotonically sequenced deltas under a broker-lifetime origin epoch. Sequence gaps request a fresh snapshot; stale epochs cannot roll state back; and disconnect atomically prunes only that link's imported sessions. Brokers export only locally owned mains and explicitly advertised subagents, never re-export imports. Raw local scope IDs remain link-local authority while public aliases qualify remote identities. Imported rows are visibly marked `remote:…`, are never `trustedLocal`, and respect local scope/subagent visibility.
+When both brokers negotiate `peer-roster-v1`, each link exchanges an authoritative bounded snapshot followed by monotonically sequenced deltas under a broker-lifetime origin epoch. Sequence gaps request a fresh snapshot; stale epochs cannot roll state back; and disconnect atomically prunes only that link's imported sessions. Brokers export locally owned mains, never re-export imports. Raw local scope IDs remain link-local authority while public aliases qualify remote identities. Imported rows are visibly marked `remote:…`, are never `trustedLocal`, and respect local scope/subagent visibility.
 
 `peer-send-v1` supports direct text sends (≤32 KiB) to imported `oqs1.*` sessions. The destination authenticates the sender through its imported roster and enforces local target ownership, scope, and visibility. A correlated destination result confirms acceptance; a missing acknowledgement does not prove nondelivery. Legacy links remain send-only or discovery-only.
 

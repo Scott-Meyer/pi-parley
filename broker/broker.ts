@@ -286,28 +286,32 @@ function matchesSupervisor(child: SessionInfo, candidateSupervisor: SessionInfo)
   return false;
 }
 
-// A subagent that has explicitly self-promoted via "advertise" is treated as
-// an ordinary main for visibility in both directions, while isSubagent /
-// supervisorSessionId / supervisorName remain in place as provenance --
-// advertising does not erase where it came from, it only lifts the ACL.
-function isRestrictedSubagent(info: SessionInfo): boolean {
-  return info.isSubagent === true && info.advertised !== true;
+function areSiblings(a: SessionInfo, b: SessionInfo): boolean {
+  if (!a.isSubagent || !b.isSubagent) return false;
+  if (a.supervisorSessionId && b.supervisorSessionId && a.supervisorSessionId === b.supervisorSessionId) {
+    return true;
+  }
+  if (a.supervisorName && b.supervisorName && a.supervisorName.toLowerCase() === b.supervisorName.toLowerCase()) {
+    return true;
+  }
+  return false;
 }
 
 function canSeeSession(observer: SessionInfo, subject: SessionInfo): boolean {
   if (observer.id === subject.id) {
     return true;
   }
-  if (isRestrictedSubagent(observer)) {
-    // Subagents see only their own supervisor, never siblings or other mains.
-    return matchesSupervisor(observer, subject);
+  if (observer.isSubagent) {
+    // Subagents see only their own supervisor and their sibling subagents,
+    // never other mains or other parents' subagents.
+    return matchesSupervisor(observer, subject) || areSiblings(observer, subject);
   }
-  if (!isRestrictedSubagent(subject)) {
-    // Mains (and advertised subagents) see every other main / advertised subagent.
-    return true;
+  if (subject.isSubagent) {
+    // Mains see only the subagent children they personally supervise.
+    return matchesSupervisor(subject, observer);
   }
-  // Mains see only the subagent children they personally supervise.
-  return matchesSupervisor(subject, observer);
+  // Mains see every other main.
+  return true;
 }
 
 const MAX_ADVERTISE_NAME_LENGTH = 128;
@@ -987,7 +991,7 @@ class ParleyBroker {
   private listLocallyOwnedFederationSessions(): LocallyOwnedFederationSession[] {
     return [...this.sessions.values()].map((session) => ({
       ownership: "local" as const,
-      exportEligible: !isRestrictedSubagent(session.info),
+      exportEligible: !session.info.isSubagent,
       conversationCapable: this.supportsRemoteConversations(session),
       localScopeId: session.scopeId ?? null,
       info: session.info,
@@ -1845,86 +1849,13 @@ class ParleyBroker {
         if (typeof requestId !== "string") {
           throw new Error("Invalid advertise message");
         }
-        const respond = (ok: boolean, extra: { name?: string; error?: string; code?: string } = {}) => {
-          this.writeBrokerFrame(socket, { type: "advertise_result", requestId, ok, ...extra });
-        };
-
-        const self = this.sessions.get(currentKey);
-        if (!self || self.socket !== socket) {
-          respond(false, { error: "Sender session not found", code: "E_SENDER_NOT_FOUND" });
-          break;
-        }
-
-        // Only a tagged subagent has anything to gain from advertising; a main
-        // is already fully visible both ways. Reject rather than silently no-op
-        // so the caller's model gets a clear, actionable result.
-        if (!isRestrictedSubagent(self.info)) {
-          respond(false, {
-            error: self.info.isSubagent
-              ? "This session has already advertised itself."
-              : "Only subagent sessions can advertise themselves; this session is already fully visible.",
-            code: "E_NOT_ELIGIBLE",
-          });
-          break;
-        }
-
-        const rawName = clientMessage.name;
-        if (typeof rawName !== "string") {
-          respond(false, { error: "advertise requires a string name", code: "E_INVALID_NAME" });
-          break;
-        }
-        const name = rawName.trim();
-        if (name.length === 0 || name.length > MAX_ADVERTISE_NAME_LENGTH) {
-          respond(false, { error: `name must be 1-${MAX_ADVERTISE_NAME_LENGTH} characters after trimming`, code: "E_INVALID_NAME" });
-          break;
-        }
-        // Single-line, printable only. This name is interpolated verbatim into
-        // roster rows, target strings, and error text on every client that can
-        // see it; control characters (newlines especially) let a chosen name
-        // forge extra fake roster lines or corrupt terminal rendering.
-        if (!isValidSessionName(name)) {
-          respond(false, { error: "name must not contain control or formatting characters or use the reserved federation prefix", code: "E_INVALID_NAME" });
-          break;
-        }
-
-        // Case-insensitive uniqueness against every other currently connected
-        // session in the same scope -- advertising is a deliberate
-        // public-identity claim, stricter than the ordinary same-name tolerance
-        // regular sessions have (which is only resolved lazily at send time
-        // via E_AMBIGUOUS_TARGET).
-        const lowerName = name.toLowerCase();
-        const nameCollision = Array.from(this.sessions.values()).some(
-          (session) => session.key !== currentKey && sameScope(session.scopeId, self.scopeId) && session.info.name?.toLowerCase() === lowerName,
-        );
-        if (nameCollision) {
-          respond(false, { error: `Name "${name}" is already in use by another connected session`, code: "E_NAME_TAKEN" });
-          break;
-        }
-        // findSessions() resolves an exact session ID before it ever checks
-        // names. If the requested name equalled another live session's real
-        // ID, that other session would silently win every lookup by this
-        // name and the advertised session would be unreachable by it.
-        const idCollision = Array.from(this.sessions.values()).some(
-          (session) => session.key !== currentKey && sameScope(session.scopeId, self.scopeId) && session.info.id === name,
-        );
-        if (idCollision) {
-          respond(false, { error: `Name "${name}" collides with another connected session's ID`, code: "E_NAME_TAKEN" });
-          break;
-        }
-
-        // Promote in place. isSubagent/supervisorSessionId/supervisorName are
-        // preserved as provenance -- advertising lifts the ACL, it does not
-        // erase where this session came from.
-        self.info.name = name;
-        self.info.runtimeFallbackAlias = false;
-        self.info.advertised = true;
-        respond(true, { name });
-
-        // The promoted info now reads as an ordinary main under canSeeSession,
-        // so this reaches every previously-blind session as well as everyone
-        // who could already see it -- exactly the newly-widened audience.
-        this.broadcastScoped({ type: "presence_update", session: self.info }, self.info, currentKey, self.scopeId);
-        this.federationRoster.reconcileLocalRoster();
+        this.writeBrokerFrame(socket, {
+          type: "advertise_result",
+          requestId,
+          ok: false,
+          error: "Subagents are scoped to their supervisor tree and cannot advertise",
+          code: "E_NOT_ELIGIBLE",
+        });
         break;
       }
 

@@ -681,24 +681,10 @@ test("two real brokers establish an explicit peer role through a FlightDeck-styl
     clientSockets.push(remoteChild);
     const beforeAdvertise = await listSessions(localClient, "roster_hidden_child");
     assert.equal(beforeAdvertise.some((session) => session.federation?.remoteStableSessionId === "remote-child"), false);
-    const joinedPush = waitForBrokerMessage(localClient, (value) => {
-      const pushed = value.session as SessionInfo | undefined;
-      return value.type === "session_joined" && pushed?.federation?.remoteStableSessionId === "remote-child";
-    });
     const advertised = await advertiseSession(remoteChild, "advertise_remote_child", "Remote Specialist");
-    assert.deepEqual(advertised, { ok: true, name: "Remote Specialist" });
-    const joined = await joinedPush;
-    assert.equal((joined.session as SessionInfo).trustedLocal, false);
-    const importedChild = await waitForImportedSession(localClient, "remote-child");
-    assert.equal(importedChild.name, "Remote Specialist");
-    const updatedPush = waitForBrokerMessage(localClient, (value) => {
-      const pushed = value.session as SessionInfo | undefined;
-      return value.type === "presence_update"
-        && pushed?.federation?.remoteStableSessionId === "remote-child"
-        && pushed.status === "thinking";
-    });
-    writeMessage(remoteChild, { type: "presence", status: "thinking" });
-    await updatedPush;
+    assert.equal(advertised.ok, false);
+    const afterAttempt = await listSessions(localClient, "roster_hidden_child_after");
+    assert.equal(afterAttempt.some((session) => session.federation?.remoteStableSessionId === "remote-child"), false);
 
     const duplicate = await dialPeer(localSocketPath, request("request_87654321", "B".repeat(32)));
     assert.equal(duplicate.ok, false);

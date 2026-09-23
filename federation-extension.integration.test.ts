@@ -146,27 +146,10 @@ test("neutral registered provider delivers bidirectional extension asks, fast an
     for (const dir of dirs) brokers.push(await startBroker(dir, false));
     for (const [index, harness] of [a, b].entries()) {
       await inAgentDir(dirs[index]!, async () => {
-        const childMetadata: Record<string, string> = index === 0 ? {
-          PI_SUBAGENT_ORCHESTRATOR_TARGET: "consumer-b",
-          PI_SUBAGENT_ORCHESTRATOR_SESSION_ID: "consumer-b",
-          PI_SUBAGENT_RUN_ID: "fixture-run-1234",
-          PI_SUBAGENT_CHILD_AGENT: "consumer",
-          PI_SUBAGENT_CHILD_INDEX: "0",
-          PI_SUBAGENT_PARLEY_SESSION_NAME: "subagent-consumer-fixture-run-1",
-        } : {};
-        try {
-          Object.assign(process.env, childMetadata);
-          extension(harness.pi as never);
-          await harness.emitLifecycle("session_start");
-          if (index === 0) {
-            const advertised = await caller(harness)({ action: "advertise", name: "consumer-a" });
-            assert.notEqual(advertised.details?.error, true, text(advertised));
-          }
-          const listed = await caller(harness)({ action: "list" });
-          assert.notEqual(listed.details?.error, true);
-        } finally {
-          for (const key of Object.keys(childMetadata)) delete process.env[key];
-        }
+        extension(harness.pi as never);
+        await harness.emitLifecycle("session_start");
+        const listed = await caller(harness)({ action: "list" });
+        assert.notEqual(listed.details?.error, true);
       }, "socket");
     }
     let acquisitions = 0;
@@ -276,34 +259,6 @@ test("neutral registered provider delivers bidirectional extension asks, fast an
       .render(120).join("\n");
     assert.match(renderedAnswer, /^\? /, "the receipt still visibly carries its uncertainty");
     assert.doesNotMatch(renderedAnswer, /✗/);
-
-    const supervisorTool = a.tools.find((tool) => tool.name === "contact_supervisor")!;
-    for (const question of ["fast:supervisor decision", "fast:lost-ack"]) {
-      const result = await supervisorTool.execute("remote-supervisor-call", { reason: "need_decision", message: question },
-        new AbortController().signal, undefined, a.ctx);
-      assert.notEqual(result.details?.error, true, text(result));
-      assert.match(text(result), /\*\*Reply from supervisor:\*\*/);
-      assert.match(text(result), new RegExp(question));
-      assert.match(result.details?.messageId as string, /^oqm1\./);
-      assert.match(result.details?.replyMessageId as string, /^oqm1\./);
-      const pending = a.entries.find((entry) => entry.type === "parley_ask_pending"
-        && (entry.data as { messageId?: string }).messageId === result.details?.messageId);
-      assert.ok((pending?.data as { endpointEpoch?: string }).endpointEpoch);
-      assert.ok((pending?.data as { originEpoch?: string }).originEpoch);
-      if (question === "fast:lost-ack") {
-        assert.equal(result.details?.delivery, "unknown");
-        assert.equal(result.details?.outcomeKnown, false);
-        assert.equal(result.details?.retryable, false);
-        assert.equal(faults!.dispatched.length, 2, "one dispatch per lost-ACK ask, with no replay");
-      }
-      const hooks = await a.emitLifecycleResults("tool_result", { toolName: "contact_supervisor", ...result, isError: false });
-      assert.equal(hooks.some((hook) => (hook as { isError?: boolean } | undefined)?.isError === true), false);
-      const rendered = supervisorTool.renderResult!(result, { isPartial: false, expanded: true }, theme, { isError: false })
-        .render(120).join("\n");
-      assert.match(rendered, question === "fast:lost-ack" ? /^\? / : /^✓ /);
-      assert.doesNotMatch(rendered, /✗/);
-      assert.deepEqual((await callA({ action: "status" })).details?.outstandingAsks, []);
-    }
   } finally {
     await controller.close();
     for (const harness of [a, b]) await harness.emitLifecycle("session_shutdown");
