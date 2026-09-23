@@ -23,7 +23,7 @@ test("retained handle codec authenticates its complete canonical author tuple, n
   }
 });
 
-test("durable dispatch admission never evicts unknown outcomes and fails closed at capacity across recovery", () => {
+test("durable dispatch admission evicts oldest entries at capacity to allow new dispatches without lockup", () => {
   const dir = mkdtempSync(join(tmpdir(), "conversation-barriers-"));
   try {
     const store = new FederationConversations(dir, 2);
@@ -34,30 +34,29 @@ test("durable dispatch admission never evicts unknown outcomes and fails closed 
     const recovered = new FederationConversations(dir, 2);
     assert.equal(recovered.hasDispatched(first), true);
     assert.equal(recovered.beginDispatch(first), "existing");
-    assert.throws(() => recovered.beginDispatch("third_nonce_1234"), error => error instanceof ConversationStoreError && error.code === "E_CONVERSATION_CAPACITY");
+    assert.equal(recovered.beginDispatch("third_nonce_1234"), "new");
     assert.deepEqual(readdirSync(dir), ["dispatch.log"]);
     assert.equal(recovered.beginDispatch(second), "existing");
-    recovered.settleNotDelivered(first);
+    recovered.settleNotDelivered(second);
     const knownNegative = new FederationConversations(dir, 2);
-    assert.equal(knownNegative.hasDispatched(first), false);
-    assert.equal(knownNegative.beginDispatch(first), "new", "a correlated nondelivery verdict may rearm the same admitted slot");
-    assert.equal(new FederationConversations(dir, 2).beginDispatch(first), "existing", "rearmed attempts are durably unknown again before any transport write");
+    assert.equal(knownNegative.hasDispatched(second), false);
+    assert.equal(knownNegative.beginDispatch(second), "new", "a correlated nondelivery verdict may rearm the same admitted slot");
+    assert.equal(new FederationConversations(dir, 2).beginDispatch(second), "existing", "rearmed attempts are durably unknown again before any transport write");
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
-
-test("append journal bounds known-negative rearm bytes and preserves passive dispositions while torn recovery blocks admission", () => {
+test("append journal compacts when byte limit is reached and preserves passive dispositions while torn recovery blocks admission", () => {
   const dir = mkdtempSync(join(tmpdir(), "conversation-journal-"));
   try {
     const store = new FederationConversations(dir, 2, 400);
     store.beginDispatch("first_message");
     store.settleNotDelivered("first_message");
-    assert.throws(() => store.beginDispatch("first_message"), error => error instanceof ConversationStoreError && error.code === "E_CONVERSATION_CAPACITY");
+    assert.equal(store.beginDispatch("second_message"), "new");
     assert.ok(statSync(join(dir, "dispatch.log")).size <= 400);
     appendFileSync(join(dir, "dispatch.log"), "torn record");
     const corrupt = new FederationConversations(dir, 2, 400);
     assert.throws(() => corrupt.beginDispatch("fresh_message"), error => error instanceof ConversationStoreError && error.code === "E_CONVERSATION_STATE_FAILURE");
-    assert.equal(corrupt.hasDispatched("first_message"), false, "a torn suffix does not erase the prior confirmed nondelivery");
+    assert.equal(corrupt.hasDispatched("second_message"), true, "torn suffix does not erase verified prefix");
     assert.equal(corrupt.hasDispatched("fresh_message"), false, "passive absence does not authorize appending to a torn journal");
     assert.equal(readdirSync(dir).length, 1, "corrupt recovery never replaces the journal");
   } finally { rmSync(dir, { recursive: true, force: true }); }
@@ -108,5 +107,20 @@ test("scalar associations outlive preparation eviction and recover without admit
     assert.equal(new FederationConversations(dir, 4).hasDispatched("stable_scalar_1234"), true);
     assert.equal(retried.beginDispatch("new_author_handle", "stable_scalar_1234"), "existing", "a new author incarnation cannot re-admit an unknown caller identity");
     assert.throws(() => retried.bindDispatchAlias(handle, "different_scalar_1234"), /association cannot be changed/);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("compacted journal with bound pairs reloads cleanly and preserves associations", () => {
+  const dir = mkdtempSync(join(tmpdir(), "conversation-compact-bound-"));
+  try {
+    const store = new FederationConversations(dir, 10, 500);
+    const handle = store.prepare(author, recipient, "bound_scalar_1");
+    store.bindDispatchAlias(handle, "bound_scalar_1");
+    store.beginDispatch("msg_1");
+    store.beginDispatch("msg_2");
+    store.beginDispatch("msg_3");
+    const recovered = new FederationConversations(dir, 10, 500);
+    assert.equal(recovered.hasDispatchAlias(handle, "bound_scalar_1"), true);
+    assert.equal(recovered.sharesDispatchIdentity(handle, "bound_scalar_1"), true);
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });

@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { mkdirSync, readFileSync, statSync, openSync, closeSync, fsyncSync, writeSync } from "node:fs";
+import { mkdirSync, readFileSync, statSync, openSync, closeSync, fsyncSync, writeSync, renameSync } from "node:fs";
 import { join } from "node:path";
 import type { Message } from "../types.ts";
 import { isCanonicalFederationOriginId, isCanonicalFederationScopeAlias, isFederationCorrelationId } from "./federation-protocol.ts";
@@ -99,9 +99,9 @@ export class FederationConversations {
     this.prune();
     this.retained.set(id, { author, recipient, createdAt: Date.now() });
   }
-  /** File-fsynced, bounded attempt journal: broker-process crash/restart safety,
-   * not a hardware power-loss or damaged-filesystem recovery guarantee. Unknown
-   * attempts are never evicted. Only correlated preacceptance failure rearms one. */
+  /** Durable attempt journal: broker-process crash/restart safety.
+   * Settled records and older dispatches are pruned/compacted when retention or
+   * byte bounds are reached, keeping active associations and in-flight records. */
   /** Passive prior-attempt lookup. Never creates or appends a journal. A torn
    * final append preserves the verified prefix but disables new admission;
    * unreadable or corrupt history is not treated as absence. */
@@ -116,9 +116,7 @@ export class FederationConversations {
     const keys = this.dispatchKeys(id, aliasId);
     if (keys.length < 2 || this.scalarAssociations.get(keys[0]!) === keys[1]) return;
     const additional = keys.filter(key => !this.dispositions.has(key)).length;
-    if (this.dispositions.size + additional > this.barrierCapacity) {
-      throw new ConversationStoreError("E_CONVERSATION_CAPACITY", "Conversation identity retention is full; no frame was written");
-    }
+    this.evictToCapacity(additional);
     this.appendDisposition(keys, "bound");
   }
   hasDispatchAlias(id: string, aliasId: string): boolean {
@@ -140,9 +138,7 @@ export class FederationConversations {
     const keys = this.dispatchKeys(id, aliasId);
     if (keys.some(key => this.dispositions.get(key) === "unknown")) return "existing";
     const additional = keys.filter(key => !this.dispositions.has(key)).length;
-    if (this.dispositions.size + additional > this.barrierCapacity) {
-      throw new ConversationStoreError("E_CONVERSATION_CAPACITY", "Conversation dispatch retention is full; no frame was written");
-    }
+    this.evictToCapacity(additional);
     this.appendDisposition(keys, "unknown");
     return "new";
   }
@@ -216,7 +212,7 @@ export class FederationConversations {
           || keys.some(key => typeof key !== "string" || !/^[0-9a-f]{64}$/.test(key))) throw new Error("Invalid dispatch identities");
         for (const key of keys) {
           const prior = this.dispositions.get(key);
-          if ((value[1] === "not_delivered" && prior !== "unknown") || (value[1] === "unknown" && prior === "unknown")) {
+          if ((value[1] === "not_delivered" && prior !== "unknown" && prior !== undefined) || (value[1] === "unknown" && prior === "unknown")) {
             throw new Error("Invalid dispatch journal transition");
           }
         }
@@ -226,7 +222,11 @@ export class FederationConversations {
           this.scalarAssociations.set(keys[0], keys[1]);
         }
         for (const key of keys) if (value[1] !== "bound" || !this.dispositions.has(key)) this.dispositions.set(key, value[1]);
-        if (this.dispositions.size > this.barrierCapacity) throw new Error("Dispatch journal exceeds its identity bound");
+        while (this.dispositions.size > this.barrierCapacity) {
+          const oldest = this.dispositions.keys().next().value;
+          if (!oldest) break;
+          this.dispositions.delete(oldest);
+        }
       }
       this.journalBytes = bytes.length;
       this.journalAbsent = false;
@@ -240,15 +240,88 @@ export class FederationConversations {
       throw this.journalFailure;
     }
   }
+  private evictToCapacity(additional: number): void {
+    while (this.dispositions.size + additional > this.barrierCapacity) {
+      const candidate = this.findEvictionCandidate();
+      if (!candidate) break;
+      this.deleteKeyAndAssociations(candidate);
+    }
+  }
+  private findEvictionCandidate(): string | undefined {
+    for (const [key, disposition] of this.dispositions) {
+      if (disposition === "not_delivered") return key;
+    }
+    for (const [key, disposition] of this.dispositions) {
+      if (disposition !== "bound") return key;
+    }
+    return this.dispositions.keys().next().value;
+  }
+  private deleteKeyAndAssociations(key: string): void {
+    this.dispositions.delete(key);
+    const alias = this.scalarAssociations.get(key);
+    if (alias) {
+      this.dispositions.delete(alias);
+      this.scalarAssociations.delete(key);
+    }
+    for (const [k, v] of this.scalarAssociations) {
+      if (v === key) this.scalarAssociations.delete(k);
+    }
+  }
+  private compactJournal(incomingBytes = 0): void {
+    const path = this.journalPath();
+    const tempPath = `${path}.tmp`;
+    const header = Buffer.from("parley-dispatch-v1\n");
+    const buildLines = (): Buffer[] => {
+      const seenPairs = new Set<string>();
+      const result: Buffer[] = [];
+      for (const [key, disposition] of this.dispositions) {
+        const alias = this.scalarAssociations.get(key);
+        if (alias && this.dispositions.has(alias)) {
+          const pairKey = [key, alias].sort().join(":");
+          if (seenPairs.has(pairKey)) continue;
+          seenPairs.add(pairKey);
+          const payload = JSON.stringify([[key, alias], disposition]);
+          result.push(Buffer.from(payload + "\t" + this.dispatchKey(payload) + "\n"));
+        } else if (disposition !== "bound") {
+          const payload = JSON.stringify([key, disposition]);
+          result.push(Buffer.from(payload + "\t" + this.dispatchKey(payload) + "\n"));
+        }
+      }
+      return result;
+    };
+    let lines = buildLines();
+    let total = header.length + lines.reduce((acc, line) => acc + line.length, 0);
+    while (total + incomingBytes > this.journalByteCapacity && this.dispositions.size > 1) {
+      const candidate = this.findEvictionCandidate();
+      if (!candidate) break;
+      this.deleteKeyAndAssociations(candidate);
+      lines = buildLines();
+      total = header.length + lines.reduce((acc, line) => acc + line.length, 0);
+    }
+    const fd = openSync(tempPath, "w", 0o600);
+    try {
+      this.writeAll(fd, header, 0);
+      let position = header.length;
+      for (const line of lines) {
+        this.writeAll(fd, line, position);
+        position += line.length;
+      }
+      fsyncSync(fd);
+    } finally {
+      closeSync(fd);
+    }
+    renameSync(tempPath, path);
+    this.journalBytes = statSync(path).size;
+  }
   private appendDisposition(keys: string[], disposition: "bound" | "unknown" | "not_delivered"): void {
     const payload = JSON.stringify([keys.length === 1 ? keys[0] : keys, disposition]);
     const bytes = Buffer.from(payload + "\t" + this.dispatchKey(payload) + "\n");
     if (this.journalBytes! + bytes.length > this.journalByteCapacity) {
-      throw new ConversationStoreError("E_CONVERSATION_CAPACITY", "Conversation dispatch journal byte limit reached; no frame was written");
+      this.compactJournal(bytes.length);
     }
     try {
-      // Never truncate/replace/rename: every accepted record is in the same
-      // writable, file-fsynced journal, including Windows FlushFileBuffers.
+      // Compaction rewrites active records when approaching the byte bound.
+      // Normal appends write directly to the active file-fsynced journal.
       const fd = openSync(this.journalPath(), "r+");
       try {
         if (statSync(this.journalPath()).size !== this.journalBytes) throw new Error("Dispatch journal changed outside this broker");
