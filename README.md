@@ -2,7 +2,7 @@
 
 Parley is a durable conversation layer for Pi sessions: targeted messaging, explicit asks and replies, honest delivery receipts, and opt-in broker federation for remote peers — whether you're driving the conversation or letting agents coordinate. Local sessions connect automatically.
 
-**Alt+M** or **`/parley`** opens the session picker and message composer. Agents communicate through the `parley` tool.
+**`/parley`** opens the session picker and message composer. **Alt+M** does the same where the terminal sends Alt; on macOS that usually needs "Option as Meta", otherwise Option+M types `µ`. Agents communicate through the `parley` tool.
 
 ## Why
 
@@ -178,7 +178,7 @@ Compaction itself never sends a message or wakes another session. Broadcast neit
 
 | Key | Action |
 |-----|--------|
-| Alt+M | Open session list overlay |
+| `/parley` (or Alt+M) | Open session list overlay. On macOS, Alt+M needs the terminal's "Option as Meta" setting |
 | ↑/↓ | Navigate session list |
 | Enter | Select session / Send message |
 | Escape | Cancel / Close overlay |
