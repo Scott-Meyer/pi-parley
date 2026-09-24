@@ -164,7 +164,7 @@ export class ReferenceBook {
     const live = this.liveViews.get(view.id);
     const current = this.sessionPrimary.get(view.id);
     if (!live && current) return current.ref;
-    const base = sessionBase(live ?? view);
+    const base = this.qualifiedBase(live ?? view);
     if (current && current.base === base) return current.ref;
     const ref = this.firstAvailableRef(base, view.id);
     this.sessionOwners.set(referenceKey(ref), view.id);
@@ -189,9 +189,16 @@ export class ReferenceBook {
     if (!base || base === UNNAMED_BASE) return undefined;
     for (const liveId of this.liveSessions) {
       const live = this.liveViews.get(liveId);
-      if (liveId !== id && live && referenceKey(sessionBase(live)) === referenceKey(base)) return this.sessionRef(live);
+      if (liveId !== id && live && referenceKey(this.qualifiedBase(live)) === referenceKey(base)) return this.sessionRef(live);
     }
     return undefined;
+  }
+
+  /** A session on this computer is just its name; one on another computer carries that computer. */
+  private qualifiedBase(session: ReferencedSession): string {
+    const name = sessionBase(session);
+    const originId = session.federation?.originId;
+    return originId ? `${this.originRef({ originId, originLabel: session.federation?.originLabel })}:${name}` : name;
   }
 
   /** A readable host description: its own label, or a pinned remote-N for unlabelled origins. */

@@ -88,8 +88,10 @@ function assertModelMessagesReadable(harness: ReturnType<typeof createExtensionH
   }
 }
 /** The roster row a model would read for a reference, if listed. */
+/** Local rows are named as-is; rows from another computer carry it as `origin:name`. */
 function rosterRow(rows: string, reference: string): string | undefined {
-  return rows.split("\n").find((line) => line.startsWith(`• ${reference} — `));
+  return rows.split("\n").find((line) => line.startsWith(`• ${reference} — `)
+    || (line.includes("remote:") && /^• [^ ]+:/.test(line) && line.includes(`:${reference} — `)));
 }
 async function waitUntil(predicate: () => boolean | Promise<boolean>, explanation: string): Promise<void> {
   const deadline = Date.now() + 5000;
@@ -414,18 +416,20 @@ for (const tcp of [false, true]) test(`late ${tcp ? "authenticated TCP" : "socke
       const questionId = question.details?.messageId as string;
       await waitUntil(() => inbound(b, questionId).length > 0, "withdrawal-control ask is received first");
       const original = history(b).incoming.get(questionId)!;
+      const refOf = (rows: string) => rosterRow(rows, "late-a")?.slice(2).split(" — ")[0];
+      const originalRef = refOf(await list(b))!;
+      assert.match(originalRef, /^[^ ]+:late-a$/, "a session on another computer is named with that computer");
       await ab.close();
-      await waitUntil(async () => !rosterRow(await list(b), "late-a"), "original sender is actually withdrawn");
+      await waitUntil(async () => !refOf(await list(b)), "original sender is actually withdrawn");
       const replacement = await admit(mc, "different-qualified-a", "late-a");
-      // B already knows "late-a" as the original sender, so the same-named newcomer gets its own reference.
-      await waitUntil(async () => Boolean(rosterRow(await list(b), "late-a~2")), "same-name different-identity actor is visible");
-      assert.ok(!rosterRow(await list(b), "late-a"), "the original reference is not recycled for the replacement");
+      await waitUntil(async () => Boolean(refOf(await list(b))), "same-name different-identity actor is visible");
+      const replacementRef = refOf(await list(b))!;
+      // The newcomer lives on a different computer, so its name never collides with the original's.
+      assert.notEqual(replacementRef, originalRef, "the original reference is not recycled for the replacement");
       assert.notEqual(qualified(replacement), original.from.id);
-      const failed = await b.call({ action: "reply", to: "late-a", replyTo: questionId, message: "must not reach replacement" });
+      const failed = await b.call({ action: "reply", to: originalRef, replyTo: questionId, message: "must not reach replacement" });
       assert.equal(failed.details?.error, true, text(failed));
-      assert.match(text(failed), /Conversation recipient is not visible or is ambiguous/);
-      assert.match(text(failed), /late-a is not currently reachable\. A different session, late-a~2, now uses that name.*Parley did not redirect this/s,
-        "the successor is named as a choice, never taken");
+      assert.match(text(failed), /Conversation recipient is not visible or is ambiguous/, "the withdrawn sender's thread fails closed, never retargeted");
       assert.equal((await outstanding(a)).some(ask => ask.messageId === questionId), true);
       assert.equal(history(a).outgoing.has(questionId), true);
       assert.equal(history(b).incoming.get(questionId)?.from.id, original.from.id);
@@ -433,7 +437,7 @@ for (const tcp of [false, true]) test(`late ${tcp ? "authenticated TCP" : "socke
       assert.match(text(await b.call({ action: "pending" })), /withdrawal must not retarget/);
       // Observe a subsequent delivery through the same B–C transport. `pending`
       // only reads local state and cannot establish receiver progress.
-      const marker = await b.call({ action: "send", to: "late-a~2", message: "withdrawal-observation-marker" });
+      const marker = await b.call({ action: "send", to: replacementRef, message: "withdrawal-observation-marker" });
       assert.equal(marker.details?.delivered, true, text(marker));
       const markerId = marker.details?.messageId as string;
       await waitUntil(() => inbound(replacement, markerId).length > 0, "subsequent marker reaches actual replacement history");

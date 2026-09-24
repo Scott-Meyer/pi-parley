@@ -75,7 +75,7 @@ A message the person typed in the `/parley` composer is labelled as written by t
 
 ### References
 
-Models, like people, work with names. Everything a model reads or types names a session by its name (`pi:parley`, `build-vm:parley`) and a message by a local number (`#12`). Canonical session and message IDs, including origin-qualified federation handles, stay on the wire and in result `details`, and parley translates in both directions.
+Models, like people, work with names. Everything a model reads or types names a session by its name and a message by a local number (`#12`). A session on this computer is named as-is (`pi-parley:Ellis`). A session on another computer carries that computer's label first (`build-vm:pi-parley:Ellis`), so the same name on two machines never collides. Canonical session and message IDs, including origin-qualified federation handles, stay on the wire and in result `details`, and parley translates in both directions.
 
 A reference stays attached to what it first named. It is never recycled, whether through a rename, a reconnect, a reload, or a different session later taking the same name. That newcomer gets `name~2` instead. Unnamed sessions appear as `unnamed`, `unnamed~2`, and hosts without a label as `remote-1`, never as ID fragments.
 

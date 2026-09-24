@@ -9,6 +9,7 @@
 
 ### Changed
 
+- Sessions on another computer are named with that computer's label first (`build-vm:pi-parley:Ellis`), and sessions on this computer keep their bare names. A same-named session on a different computer no longer collides as `name~2`.
 - A message shown again from earlier in the conversation no longer says it is "not ... active conversation". It says it is not a new delivery and that its status is current, so unanswered requests still read as owed.
 - Routing scope comes only from `PI_PARLEY_SCOPE_ID`. The temporary FlightDeck launch-context scope bridge is removed; FlightDeck now sets `PI_PARLEY_SCOPE_ID` itself.
 - Everything a model reads or types now uses human-readable references: session names (`name~2` when a different session later takes a name already seen) and per-session message numbers (`#12`). Canonical session and message IDs, including `oqs1.`/`oqm1.` federation handles, stay on the wire and in `details`; tool inputs still accept them from programmatic callers.
