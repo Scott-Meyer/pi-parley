@@ -9,6 +9,7 @@
 
 ### Changed
 
+- Tool calls from models that fill every optional field now work. Empty strings and lists count as not given, `targets` may be empty, and a `targets` list that only repeats `to` means `to`. A real `to`/`targets` conflict now says what was sent. `profile.description: null` no longer clears a focus; send a new description instead.
 - Sessions on another computer are named with that computer's label first (`build-vm:pi-parley:Ellis`), and sessions on this computer keep their bare names. A same-named session on a different computer no longer collides as `name~2`.
 - A message shown again from earlier in the conversation no longer says it is "not ... active conversation". It says it is not a new delivery and that its status is current, so unanswered requests still read as owed.
 - Routing scope comes only from `PI_PARLEY_SCOPE_ID`. The temporary FlightDeck launch-context scope bridge is removed; FlightDeck now sets `PI_PARLEY_SCOPE_ID` itself.

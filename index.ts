@@ -3670,14 +3670,32 @@ function installParleyExtension(
     })));
   }
 
+  /** Some models fill every optional field. Empty strings and lists are "not given", and a
+   * targets list that only repeats `to` means `to`. Everything else is passed through as written. */
+  function withoutPlaceholders<T extends Record<string, unknown>>(params: T): T {
+    const next: Record<string, unknown> = {};
+    for (const [key, value] of Object.entries(params)) {
+      if (typeof value === "string" && !value.trim()) continue;
+      if (Array.isArray(value) && value.length === 0) continue;
+      next[key] = value;
+    }
+    if (Array.isArray(next.targets)) {
+      const targets = next.targets as unknown[];
+      const blank = (target: unknown): boolean => typeof target === "string" && !target.trim();
+      const to = typeof next.to === "string" ? next.to.trim().toLowerCase() : undefined;
+      // A wholly blank list is a placeholder; a partly blank one stays malformed and is reported.
+      if (targets.every(blank) || (to && targets.every((target) => typeof target === "string" && target.trim().toLowerCase() === to))) delete next.targets;
+    }
+    return next as T;
+  }
+
   function normalizeToolProfilePlaceholders(profile: SelfProfileUpdate | undefined): SelfProfileUpdate | undefined {
     if (!profile) return undefined;
     const name = typeof profile.name === "string" && profile.name.trim() ? profile.name : undefined;
-    const description = profile.description === null
-      ? null
-      : typeof profile.description === "string" && profile.description.trim()
-        ? profile.description
-        : undefined;
+    // Some models fill every optional field; an empty or null description is "not given", never a clear.
+    const description = typeof profile.description === "string" && profile.description.trim()
+      ? profile.description
+      : undefined;
     if (name === undefined && description === undefined) return undefined;
     return {
       ...(name !== undefined ? { name } : {}),
@@ -4002,7 +4020,7 @@ Sessions and messages are named the way people would name them: a session by its
           Type.String(),
           Type.Null(),
         ], {
-          description: "Current focus (5-9 words), or null to clear. Display metadata, not routing identity.",
+          description: "Current focus (5-9 words). A new description replaces the old one. Display metadata, not routing identity.",
         })),
       }, {
         description: "Optional self-profile update.",
@@ -4011,7 +4029,6 @@ Sessions and messages are named the way people would name them: a session by its
         description: "One session, by the reference shown in list, receipts, or messages. For send/ask with cwd, omit to target the sole live session in that cwd or the newly opened project-pane session. For 'reply', narrows which sender you are answering.",
       })),
       targets: Type.Optional(Type.Array(Type.String(), {
-        minItems: 1,
         maxItems: MAX_EXPLICIT_SEND_TARGETS,
         description: "For 'send', several session references. Each receives an independent message and outcome. Cannot be combined with 'to', cwd targeting, replyTo, supersedes, or retryOf.",
       })),
@@ -4061,6 +4078,9 @@ Sessions and messages are named the way people would name them: a session by its
       // This call belongs to the session that started it: present and allocate with its book.
       const book = references.current;
       return callBook.run(book, async () => {
+      const sentTo = modelParams.to;
+      const sentTargets = modelParams.targets;
+      modelParams = withoutPlaceholders(modelParams);
       const resolvedReferences = resolveModelReferences(modelParams);
       if ("error" in resolvedReferences) {
         return attachSelfProfile(presentToolResult({ content: [{ type: "text" as const, text: resolvedReferences.error }], details: { error: true } }, { book }));
@@ -4447,7 +4467,7 @@ Sessions and messages are named the way people would name them: a session by its
         case "send": {
           if (to && targets) {
             return {
-              content: [{ type: "text", text: "Use either 'to' or 'targets' for send, not both." }],
+              content: [{ type: "text", text: `Nothing was sent. This call had to: ${JSON.stringify(sentTo)} and targets: ${JSON.stringify(sentTargets)}. For one colleague, use to alone; for several, targets alone (leave the other out or empty).` }],
               details: { error: true },
             };
           }

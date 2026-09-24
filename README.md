@@ -63,7 +63,7 @@ If a session is unnamed, pi-parley exposes a collision-resistant runtime-only fa
 
 `/alias` edits the current session's persisted Pi name; with no argument it opens an input in interactive mode. The `rename` tool action accepts `name` for the same canonical identity change. Neither renames another session. Send/ask call displays and delivery results include the sender identity used for that contact.
 
-Any parley action accepts an optional `profile` with `name` and/or `description`. Descriptions are 5–9 word focus labels; `description: null` clears one. A profile name can fill an unnamed/generated identity or revise a profile-managed name, but cannot replace an explicit user or host name. Results distinguish the canonical Pi name, broker-confirmed parley identity, focus, and publication status. Focus is display metadata, not a routing or permission boundary.
+Any parley action accepts an optional `profile` with `name` and/or `description`. Descriptions are 5–9 word focus labels; a new one replaces the old. Empty or `null` fields are ignored, because some models fill every optional field with a placeholder, so a profile placeholder never clears anything. A profile name can fill an unnamed/generated identity or revise a profile-managed name, but cannot replace an explicit user or host name. Results distinguish the canonical Pi name, broker-confirmed parley identity, focus, and publication status. Focus is display metadata, not a routing or permission boundary.
 
 ## Conversations
 
@@ -116,7 +116,7 @@ Local history and broker routing have different lifetimes. Thread relationships 
 | `openProjectPaneIfMissing` | boolean | For `send`/`ask` with `cwd`, launch Pi in that project through a registered generic project launcher when no matching live session exists |
 | `focus` | boolean | For `openProjectPaneIfMissing`, focus the new terminal when the launcher supports it. Defaults to true |
 | `name` | string | Canonical self-name for `rename` |
-| `profile` | object | Optional self-profile update: `{ name?, description? }`; `description: null` clears focus |
+| `profile` | object | Optional self-profile update: `{ name?, description? }`; empty or `null` fields are ignored |
 
 ### contact_supervisor
 

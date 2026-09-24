@@ -2029,7 +2029,7 @@ test("multi-target and broadcast sends reject ambiguous targeting and conversati
       message: "Ambiguous recipients",
     }, new AbortController().signal, undefined, harness.ctx);
     assert.equal(bothTargetForms.details?.error, true);
-    assert.match(bothTargetForms.content[0]?.text ?? "", /either 'to' or 'targets'/i);
+    assert.match(bothTargetForms.content[0]?.text ?? "", /Nothing was sent.*use to alone.*targets alone/s);
 
     const threadedBatch = await parleyTool.execute("invalid-thread", {
       action: "send",
@@ -3082,13 +3082,53 @@ test("any parley call can publish a durable short self description and returns s
     const restored = await waitForSessionDescription(planner, "profile-worker", "Hardening lightweight peer discovery and profiles");
     assert.equal(restored.description, "Hardening lightweight peer discovery and profiles");
 
-    const cleared = await parleyTool.execute("profile-clear", {
+    // Some models fill every optional field; placeholder profiles never wipe a focus.
+    const placeholder = await parleyTool.execute("profile-placeholder", {
       action: "status",
-      profile: { description: null },
+      profile: { name: "", description: null },
     }, new AbortController().signal, undefined, harness.ctx);
-    assert.equal((cleared.details?.selfProfile as { description?: string }).description, undefined);
-    const clearedRoster = await waitForSessionDescription(planner, "profile-worker", undefined);
-    assert.equal(clearedRoster.description, undefined);
+    assert.equal((placeholder.details?.selfProfile as { description?: string }).description, "Hardening lightweight peer discovery and profiles");
+    const replaced = await parleyTool.execute("profile-replace", {
+      action: "status",
+      profile: { description: "Reviewing placeholder tolerance in parley calls" },
+    }, new AbortController().signal, undefined, harness.ctx);
+    assert.equal((replaced.details?.selfProfile as { description?: string }).description, "Reviewing placeholder tolerance in parley calls");
+  } finally {
+    await harness.emitLifecycle("session_shutdown");
+    await cleanup();
+  }
+});
+
+test("a send with every optional field filled in still reaches the one colleague it names", { concurrency: false }, async () => {
+  const { planner, cleanup } = await setupClients();
+  const harness = createExtensionHarness("fill-all-worker", { hasUI: true });
+  const received: Message[] = [];
+  planner.on("message", (_from: SessionInfo, message: Message) => received.push(message));
+  try {
+    const { default: piParleyExtension } = await import("./index.ts");
+    piParleyExtension(harness.pi as never);
+    await harness.emitLifecycle("session_start");
+    const parleyTool = harness.tools.find((tool) => tool.name === "parley")!;
+    const run = (id: string, params: Record<string, unknown>) => parleyTool.execute(id, params, new AbortController().signal, undefined, harness.ctx);
+    // The shape one model actually produced: every optional field present, most as placeholders.
+    const filled = {
+      action: "send", profile: { name: "", description: null }, attachments: [], replyTo: "", messageId: "", label: "",
+      supersedes: "", retryOf: "", cwd: "", blocking: false, openProjectPaneIfMissing: false, focus: false, name: "",
+    };
+    const toOnly = await run("fill-to", { ...filled, to: "planner", targets: [], message: "one colleague, empty targets" });
+    assert.equal(toOnly.details?.delivered, true, modelText(toOnly));
+    const repeated = await run("fill-repeat", { ...filled, to: "planner", targets: ["planner"], message: "targets repeats to" });
+    assert.equal(repeated.details?.delivered, true, modelText(repeated));
+    const viaTargets = await run("fill-targets", { ...filled, to: "", targets: ["planner"], message: "empty to, one target" });
+    assert.ok(!(viaTargets.details as { error?: boolean } | undefined)?.error, modelText(viaTargets));
+    const deadline = Date.now() + 3000;
+    while (received.length < 3 && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 20));
+    assert.equal(received.length, 3, "all three sends reach planner");
+
+    const conflicting = await run("fill-conflict", { ...filled, to: "planner", targets: ["x"], message: "not sent" });
+    assert.equal((conflicting.details as { error?: boolean }).error, true);
+    assert.match(modelText(conflicting), /to: "planner" and targets: \["x"\].*use to alone/s, "the error shows what was sent and what to change");
+    assert.equal(received.length, 3);
   } finally {
     await harness.emitLifecycle("session_shutdown");
     await cleanup();
