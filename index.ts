@@ -3670,8 +3670,9 @@ function installParleyExtension(
     })));
   }
 
-  /** Some models fill every optional field. Empty strings and lists are "not given", and a
-   * targets list that only repeats `to` means `to`. Everything else is passed through as written. */
+  /** Some models fill every optional field. Empty strings and lists are "not given", a targets
+   * list that only repeats `to` means `to`, targets outside send are ignored, and a send naming
+   * both `to` and `targets` goes to all of them. Everything else is passed through as written. */
   function withoutPlaceholders<T extends Record<string, unknown>>(params: T): T {
     const next: Record<string, unknown> = {};
     for (const [key, value] of Object.entries(params)) {
@@ -3685,6 +3686,13 @@ function installParleyExtension(
       const to = typeof next.to === "string" ? next.to.trim().toLowerCase() : undefined;
       // A wholly blank list is a placeholder; a partly blank one stays malformed and is reported.
       if (targets.every(blank) || (to && targets.every((target) => typeof target === "string" && target.trim().toLowerCase() === to))) delete next.targets;
+      // targets only means something for send. Elsewhere it's filler, so it can't block a reply.
+      else if (next.action !== "send") delete next.targets;
+      // A send naming both reaches everyone named, each with its own outcome.
+      else if (to && next.cwd === undefined) {
+        next.targets = [next.to, ...targets.filter((target) => !(typeof target === "string" && target.trim().toLowerCase() === to))];
+        delete next.to;
+      }
     }
     return next as T;
   }
@@ -4030,7 +4038,7 @@ Sessions and messages are named the way people would name them: a session by its
       })),
       targets: Type.Optional(Type.Array(Type.String(), {
         maxItems: MAX_EXPLICIT_SEND_TARGETS,
-        description: "For 'send', several session references. Each receives an independent message and outcome. Cannot be combined with 'to', cwd targeting, replyTo, supersedes, or retryOf.",
+        description: "For 'send', several session references. Each receives an independent message and outcome; with 'to' as well, everyone named is included. Not combined with cwd targeting, replyTo, supersedes, or retryOf. Ignored by other actions.",
       })),
       message: Type.Optional(Type.String({
         description: "Message to send (for 'send', 'broadcast', 'ask', or 'reply' action)",
@@ -4081,6 +4089,11 @@ Sessions and messages are named the way people would name them: a session by its
       const sentTo = modelParams.to;
       const sentTargets = modelParams.targets;
       modelParams = withoutPlaceholders(modelParams);
+      // targets outside send is dropped; say so, in case it was meant rather than filler.
+      const ignoredTargets = modelParams.action !== "send" && Array.isArray(sentTargets) && modelParams.targets === undefined
+        && sentTargets.some((target) => typeof target === "string" && target.trim()
+          && target.trim().toLowerCase() !== (typeof sentTo === "string" ? sentTo.trim().toLowerCase() : ""))
+        ? sentTargets : undefined;
       const resolvedReferences = resolveModelReferences(modelParams);
       if ("error" in resolvedReferences) {
         return attachSelfProfile(presentToolResult({ content: [{ type: "text" as const, text: resolvedReferences.error }], details: { error: true } }, { book }));
@@ -5146,6 +5159,7 @@ Sessions and messages are named the way people would name them: a session by its
       }
       const hint = stale ? undefined : successorHintFor(params, resolvedReferences, toolResult.details);
       if (hint) toolResult.content.push({ type: "text", text: hint });
+      if (ignoredTargets) toolResult.content.push({ type: "text", text: `Ignored targets ${JSON.stringify(ignoredTargets)}: ${params.action} goes to one colleague. To reach several, send to them with targets.` });
       return attachSelfProfile(presentToolResult(toolResult, { book, sessions: routedSessions }), normalizeToolProfilePlaceholders(params.profile) !== undefined);
       });
     },

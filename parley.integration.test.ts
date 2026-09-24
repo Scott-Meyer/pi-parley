@@ -2028,8 +2028,10 @@ test("multi-target and broadcast sends reject ambiguous targeting and conversati
       targets: ["orchestrator"],
       message: "Ambiguous recipients",
     }, new AbortController().signal, undefined, harness.ctx);
-    assert.equal(bothTargetForms.details?.error, true);
-    assert.match(bothTargetForms.content[0]?.text ?? "", /Nothing was sent.*use to alone.*targets alone/s);
+    // Naming both reaches everyone named, each with its own outcome.
+    assert.equal(bothTargetForms.details?.error, undefined, bothTargetForms.content[0]?.text);
+    assert.match(bothTargetForms.content[0]?.text ?? "", /planner/);
+    assert.match(bothTargetForms.content[0]?.text ?? "", /orchestrator/);
 
     const threadedBatch = await parleyTool.execute("invalid-thread", {
       action: "send",
@@ -2074,14 +2076,16 @@ test("multi-target and broadcast sends reject ambiguous targeting and conversati
     assert.equal(oversizedTargets.details?.error, true);
     assert.match(oversizedTargets.content[0]?.text ?? "", /1-32 non-empty/i);
 
-    const batchAsk = await parleyTool.execute("invalid-batch-ask", {
+    // An ask goes to one colleague; extra targets are dropped and the result says so.
+    const batchAsk = await parleyTool.execute("batch-ask", {
       action: "ask",
       to: "planner",
       targets: ["planner", "orchestrator"],
       message: "Everyone answer",
+      blocking: false,
     }, new AbortController().signal, undefined, harness.ctx);
-    assert.equal(batchAsk.details?.error, true);
-    assert.match(batchAsk.content[0]?.text ?? "", /ask accepts one recipient/i);
+    assert.equal(batchAsk.details?.delivered, true);
+    assert.match(batchAsk.content.map((part) => part.text ?? "").join("\n"), /Ignored targets \["planner","orchestrator"\]: ask goes to one colleague/);
 
     const abortController = new AbortController();
     abortController.abort();
@@ -2098,11 +2102,12 @@ test("multi-target and broadcast sends reject ambiguous targeting and conversati
     await new Promise((resolve) => setTimeout(resolve, 25));
     assert.equal(
       receivedMessages.length,
-      2,
-      "only the placeholder regression send and the duplicated-singular send should be delivered",
+      5,
+      "the placeholder send, the duplicated-singular send, the to+targets send (to both), and the one-recipient ask",
     );
     assert.equal(receivedMessages[0]?.content.text, "Optional schema placeholders should be ignored");
     assert.equal(receivedMessages[1]?.content.text, "Duplicated singular recipient should deliver once");
+    assert.deepEqual(receivedMessages.slice(2).map((message) => message.content.text), ["Ambiguous recipients", "Ambiguous recipients", "Everyone answer"]);
 
   } finally {
     await harness.emitLifecycle("session_shutdown").catch(() => undefined);
@@ -3125,10 +3130,21 @@ test("a send with every optional field filled in still reaches the one colleague
     while (received.length < 3 && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 20));
     assert.equal(received.length, 3, "all three sends reach planner");
 
-    const conflicting = await run("fill-conflict", { ...filled, to: "planner", targets: ["x"], message: "not sent" });
-    assert.equal((conflicting.details as { error?: boolean }).error, true);
-    assert.match(modelText(conflicting), /to: "planner" and targets: \["x"\].*use to alone/s, "the error shows what was sent and what to change");
-    assert.equal(received.length, 3);
+    // A made-up extra target can't stop the real one: planner gets it, and "x" is reported as not found.
+    const withFiller = await run("fill-extra", { ...filled, to: "planner", targets: ["x"], message: "real colleague plus filler" });
+    assert.match(modelText(withFiller), /planner/);
+    assert.match(modelText(withFiller), /x/);
+    // targets means nothing outside send, so filler there can't block a reply or an ask.
+    const asked = await run("fill-ask", { ...filled, action: "ask", to: "planner", targets: ["x"], message: "quick question?", blocking: false });
+    assert.equal(asked.details?.delivered, true, modelText(asked));
+    const deadline2 = Date.now() + 3000;
+    while (received.length < 5 && Date.now() < deadline2) await new Promise((resolve) => setTimeout(resolve, 20));
+    assert.equal(received.length, 5);
+    const incoming = await planner.send("fill-all-worker", { text: "Can you confirm?", expectsReply: true, senderWaitMode: "nonblocking" });
+    assert.equal(incoming.delivered, true);
+    await waitForVisibleText(harness, "Can you confirm?");
+    const replied = await run("fill-reply", { ...filled, action: "reply", to: "planner", replyTo: incoming.id, targets: ["x"], message: "Confirmed." });
+    assert.equal(replied.details?.delivered, true, modelText(replied));
   } finally {
     await harness.emitLifecycle("session_shutdown");
     await cleanup();
