@@ -16,7 +16,12 @@ interface NativeFileLocks {
   tryLock(fd: number): boolean;
   unlock(fd: number): void;
 }
-const nativeLocks = createRequire(import.meta.url)("fs-native-extensions") as NativeFileLocks;
+// Loaded on first use, so hosts that never lock (Bun clients) never touch the addon.
+let loadedNativeLocks: NativeFileLocks | undefined;
+function nativeLocks(): NativeFileLocks {
+  loadedNativeLocks ??= createRequire(import.meta.url)("fs-native-extensions") as NativeFileLocks;
+  return loadedNativeLocks;
+}
 
 export interface ProcessLockOwner {
   readonly pid: number;
@@ -77,7 +82,7 @@ export function tryAcquireProcessLock(directory: string): ProcessLockResult {
   let retained = false;
   try {
     if (!fstatSync(fd).isFile()) throw new Error("Process lock must be a regular file");
-    if (!nativeLocks.tryLock(fd)) {
+    if (!nativeLocks().tryLock(fd)) {
       return Object.freeze({ status: "occupied", owner: readDiagnosticOwner(directory) });
     }
 
@@ -100,7 +105,7 @@ export function tryAcquireProcessLock(directory: string): ProcessLockResult {
         // Clear before closing: even if release throws, never operate on a reused fd.
         descriptor = null;
         try {
-          nativeLocks.unlock(ownedDescriptor);
+          nativeLocks().unlock(ownedDescriptor);
         } finally {
           closeSync(ownedDescriptor);
         }

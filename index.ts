@@ -3086,7 +3086,8 @@ function installParleyExtension(
   // Upstream 0.73.1 emits this event but omitted it from ExtensionAPI's event
   // overloads. Compile against the common runtime contract shared by both Pi
   // distributions instead of requiring the fork's broader declaration file.
-  const onSessionInfoChanged = pi.on as unknown as (
+  // Bound: some hosts (OMP) implement `on` as a method that needs its receiver.
+  const onSessionInfoChanged = pi.on.bind(pi) as unknown as (
     event: "session_info_changed",
     handler: (event: SessionInfoChangedEvent, ctx: ExtensionContext) => void,
   ) => void;
@@ -3114,7 +3115,7 @@ function installParleyExtension(
   // declare before/success, so compaction presence stays disabled there rather
   // than risking stale status after an ordinary provider failure. Registering
   // the additional event remains harmless on those hosts.
-  const onSessionCompactFailed = pi.on as unknown as (
+  const onSessionCompactFailed = pi.on.bind(pi) as unknown as (
     event: "session_compact_failed",
     handler: (event: unknown, ctx: ExtensionContext) => void,
   ) => void;

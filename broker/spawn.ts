@@ -191,7 +191,13 @@ export async function spawnBrokerIfNeeded(brokerCommand: string, brokerArgs: str
   ensureParleyRuntimeDir(PARLEY_DIR);
   if (await isBrokerRunning()) return;
 
-  const startup = tryAcquireProcessLock(BROKER_STARTUP_LOCK_DIR);
+  // Bun hosts (OMP) crash inside the native file-lock addon. Skipping this client-side
+  // startup lock is safe: the broker, which always runs under Node, holds the real runtime
+  // lock, and a losing duplicate exits with BROKER_RUNTIME_OCCUPIED_EXIT_CODE, which is
+  // awaited below like any other owner.
+  const startup = process.versions.bun
+    ? { status: "acquired" as const, lease: { release() {} } }
+    : tryAcquireProcessLock(BROKER_STARTUP_LOCK_DIR);
   if (startup.status === "occupied") {
     await waitForBroker();
     return;

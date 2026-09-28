@@ -4,6 +4,7 @@
 
 ### Added
 
+- Parley runs in Oh My Pi (OMP 18.2.4). Detached `pi.on` calls are bound to their host, and Bun clients skip the native startup lock that crashed them; the Node broker still holds the ownership lock. `scripts/omp-compat/run.sh` checks a two-session ask and reply in OMP.
 - Messages typed in the `/parley` composer carry `session_person` provenance, and readers see that the person at the sending session wrote them, not its agent. It's negotiated as `person-provenance-v1`. Older local receivers get the message without it, and federated peers receive text only.
 - README section on when to use Parley vs Threadroom. The skill notes that questions for a person, and records meant to outlast the sessions, belong elsewhere.
 
