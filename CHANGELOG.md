@@ -10,6 +10,7 @@
 
 ### Changed
 
+- An unnamed session's own receipts and self-profile say `unnamed` rather than its runtime `session-<id>` alias. `/parley-id` still inserts the alias, because it's the contact other sessions can route to.
 - Tool calls from models that fill every optional field now work. Empty strings and lists count as not given, `targets` may be empty, and a `targets` list that only repeats `to` means `to`. A send naming both `to` and `targets` goes to everyone named, each with its own outcome. Other actions ignore `targets` and say so, so filler there can't block a reply or an ask. `profile.description: null` no longer clears a focus; send a new description instead.
 - Sessions on another computer are named with that computer's label first (`build-vm:pi-parley:Ellis`), and sessions on this computer keep their bare names. A same-named session on a different computer no longer collides as `name~2`.
 - A message shown again from earlier in the conversation no longer says it is "not ... active conversation". It says it is not a new delivery and that its status is current, so unanswered requests still read as owed.

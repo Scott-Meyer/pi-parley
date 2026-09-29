@@ -1167,6 +1167,11 @@ test("unnamed sessions use a neutral collision-resistant runtime alias", { concu
     assert.notEqual(first.isSubagent, true);
     assert.notEqual(second.isSubagent, true);
     assert.notEqual(first.name, second.name);
+    // The alias routes; the sender's own receipt still names it readably.
+    const tool = firstHarness.tools.find((candidate) => candidate.name === "parley")!;
+    const sent = await tool.execute("unnamed-send", { action: "send", to: "planner", message: "hello from an unnamed session" }, new AbortController().signal, undefined, firstHarness.ctx);
+    assert.match(modelText(sent), /sent as unnamed to planner/);
+    assert.doesNotMatch(modelText(sent), /session-019fe418/);
   } finally {
     await firstHarness.emitLifecycle("session_shutdown");
     await secondHarness.emitLifecycle("session_shutdown");

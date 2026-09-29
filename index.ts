@@ -1320,7 +1320,10 @@ function installParleyExtension(
    * canonical Pi name. Captured at send time so receipts keep the identity
    * actually used, even after a later rename. */
   function currentSendIdentity(client: ParleyClient): string {
-    return client.getSelfSession()?.name?.trim() || pi.getSessionName()?.trim() || "unnamed session";
+    // A runtime fallback alias (session-<id>) is routing machinery, not a name to show.
+    const self = client.getSelfSession();
+    const name = self?.runtimeFallbackAlias ? undefined : self?.name?.trim();
+    return name || pi.getSessionName()?.trim() || "unnamed";
   }
   function waitForReply(from: string, replyTo: string, signal?: AbortSignal, cancelOnAbort?: () => void, getDeliveryState: () => string = () => "unknown", endpointEpoch?: string, originEpoch?: string): Promise<Message> {
     if (replyWaiter) {
@@ -3825,8 +3828,11 @@ function installParleyExtension(
   } {
     const requestedName = pi.getSessionName()?.trim() || observedSessionName;
     const fallbackId = currentParleySessionId ?? currentSessionId;
-    const name = requestedName || (fallbackId ? resolveParleyPresenceName(undefined, fallbackId) : "unnamed");
-    const effectiveName = client?.getSelfSession()?.name;
+    void fallbackId;
+    // An unnamed session routes by a runtime alias (session-<id>); the model only ever sees "unnamed".
+    const name = requestedName || "unnamed";
+    const self = client?.getSelfSession();
+    const effectiveName = self?.runtimeFallbackAlias ? undefined : self?.name;
     return {
       name,
       ...(currentSessionDescription ? { description: currentSessionDescription } : {}),
