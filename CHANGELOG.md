@@ -10,6 +10,7 @@
 
 ### Changed
 
+- When a name matches no session, the result points at sessions it probably meant: the last part of a session name (`June` for `MistFall Windows:June`) or the persona leading a description. It's a hint only, never a reroute. A `label` on a multi-target send no longer blocks the send; the messages go out and the result says the label wasn't applied.
 - An unnamed session's own receipts and self-profile say `unnamed` rather than its runtime `session-<id>` alias. `/parley-id` still inserts the alias, because it's the contact other sessions can route to.
 - Tool calls from models that fill every optional field now work. Empty strings and lists count as not given, `targets` may be empty, and a `targets` list that only repeats `to` means `to`. A send naming both `to` and `targets` goes to everyone named, each with its own outcome. Other actions ignore `targets` and say so, so filler there can't block a reply or an ask. `profile.description: null` no longer clears a focus; send a new description instead.
 - Sessions on another computer are named with that computer's label first (`build-vm:pi-parley:Ellis`), and sessions on this computer keep their bare names. A same-named session on a different computer no longer collides as `name~2`.

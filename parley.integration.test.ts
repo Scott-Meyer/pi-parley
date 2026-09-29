@@ -3156,6 +3156,33 @@ test("a send with every optional field filled in still reaches the one colleague
   }
 });
 
+test("a colleague called by the last part of their name gets a pointer, and a labelled group send still goes out", { concurrency: false }, async () => {
+  const { planner, cleanup } = await setupClients();
+  const harness = createExtensionHarness("workspace:Nico", { hasUI: true });
+  const colleague = new ParleyClient();
+  try {
+    await colleague.connect({ name: "workspace:June", cwd: repoDir, model: "m", pid: process.pid, startedAt: Date.now(), lastActivity: Date.now() });
+    const { default: piParleyExtension } = await import("./index.ts");
+    piParleyExtension(harness.pi as never);
+    await harness.emitLifecycle("session_start");
+    await waitForSessionByName(planner, "workspace:Nico");
+    const tool = harness.tools.find((candidate) => candidate.name === "parley")!;
+    const run = (id: string, params: Record<string, unknown>) => tool.execute(id, params, new AbortController().signal, undefined, harness.ctx);
+
+    const shortName = await run("short-name", { action: "send", targets: ["June", "planner"], message: "resuming the pass" });
+    assert.match(modelText(shortName), /No session is named "June"\. Did you mean workspace:June\?/);
+    assert.doesNotMatch(modelText(shortName), /planner"\. Did you mean/, "names that exist get no hint");
+
+    const labelled = await run("labelled-batch", { action: "send", targets: ["workspace:June", "planner"], label: "status", message: "labelled group update" });
+    assert.match(modelText(labelled), /Message accepted for 2 of 2 targets/);
+    assert.match(modelText(labelled), /Label "status" was not applied/);
+  } finally {
+    await colleague.disconnect().catch(() => undefined);
+    await harness.emitLifecycle("session_shutdown");
+    await cleanup();
+  }
+});
+
 test("profile names fill unnamed sessions but never replace an explicit Pi name", { concurrency: false }, async () => {
   const { planner, cleanup } = await setupClients();
   const explicit = createExtensionHarness("FlightDeck Owner", { hasUI: true, sessionId: "profile-explicit" });

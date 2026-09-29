@@ -3674,6 +3674,31 @@ function installParleyExtension(
     })));
   }
 
+  /** Colleagues are often called by the last part of their session name ("June" for
+   * "MistFall Windows:June") or by the persona leading their description. When a name
+   * matches no session, point at the ones it probably meant. A hint only; never a reroute. */
+  async function nameSuggestions(requested: string[]): Promise<string | undefined> {
+    const live = client;
+    if (!live?.isConnected()) return undefined;
+    let sessions: SessionInfo[];
+    try { sessions = await live.listSessions({ timeoutMs: 2000 }); } catch { return undefined; }
+    const lines: string[] = [];
+    for (const raw of requested) {
+      const want = raw.trim().toLowerCase();
+      if (sessions.some((session) => session.name?.toLowerCase() === want || references.current.sessionRef(session).toLowerCase() === want)) continue;
+      const matches = sessions.filter((session) => {
+        const last = session.name?.toLowerCase().split(":").at(-1)?.trim();
+        const persona = session.description?.split(/\s+[—–-]\s+/)[0]?.trim().toLowerCase();
+        return last === want || persona === want;
+      });
+      if (matches.length) {
+        const refs = matches.map((session) => references.current.sessionRef(session)).join(", ");
+        lines.push(`No session is named "${raw}". ${matches.length === 1 ? `Did you mean ${refs}?` : `Sessions it could mean: ${refs}.`}`);
+      }
+    }
+    return lines.length ? lines.join("\n") : undefined;
+  }
+
   /** Some models fill every optional field. Empty strings and lists are "not given", a targets
    * list that only repeats `to` means `to`, targets outside send are ignored, and a send naming
    * both `to` and `targets` goes to all of them. Everything else is passed through as written. */
@@ -4112,10 +4137,9 @@ Sessions and messages are named the way people would name them: a session by its
       // Labels are claimed before any await, so concurrent calls cannot both take one.
       const requestedLabel = typeof params.label === "string" && params.label.trim() ? params.label : undefined;
       let labelReservation: ReturnType<ReferenceBook["reserveLabel"]> | undefined;
-      if (requestedLabel && (params.action === "send" || params.action === "ask")) {
-        if (params.targets?.some((target) => target.trim())) {
-          return attachSelfProfile(presentToolResult({ content: [{ type: "text" as const, text: "A label names one message; a multi-target send creates one message per recipient. Label each afterwards with the label action." }], details: { error: true } }, { book }));
-        }
+      // A label names one message, and a multi-target send makes one per recipient: send anyway, skip the label, say so.
+      const labelSkippedForBatch = Boolean(requestedLabel && params.action === "send" && params.targets?.some((target) => target.trim()));
+      if (requestedLabel && !labelSkippedForBatch && (params.action === "send" || params.action === "ask")) {
         labelReservation = book.reserveLabel(requestedLabel);
         if (!labelReservation.ok) {
           return attachSelfProfile(presentToolResult({ content: [{ type: "text" as const, text: `Label not available: ${labelReservation.reason} Nothing was sent.` }], details: { error: true } }, { book }));
@@ -5166,6 +5190,13 @@ Sessions and messages are named the way people would name them: a session by its
       }
       const hint = stale ? undefined : successorHintFor(params, resolvedReferences, toolResult.details);
       if (hint) toolResult.content.push({ type: "text", text: hint });
+      if (labelSkippedForBatch) toolResult.content.push({ type: "text", text: `Label "${requestedLabel}" was not applied: a multi-target send makes one message per recipient. Label one afterwards with the label action.` });
+      const resultText = toolResult.content.map((part) => part.type === "text" ? part.text ?? "" : "").join("\n");
+      if (/Session not found/.test(resultText)) {
+        const requested = [sentTo, ...(Array.isArray(sentTargets) ? sentTargets : [])].filter((value): value is string => typeof value === "string" && Boolean(value.trim()));
+        const hint = await nameSuggestions(requested);
+        if (hint) toolResult.content.push({ type: "text", text: hint });
+      }
       if (ignoredTargets) toolResult.content.push({ type: "text", text: `Ignored targets ${JSON.stringify(ignoredTargets)}: ${params.action} goes to one colleague. To reach several, send to them with targets.` });
       return attachSelfProfile(presentToolResult(toolResult, { book, sessions: routedSessions }), normalizeToolProfilePlaceholders(params.profile) !== undefined);
       });
