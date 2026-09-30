@@ -926,6 +926,8 @@ function installParleyExtension(
   // A tool call keeps the book of the session that started it through every await and helper,
   // so a result that outlives its session never allocates in the session that replaced it.
   const callBook = new AsyncLocalStorage<ReferenceBook>();
+  /** Notes about short names resolved during one tool call, reported in its result. */
+  const shortNameNotes = new AsyncLocalStorage<string[]>();
   const references = {
     get current(): ReferenceBook { return callBook.getStore() ?? sessionBook; },
   };
@@ -2579,6 +2581,14 @@ function installParleyExtension(
     if (byName.length === 1) {
       return byName[0]!;
     }
+    // "June" for "MistFall Windows:June": reach the one session whose name ends that way, and say so.
+    const byLastPart = sessions.filter((s) => s.name?.toLowerCase().split(":").at(-1)?.trim() === lowerName.trim());
+    if (byLastPart.length === 1) {
+      const session = byLastPart[0]!;
+      const ref = references.current.sessionRef(session);
+      shortNameNotes.getStore()?.push(`"${nameOrId}" isn't a full session name, so this went to ${ref}, the only session it matches. Use ${ref} to be exact.`);
+      return session;
+    }
 
     const byIdPrefix = sessions.filter(s => s.id.startsWith(nameOrId));
     if (byIdPrefix.length === 1) {
@@ -4117,7 +4127,8 @@ Sessions and messages are named the way people would name them: a session by its
       const actionGeneration = runtimeGeneration;
       // This call belongs to the session that started it: present and allocate with its book.
       const book = references.current;
-      return callBook.run(book, async () => {
+      const callShortNameNotes: string[] = [];
+      return shortNameNotes.run(callShortNameNotes, () => callBook.run(book, async () => {
       const sentTo = modelParams.to;
       const sentTargets = modelParams.targets;
       modelParams = withoutPlaceholders(modelParams);
@@ -4132,6 +4143,9 @@ Sessions and messages are named the way people would name them: a session by its
       }
       const params = resolvedReferences.params;
       const pinned = (value?: string): boolean => typeof value === "string" && resolvedReferences.pinnedIds.has(value);
+      // An unresolved name is not a session identity; recording it as one would present it as "unnamed".
+      const knownTarget = (value?: string): string | undefined =>
+        value !== undefined && (pinned(value) || isCanonicalIdentity(value) || references.current.isKnownSession(value)) ? value : undefined;
       const display = (value?: string): string | undefined => value === undefined ? undefined : resolvedReferences.displayFor.get(value) ?? value;
       const routedSessions = new Set<string>(resolvedReferences.pinnedIds);
       // Labels are claimed before any await, so concurrent calls cannot both take one.
@@ -4667,11 +4681,13 @@ Sessions and messages are named the way people would name them: a session by its
                 };
               }
             }
+            const resolvedTargetId = cwd ? undefined : await resolveSessionTarget(connectedClient, to!, pinned(to));
             const target: DeliveryTarget = cwd
               ? await resolveCwdDeliveryTarget(connectedClient, { to, exactTo: pinned(to), cwd, openProjectPaneIfMissing, focus, signal: _signal })
-              : { id: await resolveSessionTarget(connectedClient, to!, pinned(to)) ?? to!, label: display(to)! };
+              : { id: resolvedTargetId ?? to!, label: display(to)! };
             const sendTo = target.id;
-            routedSessions.add(sendTo);
+            // Only a real identity is routed; an unmatched name stays text, not an "unnamed" session.
+            if (cwd || resolvedTargetId || knownTarget(sendTo)) routedSessions.add(sendTo);
             const targetDisplay = target.projectPane ? target.label : display(to) ?? target.label;
             if (sendTo === connectedClient.sessionId) {
               return {
@@ -4725,7 +4741,7 @@ Sessions and messages are named the way people would name them: a session by its
             settleSupersededQuestion();
             recordActionEntry("parley_sent", {
               to: targetDisplay,
-              targetId: result.recipient?.id ?? sendTo,
+              targetId: result.recipient?.id ?? knownTarget(sendTo),
               as: sendIdentity!,
               toolCallId: _toolCallId,
               message: { text: message, attachments, replyTo, completesAsk: false, supersedes, retryOf },
@@ -4888,7 +4904,7 @@ Sessions and messages are named the way people would name them: a session by its
               settleSupersededQuestion();
               recordActionEntry("parley_sent", {
                 to: targetDisplay,
-                targetId: sendResult.recipient?.id ?? sendTo,
+                targetId: sendResult.recipient?.id ?? knownTarget(sendTo),
                 as: sendIdentity!,
                 toolCallId: _toolCallId,
                 message: { text: message, attachments, replyTo, completesAsk: false, supersedes, retryOf },
@@ -4957,7 +4973,7 @@ Sessions and messages are named the way people would name them: a session by its
             settleSupersededQuestion();
             recordActionEntry("parley_sent", {
               to: targetDisplay,
-              targetId: sendResult.recipient?.id ?? sendTo,
+              targetId: sendResult.recipient?.id ?? knownTarget(sendTo),
               as: sendIdentity!,
               toolCallId: _toolCallId,
               message: { text: message, attachments, replyTo, completesAsk: false, supersedes, retryOf },
@@ -5190,6 +5206,7 @@ Sessions and messages are named the way people would name them: a session by its
       }
       const hint = stale ? undefined : successorHintFor(params, resolvedReferences, toolResult.details);
       if (hint) toolResult.content.push({ type: "text", text: hint });
+      for (const note of callShortNameNotes) toolResult.content.push({ type: "text", text: note });
       if (labelSkippedForBatch) toolResult.content.push({ type: "text", text: `Label "${requestedLabel}" was not applied: a multi-target send makes one message per recipient. Label one afterwards with the label action.` });
       const resultText = toolResult.content.map((part) => part.type === "text" ? part.text ?? "" : "").join("\n");
       if (/Session not found/.test(resultText)) {
@@ -5199,7 +5216,7 @@ Sessions and messages are named the way people would name them: a session by its
       }
       if (ignoredTargets) toolResult.content.push({ type: "text", text: `Ignored targets ${JSON.stringify(ignoredTargets)}: ${params.action} goes to one colleague. To reach several, send to them with targets.` });
       return attachSelfProfile(presentToolResult(toolResult, { book, sessions: routedSessions }), normalizeToolProfilePlaceholders(params.profile) !== undefined);
-      });
+      }));
     },
     renderCall(args, theme, context) {
       const action = typeof args.action === "string" ? args.action : PARLEY_TOOL_NAME;

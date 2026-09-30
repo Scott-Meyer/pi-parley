@@ -3156,7 +3156,7 @@ test("a send with every optional field filled in still reaches the one colleague
   }
 });
 
-test("a colleague called by the last part of their name gets a pointer, and a labelled group send still goes out", { concurrency: false }, async () => {
+test("a colleague called by the last part of their name is reached when unambiguous, and a labelled group send still goes out", { concurrency: false }, async () => {
   const { planner, cleanup } = await setupClients();
   const harness = createExtensionHarness("workspace:Nico", { hasUI: true });
   const colleague = new ParleyClient();
@@ -3169,9 +3169,23 @@ test("a colleague called by the last part of their name gets a pointer, and a la
     const tool = harness.tools.find((candidate) => candidate.name === "parley")!;
     const run = (id: string, params: Record<string, unknown>) => tool.execute(id, params, new AbortController().signal, undefined, harness.ctx);
 
+    // One session's name ends in ":June", so "June" reaches it, and the result says how.
     const shortName = await run("short-name", { action: "send", targets: ["June", "planner"], message: "resuming the pass" });
-    assert.match(modelText(shortName), /No session is named "June"\. Did you mean workspace:June\?/);
-    assert.doesNotMatch(modelText(shortName), /planner"\. Did you mean/, "names that exist get no hint");
+    assert.match(modelText(shortName), /Message accepted for 2 of 2 targets/);
+    assert.match(modelText(shortName), /"June" isn't a full session name, so this went to workspace:June, the only session it matches/);
+    const single = await run("short-single", { action: "send", to: "june", message: "one to one" });
+    assert.equal(single.details?.delivered, true, modelText(single));
+
+    // Two sessions end in ":June": nothing is guessed, and the result names both.
+    const other = new ParleyClient();
+    await other.connect({ name: "elsewhere:June", cwd: repoDir, model: "m", pid: process.pid, startedAt: Date.now(), lastActivity: Date.now() });
+    try {
+      const ambiguous = await run("short-ambiguous", { action: "send", to: "June", message: "who gets this?" });
+      assert.notEqual(ambiguous.details?.delivered, true);
+      assert.match(modelText(ambiguous), /No session is named "June"\. Sessions it could mean: .*workspace:June.*elsewhere:June|elsewhere:June.*workspace:June/);
+    } finally {
+      await other.disconnect().catch(() => undefined);
+    }
 
     const labelled = await run("labelled-batch", { action: "send", targets: ["workspace:June", "planner"], label: "status", message: "labelled group update" });
     assert.match(modelText(labelled), /Message accepted for 2 of 2 targets/);
