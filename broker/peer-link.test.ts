@@ -76,6 +76,26 @@ test("inbound hello must match independently prepared origin and local scope aut
   socket.destroy();
 });
 
+test("a new link from a peer replaces its old one once the old one has been up a while", (t) => {
+  const manager = new PeerLinkManager();
+  const oldSocket = new net.Socket();
+  const first = manager.acceptInbound(oldSocket, hello("link_old_12345678"), manager.prepareInbound(preparation("link_old_12345678")));
+  assert.equal(first.ack.accepted, true);
+
+  // A fresh second attach seconds later is a genuine race, settled by preferred direction as before.
+  const racing = manager.acceptInbound(new net.Socket(), hello("link_race_12345678"), manager.prepareInbound(preparation("link_race_12345678")));
+  assert.equal(racing.ack.accepted, false);
+
+  // After the peer's broker restarts, this side can still hold the old link's socket with nothing behind it.
+  // A newly authorized link to the same origin must not be refused because of it.
+  t.mock.timers.enable({ apis: ["Date"], now: Date.now() + 11_000 });
+  const replacement = manager.acceptInbound(new net.Socket(), hello("link_new_12345678"), manager.prepareInbound(preparation("link_new_12345678")));
+  assert.equal(replacement.ack.accepted, true, JSON.stringify(replacement.ack));
+  assert.equal(manager.size, 1, "the stale link is gone, not kept alongside");
+  assert.equal(oldSocket.destroyed, true, "the stale link's socket is closed");
+  t.mock.timers.reset();
+});
+
 async function createAckServer(
   origin = remoteOrigin,
   ackFeatures: string[] = [...FEDERATION_REQUIRED_FEATURES],

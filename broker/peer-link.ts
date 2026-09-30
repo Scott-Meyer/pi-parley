@@ -27,6 +27,14 @@ import {
 
 const PEER_HANDSHAKE_TIMEOUT_MS = 5_000;
 const MAX_PEER_LINKS = 16;
+/** A link to an origin that has lived this long is replaced by a newly authorized one rather than
+ * defended. When a remote broker restarts or its controller changes, the old link's socket can stay
+ * open on this side with nothing behind it, and refusing the new link would strand that peer. The
+ * preferred-direction rule still settles genuine simultaneous attaches, which happen within moments. */
+const REPLACEABLE_LINK_AGE_MS = 10_000;
+function isReplaceable(link: FederationPeerLink): boolean {
+  return Date.now() - link.connectedAt >= REPLACEABLE_LINK_AGE_MS;
+}
 const PEER_FRAME_RATE_CAPACITY = 240;
 const PEER_FRAME_REFILL_PER_SECOND = 120;
 
@@ -146,7 +154,7 @@ export class PeerLinkManager {
       return { ack: rejection(hello, "E_ALREADY_CONNECTED", "Peer link ID is already connected") };
     }
     const existing = this.getLinkForRemoteOrigin(hello.origin.id);
-    if (existing && (
+    if (existing && !isReplaceable(existing) && (
       existing.direction === "inbound"
       || !this.isPreferredDirection("inbound", prepared.localOrigin.id, prepared.remoteOrigin.id)
     )) {
@@ -202,7 +210,7 @@ export class PeerLinkManager {
       throw new FederationPeerError("E_ALREADY_CONNECTED", "Peer link ID is already connected");
     }
     const existing = this.getLinkForRemoteOrigin(value.remoteOrigin.id);
-    if (existing && (existing.direction === "outbound"
+    if (existing && !isReplaceable(existing) && (existing.direction === "outbound"
       || !this.isPreferredDirection("outbound", value.localOrigin.id, value.remoteOrigin.id))) {
       throw new FederationPeerError("E_ALREADY_CONNECTED", "The existing peer link has the deterministic preferred direction");
     }
@@ -452,10 +460,10 @@ export class PeerLinkManager {
     }
     const existing = this.getLinkForRemoteOrigin(link.remoteOrigin.id);
     if (existing) {
-      if (
+      if (!isReplaceable(existing) && (
         this.isPreferredDirection(existing.direction, existing.localOrigin.id, existing.remoteOrigin.id)
         || !this.isPreferredDirection(link.direction, link.localOrigin.id, link.remoteOrigin.id)
-      ) {
+      )) {
         throw new FederationPeerError("E_ALREADY_CONNECTED", "The existing peer link has the deterministic preferred direction");
       }
       this.unregisterLink(existing);
