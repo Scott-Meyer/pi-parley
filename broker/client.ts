@@ -356,8 +356,7 @@ export class ParleyClient extends EventEmitter {
           session,
           ...(sessionId ? { sessionId } : {}),
           ...(scopeId ? { scopeId } : {}),
-          // No compaction awareness: peers are never told about each other's context.
-          clientFeatures: [CONVERSATION_CONTRACT_FEATURE, EXACT_SEND_FEATURE, EXACT_IDENTITY_SEND_FEATURE, FEDERATED_CONVERSATION_FEATURE, PERSON_PROVENANCE_FEATURE],
+          clientFeatures: [COMPACTION_AWARENESS_FEATURE, CONVERSATION_CONTRACT_FEATURE, EXACT_SEND_FEATURE, EXACT_IDENTITY_SEND_FEATURE, FEDERATED_CONVERSATION_FEATURE, PERSON_PROVENANCE_FEATURE],
           ...(typeof target === "string" ? {} : { stateId: target.stateId }),
         });
       } catch (error) {

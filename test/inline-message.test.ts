@@ -64,7 +64,7 @@ test("compaction notices identify the actual peer after mailbox identity rebound
   });
   assert.match(notice, /replacement-worker \[session replacement-session-id\]/);
   assert.match(notice, /message was requested for departed-worker \[session departed-session-id\]/);
-  assert.doesNotMatch(notice, /Notice: departed-worker compacted/);
+  assert.doesNotMatch(notice, /Note: departed-worker has compacted/);
 });
 
 test("broker-authored rebound ID wins even when it matches the replacement name", () => {
@@ -88,7 +88,7 @@ test("routing names are not mistaken for stable-ID rebound", () => {
     previousGeneration: 1,
     compactedAt: 1234,
   }, "planner");
-  assert.match(notice, /Notice: planner compacted/);
+  assert.match(notice, /Note: planner has compacted/);
   assert.doesNotMatch(notice, /message was requested for/);
 });
 
@@ -240,7 +240,7 @@ test("with typed naming, a rebound notice names each identity by its own referen
     previousGeneration: 1,
     compactedAt: 1234,
   }, undefined, (id, name) => book.sessionRef(name ? { id, name } : id));
-  assert.match(notice, /^Notice: Bob~2 \(message was requested for Bob\) compacted context/);
+  assert.match(notice, /^Note: Bob~2 \(message was requested for Bob\) has compacted since you last talked/);
   assert.doesNotMatch(notice, /\[session|builder/, "no raw identity, and never another session's reference");
 });
 
@@ -263,6 +263,6 @@ test("a delivery receipt carrying a rebound compaction notice names every identi
     sessionName: (id, name) => book.sessionRef(name ? { id, name } : id),
   });
   assert.match(receipt, /^Message sent as observer to Bob~2\.\nMessage: #1/);
-  assert.match(receipt, /Notice: Bob~2 \(message was requested for Bob\) compacted context/);
+  assert.match(receipt, /Note: Bob~2 \(message was requested for Bob\) has compacted since you last talked/);
   assert.doesNotMatch(receipt, /\[session|builder/, "no raw identity, and never another session's reference");
 });

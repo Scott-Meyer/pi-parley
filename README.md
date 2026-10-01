@@ -170,7 +170,7 @@ Results preserve separate observations: **launch request accepted or command sta
 
 ### Nobody's context is shared
 
-Parley never tells a session anything about another session's context: no usage numbers, no compaction notices, no `compacting` status. A colleague's words are what you get.
+Parley never tells a session anything about another session's context: no usage numbers and no `compacting` status. The one exception is a small note on your own receipt: when you send to a colleague you've talked to before and they've compacted since, the receipt says so once ("Note: Hazel has compacted since you last talked. It probably still knows what's going on, but if this depends on something specific from before, its memory of that may be vaguer."). The receiving side is never told anything about the sender.
 
 ## Keyboard Shortcuts
 

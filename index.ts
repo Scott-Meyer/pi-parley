@@ -1787,7 +1787,44 @@ function installParleyExtension(
   }
 
   function flushPendingCompactionReports(): void {
-    // Compaction is never reported to the broker, so no peer is told about anyone's context.
+    if (compactionReportFlush || pendingCompactionReports.size === 0) return;
+    const activeClient = client;
+    const expectedGeneration = runtimeGeneration;
+    if (!activeClient?.isConnected() || !activeClient.supportsFeature(COMPACTION_AWARENESS_FEATURE)) return;
+
+    clearCompactionReportRetryTimer();
+    compactionReportFlush = (async () => {
+      while (
+        expectedGeneration === runtimeGeneration
+        && activeClient === client
+        && activeClient.isConnected()
+        && pendingCompactionReports.size > 0
+      ) {
+        const next = pendingCompactionReports.entries().next().value as [string, number] | undefined;
+        if (!next) return;
+        const [eventId, compactedAt] = next;
+        try {
+          const recorded = await activeClient.reportCompactionCompleted(eventId);
+          if (expectedGeneration !== runtimeGeneration || activeClient !== client) return;
+          pi.appendEntry("parley_compaction_recorded", {
+            eventId,
+            compactedAt,
+            generation: recorded.generation,
+            recordedAt: recorded.compactedAt,
+          });
+          pendingCompactionReports.delete(eventId);
+        } catch {
+          scheduleCompactionReportRetry(expectedGeneration);
+          return;
+        }
+      }
+    })().finally(() => {
+      if (expectedGeneration !== runtimeGeneration) return;
+      compactionReportFlush = null;
+      if (pendingCompactionReports.size > 0) {
+        scheduleCompactionReportRetry(expectedGeneration);
+      }
+    });
   }
 
 
@@ -3058,6 +3095,13 @@ function installParleyExtension(
   });
   pi.on("session_compact", (_event, ctx) => {
     finishCompactionStatus(ctx);
+    if (getLiveContext(ctx)) {
+      const eventId = randomUUID();
+      const compactedAt = Date.now();
+      pi.appendEntry("parley_compaction_pending", { eventId, compactedAt });
+      pendingCompactionReports.set(eventId, compactedAt);
+      flushPendingCompactionReports();
+    }
   });
   // Earendil Pi 0.85+ reports aborts and failures explicitly. Older hosts only
   // declare before/success, so compaction presence stays disabled there rather

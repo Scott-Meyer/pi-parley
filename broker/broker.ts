@@ -452,9 +452,8 @@ class ParleyBroker {
       .every(feature => session.clientFeatures.has(feature));
   }
 
-  /** Parley never tells anyone about another session's context, so no compaction notices. */
-  private supportsCompactionAwareness(_session: ConnectedSession): boolean {
-    return false;
+  private supportsCompactionAwareness(session: ConnectedSession): boolean {
+    return session.clientFeatures.has(COMPACTION_AWARENESS_FEATURE);
   }
 
   private directContactPlan(
@@ -1668,7 +1667,7 @@ class ParleyBroker {
         this.writeBrokerFrame(socket, {
           type: "registered",
           sessionId: id,
-          features: [EXTENSION_BUS_FEATURE, EXACT_SEND_FEATURE, EXACT_IDENTITY_SEND_FEATURE, SESSION_PROFILE_FEATURE, CONVERSATION_CONTRACT_FEATURE, FEDERATED_CONVERSATION_FEATURE, PERSON_PROVENANCE_FEATURE],
+          features: [EXTENSION_BUS_FEATURE, EXACT_SEND_FEATURE, EXACT_IDENTITY_SEND_FEATURE, COMPACTION_AWARENESS_FEATURE, SESSION_PROFILE_FEATURE, CONVERSATION_CONTRACT_FEATURE, FEDERATED_CONVERSATION_FEATURE, PERSON_PROVENANCE_FEATURE],
           session: info,
         });
         this.broadcastScoped({ type: "session_joined", session: info }, info, key, scopeId);
@@ -2006,7 +2005,7 @@ class ParleyBroker {
             brokerReceivedAt,
             brokerDeliveredAt: Date.now(),
             ...(message.expectsReply ? { replyDeadline: brokerReceivedAt + this.askTimeoutMs } : {}),
-            ...(receiverContact?.notice ? { peerCompaction: receiverContact.notice } : {}),
+            // Incoming messages never carry a note about the sender; only the sender's own receipt does.
             ...(receiverContactToken ? { contactToken: receiverContactToken } : {}),
             ...(receiverContact?.durableBaseline ? { contactBaseline: true } : {}),
           };
@@ -2133,7 +2132,7 @@ class ParleyBroker {
             ...message,
             brokerReceivedAt,
             brokerDeliveredAt: Date.now(),
-            ...(receiverContact?.notice ? { peerCompaction: receiverContact.notice } : {}),
+            // Incoming messages never carry a note about the sender; only the sender's own receipt does.
             ...(receiverContactToken ? { contactToken: receiverContactToken } : {}),
             ...(receiverContact?.durableBaseline ? { contactBaseline: true } : {}),
           };
@@ -2790,7 +2789,7 @@ class ParleyBroker {
       const deliveredMessage: Message = {
         ...entry.message,
         brokerDeliveredAt: Date.now(),
-        ...(receiverContact?.notice ? { peerCompaction: receiverContact.notice } : {}),
+        // Incoming messages never carry a note about the sender; only the sender's own receipt does.
         ...(receiverContactToken ? { contactToken: receiverContactToken } : {}),
         ...(receiverContact?.durableBaseline ? { contactBaseline: true } : {}),
       };

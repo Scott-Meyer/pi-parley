@@ -295,7 +295,7 @@ test("opt-in TCP broker requires endpoint state for health and registration", { 
     const registered = registerMessages[0] as { type: string; sessionId: string; features: string[]; session: SessionInfo };
     assert.equal(registered.type, "registered");
     assert.equal(registered.sessionId, "authorized-tcp-client");
-    for (const feature of ["extension-bus-v1", "exact-send-v1", "session-profile-v1", "conversation-contract-v1"]) {
+    for (const feature of ["extension-bus-v1", "exact-send-v1", "compaction-awareness-v1", "session-profile-v1", "conversation-contract-v1"]) {
       assert.ok(registered.features.includes(feature), `the TCP endpoint must advertise ${feature}`);
     }
     assert.equal(registered.session.id, "authorized-tcp-client");
@@ -2531,9 +2531,12 @@ test("sessions publish automatic lifecycle status", { concurrency: false }, asyn
     await harness.emitLifecycle("session_before_compact", { signal: idleCompaction.signal, reason: "manual" });
     await harness.emitLifecycle("session_compact", { reason: "manual" });
     await waitForSessionStatus(planner, "status-worker", "idle");
-    // Compaction is private: no "compacting" status, and nothing is recorded for peers.
-    await new Promise((resolve) => setTimeout(resolve, 100));
-    assert.equal(harness.entries.some((entry) => entry.type === "parley_compaction_pending" || entry.type === "parley_compaction_recorded"), false);
+    // No "compacting" status; the compaction itself is recorded so a later sender can be told, gently.
+    const reportDeadline = Date.now() + 2_000;
+    while (!harness.entries.some((entry) => entry.type === "parley_compaction_recorded") && Date.now() < reportDeadline) {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    assert.ok(harness.entries.some((entry) => entry.type === "parley_compaction_recorded"));
 
     const freshEventContext = {
       ...harness.ctx,
@@ -2565,7 +2568,11 @@ test("sessions publish automatic lifecycle status", { concurrency: false }, asyn
     await harness.emitLifecycle("tool_execution_end", { toolCallId: "tool-2", toolName: "read" });
     await waitForSessionStatus(planner, "status-worker", "thinking");
 
-    assert.equal(harness.entries.some((entry) => entry.type === "parley_compaction_recorded"), false, "compaction is never reported");
+    assert.equal(
+      harness.entries.filter((entry) => entry.type === "parley_compaction_recorded").length,
+      1,
+      "failed and aborted compactions must not advance the durable generation",
+    );
 
     await harness.emitLifecycle("agent_end");
     await waitForSessionStatus(planner, "status-worker", "idle");
@@ -2845,6 +2852,45 @@ test("a colleague called by the last part of their name is reached when unambigu
     assert.match(modelText(labelled), /Label "status" was not applied/);
   } finally {
     await colleague.disconnect().catch(() => undefined);
+    await harness.emitLifecycle("session_shutdown");
+    await cleanup();
+  }
+});
+
+test("a send notes once that the colleague compacted since you last talked, and only on the sender's receipt", { concurrency: false }, async () => {
+  const { planner, cleanup } = await setupClients();
+  const harness = createExtensionHarness("note-worker", { hasUI: true });
+  const plannerReceived: Message[] = [];
+  planner.on("message", (_from: SessionInfo, message: Message) => plannerReceived.push(message));
+  try {
+    const { default: piParleyExtension } = await import("./index.ts");
+    piParleyExtension(harness.pi as never);
+    await harness.emitLifecycle("session_start");
+    const tool = harness.tools.find((candidate) => candidate.name === "parley")!;
+    const send = (id: string, message: string) => tool.execute(id, { action: "send", to: "planner", message }, new AbortController().signal, undefined, harness.ctx);
+
+    const first = await send("note-first", "first contact");
+    assert.doesNotMatch(modelText(first), /has compacted/, "first contact makes no claim");
+    await planner.reportCompactionCompleted();
+    const second = await send("note-second", "after planner compacted");
+    assert.match(modelText(second), /Note: planner has compacted since you last talked\. It probably still knows what's going on/);
+    assert.doesNotMatch(modelText(second), /context|%/i, "nothing about anyone's context");
+    const third = await send("note-third", "again");
+    assert.doesNotMatch(modelText(third), /has compacted/, "the note appears once per compaction");
+
+    // The receiving side is never told about the sender.
+    const worker = await waitForSessionByName(planner, "note-worker");
+    assert.equal((await planner.send(worker.id, { text: "baseline from planner" })).delivered, true);
+    await waitForVisibleText(harness, "baseline from planner");
+    await harness.emitLifecycle("session_compact", { reason: "manual" });
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    const fromPlanner = await planner.send(worker.id, { text: "hello after your compaction" });
+    assert.ok(fromPlanner.peerCompaction, "the planner's own receipt carries the note");
+    await waitForVisibleText(harness, "hello after your compaction");
+    const incoming = harness.sentMessages.find((entry) => entry.message.content?.includes("hello after your compaction"))!;
+    assert.doesNotMatch(incoming.message.content, /has compacted/);
+    assert.ok(plannerReceived.every((message) => message.peerCompaction === undefined));
+  } finally {
     await harness.emitLifecycle("session_shutdown");
     await cleanup();
   }
@@ -3834,10 +3880,13 @@ test("Parley journal replay and model context ignore unrelated custom entry type
     assert.deepEqual(rendererTypes, ["parley_message"]);
     await harness.emitLifecycle("session_start");
     await waitForSessionByName(planner, "journal-worker");
-    // Foreign journal entries are never treated as Parley contact state.
-    await new Promise((resolve) => setTimeout(resolve, 200));
-    assert.equal(harness.entries.some((entry) => entry.type === "parley_receiver_baseline_abandoned"
-      && ["foreign-token", "other-token"].includes((entry.data as { token?: string }).token ?? "")), false);
+    const deadline = Date.now() + 2_000;
+    while (!harness.entries.some((entry) => entry.type === "parley_receiver_baseline_abandoned"
+      && (entry.data as { token?: string }).token === "current-token") && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    assert.deepEqual(harness.entries.filter((entry) => entry.type === "parley_receiver_baseline_abandoned")
+      .map((entry) => (entry.data as { token: string }).token), ["current-token"]);
 
     const current = { role: "custom", ...envelope("parley_message", "context-id"), timestamp: 999 };
     const unrelated = { role: "custom", ...envelope("unrelated_message", "context-id") };
@@ -3925,7 +3974,7 @@ test("child supervisor tool resolves target and includes run metadata", { concur
       const askResult = await askResultPromise;
       assert.notEqual(askResult.details?.error, true);
       assert.match(askResult.content[0]?.text ?? "", /Use the stable API/);
-      assert.doesNotMatch(askResult.content[0]?.text ?? "", /compacted context/i, "nothing about anyone's context");
+      assert.doesNotMatch(askResult.content[0]?.text ?? "", /context/i, "nothing about anyone's context");
 
       const updateReceived = once(orchestrator, "message") as Promise<[SessionInfo, Message]>;
       const updateResult = await supervisorTool.execute("update-1", { reason: "progress_update", message: "Found a schema mismatch." }, new AbortController().signal, undefined, harness.ctx);

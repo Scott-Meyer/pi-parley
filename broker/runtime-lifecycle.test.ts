@@ -171,11 +171,14 @@ test("simultaneous direct starts have one broker; losing starts cannot disrupt l
   await exchange(sender.client, receiver.client, receiver.id);
 });
 
-test("idle shutdown and restart let a session reconnect and publish a distinct owner", { timeout: 30_000 }, async (t) => {
+test("idle shutdown and restart retain collaboration state and publish a distinct owner", { timeout: 30_000 }, async (t) => {
   const ctx = runtime(t);
   const original = await candidate(ctx);
   assert.equal(await original.start(), true, original.diagnostics());
   const seat = await connect(ctx, "lifecycle-persistent");
+  const eventId = randomUUID();
+  const recorded = await seat.client.reportCompactionCompleted(eventId);
+  assert.equal(recorded.generation, 1);
   const before = (await health()).broker;
   await seat.client.disconnect();
   assert.equal(await original.exited, 0);
@@ -183,7 +186,7 @@ test("idle shutdown and restart let a session reconnect and publish a distinct o
   const replacement = await candidate(ctx);
   assert.equal(await replacement.start(), true, replacement.diagnostics());
   const resumed = await connect(ctx, "lifecycle-persistent", seat.id);
-  assert.equal(resumed.id, seat.id, "the same session reconnects to the restarted broker");
+  assert.deepEqual(await resumed.client.reportCompactionCompleted(eventId), recorded);
   const after = (await health()).broker;
   assert.equal(after.pid, replacement.child.pid);
   assert.notEqual(after.instanceId, before.instanceId);
