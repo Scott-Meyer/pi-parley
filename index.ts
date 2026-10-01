@@ -36,7 +36,6 @@ import { restoreConversationHistory, messageControlKey, matchesAskCounterpart, t
 import { resolve as resolvePath } from "node:path";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { sameCwd } from "./cwd.ts";
-import { formatContextUsage } from "./format-context.ts";
 import { formatPeerCompactionNotice } from "./compaction-awareness.ts";
 import { formatCancellationResult, formatDeliveryResult } from "./message-results.ts";
 import {
@@ -738,7 +737,7 @@ function formatSessionListRow(session: SessionInfo, currentCwd: string, isSelf: 
   const suffix = tags.length ? ` [${tags.join(", ")}]` : "";
   const pane = session.tmuxPane ? ` · tmux ${session.tmuxPane}` : "";
   const description = session.description ? ` — ${session.description}` : "";
-  return `• ${reference}${description} — ${session.cwd} (${session.model}${formatContextUsage(session)}${pane})${suffix}`;
+  return `• ${reference}${description} — ${session.cwd} (${session.model}${pane})${suffix}`;
 }
 function previewText(value: unknown, maxLength = 72): string | undefined {
   if (typeof value !== "string") {
@@ -874,7 +873,9 @@ function installParleyExtension(
   let client: ParleyClient | null = null;
   const config: ParleyConfig = loadRuntimeConfig((error) => console.error(error.message));
   const askTimeoutMs = getAskTimeoutMs();
-  const compactionPresenceSupported = sessionCompactFailuresReachExtensions();
+  // Parley says nothing about anyone's context: no "compacting" presence, no compaction notices.
+  const compactionPresenceSupported = false;
+  void sessionCompactFailuresReachExtensions;
   const localExtensions = new Map<string, {
     registration: ParleyExtensionRegistration;
     channel: ParleyExtensionChannel;
@@ -1601,28 +1602,7 @@ function installParleyExtension(
       ...(metadata.orchestratorSessionId ? { supervisorSessionId: metadata.orchestratorSessionId } : {}),
     };
   }
-  // Snapshot the live session's context-window usage for presence. getContextUsage()
-  // (stock SDK) reports { tokens, contextWindow, percent }, with tokens/percent null
-  // right after a compaction (before the next assistant response). We emit null in
-  // that case to CLEAR a peer's stale value rather than freeze the old percentage.
-  // A missing host capability is omitted; a supported getter reporting unknown
-  // usage explicitly clears its previous sample.
-  function currentContextUsage(): { contextPct?: number | null; contextTokens?: number | null; contextWindow?: number | null } {
-    const context = getLiveContext();
-    if (typeof context?.getContextUsage !== "function") return {};
-    const usage = context.getContextUsage();
-    if (!usage) {
-      return { contextPct: null, contextTokens: null, contextWindow: null };
-    }
-    const result: { contextPct?: number | null; contextTokens?: number | null; contextWindow?: number } = {
-      contextPct: typeof usage.percent === "number" && Number.isFinite(usage.percent) ? Math.round(usage.percent) : null,
-      contextTokens: typeof usage.tokens === "number" && Number.isFinite(usage.tokens) ? usage.tokens : null,
-    };
-    if (typeof usage.contextWindow === "number" && usage.contextWindow > 0) {
-      result.contextWindow = usage.contextWindow;
-    }
-    return result;
-  }
+
 
   function persistProfileOwnershipRevocation(): void {
     if (!profileOwnershipRevocationPending) return;
@@ -1663,7 +1643,6 @@ function installParleyExtension(
         ? { description: currentSessionDescription ?? null }
         : {}),
       status: currentStatus(),
-      ...currentContextUsage(),
     });
   }
   function publishParleySessionId(sessionId: string): void {
@@ -1680,8 +1659,7 @@ function installParleyExtension(
     if (!client || !currentSessionId || !getLiveContext()) {
       return;
     }
-    // context% rides the status heartbeat so peers see live usage at turn boundaries.
-    client.updatePresence({ status: currentStatus(), ...currentContextUsage() });
+    client.updatePresence({ status: currentStatus() });
   }
   function finishCompactionStatus(ctx: ExtensionContext, expectedGeneration?: number): void {
     if (!getLiveContext(ctx)) {
@@ -1809,45 +1787,9 @@ function installParleyExtension(
   }
 
   function flushPendingCompactionReports(): void {
-    if (compactionReportFlush || pendingCompactionReports.size === 0) return;
-    const activeClient = client;
-    const expectedGeneration = runtimeGeneration;
-    if (!activeClient?.isConnected() || !activeClient.supportsFeature(COMPACTION_AWARENESS_FEATURE)) return;
-
-    clearCompactionReportRetryTimer();
-    compactionReportFlush = (async () => {
-      while (
-        expectedGeneration === runtimeGeneration
-        && activeClient === client
-        && activeClient.isConnected()
-        && pendingCompactionReports.size > 0
-      ) {
-        const next = pendingCompactionReports.entries().next().value as [string, number] | undefined;
-        if (!next) return;
-        const [eventId, compactedAt] = next;
-        try {
-          const recorded = await activeClient.reportCompactionCompleted(eventId);
-          if (expectedGeneration !== runtimeGeneration || activeClient !== client) return;
-          pi.appendEntry("parley_compaction_recorded", {
-            eventId,
-            compactedAt,
-            generation: recorded.generation,
-            recordedAt: recorded.compactedAt,
-          });
-          pendingCompactionReports.delete(eventId);
-        } catch {
-          scheduleCompactionReportRetry(expectedGeneration);
-          return;
-        }
-      }
-    })().finally(() => {
-      if (expectedGeneration !== runtimeGeneration) return;
-      compactionReportFlush = null;
-      if (pendingCompactionReports.size > 0) {
-        scheduleCompactionReportRetry(expectedGeneration);
-      }
-    });
+    // Compaction is never reported to the broker, so no peer is told about anyone's context.
   }
+
 
   function beginCompactionStatus(ctx: ExtensionContext, signal?: AbortSignal): void {
     if (!compactionPresenceSupported || !getLiveContext(ctx)) {
@@ -3116,13 +3058,6 @@ function installParleyExtension(
   });
   pi.on("session_compact", (_event, ctx) => {
     finishCompactionStatus(ctx);
-    if (getLiveContext(ctx)) {
-      const eventId = randomUUID();
-      const compactedAt = Date.now();
-      pi.appendEntry("parley_compaction_pending", { eventId, compactedAt });
-      pendingCompactionReports.set(eventId, compactedAt);
-      flushPendingCompactionReports();
-    }
   });
   // Earendil Pi 0.85+ reports aborts and failures explicitly. Older hosts only
   // declare before/success, so compaction presence stays disabled there rather

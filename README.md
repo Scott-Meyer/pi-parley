@@ -138,7 +138,7 @@ Registered only with the required pi-subagents child bridge metadata and no nati
 
 ### parley actions
 
-**`list` / `list-cwd`** — Returns the current session and visible connected peers by reference, with directory, focus, model, context usage, and activity. `list-cwd` filters by directory. Activity follows Pi lifecycle events: `idle`, `thinking`, `tool:<name>`, or, on supported hosts, `compacting`. Presence changes do not wake peers. Federation rows indicate their remote capabilities.
+**`list` / `list-cwd`** — Returns the current session and visible connected peers by reference, with directory, focus, model, and activity. `list-cwd` filters by directory. Activity follows Pi lifecycle events: `idle`, `thinking`, or `tool:<name>`. Presence changes do not wake peers. Federation rows indicate their remote capabilities.
 
 **`send`** — Sends to one `to` or independently to 1–32 explicit `targets`. Duplicate aliases for one live endpoint deliver once; partial failures do not roll back successes. Group sends reject `replyTo`, `supersedes`, and `retryOf`. A singular send can carry thread context, but never infers or completes an ask's answer. `confirmSend` can require one UI approval before ordinary delivery; group approval pins the resolved endpoints so an alias cannot silently rebind afterward.
 
@@ -168,13 +168,9 @@ The provider API receives an ordinary parley message containing `{ type: "pi-par
 
 Results preserve separate observations: **launch request accepted or command started**, **new peer registration observed**, and **message accepted**. A later failure does not erase earlier stages. The v1 request carries no requested name or registration correlation: it observes a sole new local peer in the project, cannot prove that a particular launch created it, and reports ambiguity when several appear. Ending the registration wait does not cancel startup; repeating a launch can create another visible surface.
 
-### Just-in-time compaction awareness
+### Nobody's context is shared
 
-Successful compactions advance a private broker-owned generation for the session's stable parley ID. At the next accepted direct contact, `send`, `ask`, `reply`, the compose overlay, and each explicit multicast outcome say when that peer compacted since the previous direct contact. Incoming direct messages carry the same notice in the message already being delivered. When a peer is live and current context usage is known, the notice includes it so references can be made explicit before relying on older conversational detail; queued contact never describes a disconnected presence snapshot as current.
-
-The first contact between two identities establishes a synchronously durable baseline without making a historical claim. Directional contact watermarks and compaction generations persist across reconnects and broker restarts; detection compares generations rather than elapsed time, so machine sleep and clock changes do not create false positives. Broker state files, limits, and recovery are isolated per scope; those files hash scopes, stable session IDs, and compaction event IDs rather than storing routing identities in plaintext. The Pi session journal retains opaque pending event IDs so compaction reports can be retried until the broker acknowledges durable storage.
-
-Compaction itself never sends a message or wakes another session. Broadcast neither displays nor consumes compaction notices and never enters the collaboration graph. A send rejected before acceptance does not advance contact watermarks. Sender first-contact baselines are durable before delivery success; receiver baselines are durably staged before delivery and promoted only after the surfaced message's opaque token is acknowledged. The Pi session journal retries an unconfirmed receiver token across reconnects and broker restarts. Later compaction notices also remain pending until acknowledgement and may safely repeat rather than be lost. Clients that do not advertise the capability cannot silently consume a notice.
+Parley never tells a session anything about another session's context: no usage numbers, no compaction notices, no `compacting` status. A colleague's words are what you get.
 
 ## Keyboard Shortcuts
 
@@ -223,7 +219,7 @@ Custom broker commands are trusted local configuration: anyone who can edit this
 }
 ```
 
-Pi Parley publishes live session status automatically. Sessions register as `idle`, switch to `thinking` while the agent is running, and show `tool:<name>` during tool execution. On hosts that report unsuccessful compactions to extensions (Earendil Pi 0.85+), they also publish `compacting` from pre-compaction until success, failure, or abort; the underlying thinking/tool/idle state resumes afterward. Older hosts leave compaction presence disabled rather than risk stale status after an unreported failure. This is passive roster presence and never wakes peer agents. If `status` is set in config, it is appended as context instead of replacing the lifecycle status.
+Pi Parley publishes live session status automatically. Sessions register as `idle`, switch to `thinking` while the agent is running, and show `tool:<name>` during tool execution. This is passive roster presence and never wakes peer agents. If `status` is set in config, it is appended as context instead of replacing the lifecycle status.
 
 Set `PI_PARLEY_SCOPE_ID` before starting Pi to opt a session into an opaque broker routing scope. The value is trimmed. Empty values are treated as unscoped. A scoped session can list, address by full ID, name, ID prefix, or cwd, receive presence and session lifecycle events, recover queued mailbox messages, and use extension-channel owner, publish, and state traffic only with sessions that registered the exact same scope. Scoped sessions and unscoped sessions do not cross this boundary. Existing unscoped behavior is unchanged when the variable is not set.
 

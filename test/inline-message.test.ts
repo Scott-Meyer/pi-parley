@@ -53,30 +53,6 @@ test("expanded inline parley messages show the full body without collapse contro
   assert.doesNotMatch(rendered, /Ctrl\+O/);
 });
 
-test("inline parley messages retain compaction awareness in expanded and collapsed rendering", () => {
-  const awareMessage: Message = {
-    ...message,
-    peerCompaction: {
-      peerSessionId: from.id,
-      peerName: from.name,
-      generation: 4,
-      previousGeneration: 2,
-      compactedAt: 1234,
-      contextPct: 38,
-    },
-  };
-
-  const expanded = new InlineMessageComponent(from, awareMessage, theme as any);
-  const expandedText = expanded.render(100).join("\n");
-  assert.match(expandedText, /sender compacted context since your last direct contact \(2 compactions\)/i);
-  assert.match(expandedText, /Last[\s│]*reported[\s│]*context[\s│]*usage is 38%/i);
-  assert.match(expandedText, /available terminal width/);
-
-  const collapsed = new InlineMessageComponent(from, awareMessage, theme as any, undefined, undefined, true);
-  const collapsedText = collapsed.render(100).join("\n");
-  assert.match(collapsedText, /Sender compacted since prior direct contact/);
-});
-
 test("compaction notices identify the actual peer after mailbox identity rebound", () => {
   const notice = formatPeerCompactionNotice("departed-worker", {
     peerSessionId: "replacement-session-id",

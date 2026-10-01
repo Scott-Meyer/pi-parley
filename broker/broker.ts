@@ -452,8 +452,9 @@ class ParleyBroker {
       .every(feature => session.clientFeatures.has(feature));
   }
 
-  private supportsCompactionAwareness(session: ConnectedSession): boolean {
-    return session.clientFeatures.has(COMPACTION_AWARENESS_FEATURE);
+  /** Parley never tells anyone about another session's context, so no compaction notices. */
+  private supportsCompactionAwareness(_session: ConnectedSession): boolean {
+    return false;
   }
 
   private directContactPlan(
@@ -472,7 +473,6 @@ class ParleyBroker {
           generation: snapshot.peerGeneration,
           previousGeneration: snapshot.lastContactGeneration,
           compactedAt: snapshot.peerCompactedAt!,
-          ...(!includePeerContext || peer.contextPct === undefined ? {} : { contextPct: peer.contextPct }),
         }
       : undefined;
     return {
@@ -1668,7 +1668,7 @@ class ParleyBroker {
         this.writeBrokerFrame(socket, {
           type: "registered",
           sessionId: id,
-          features: [EXTENSION_BUS_FEATURE, EXACT_SEND_FEATURE, EXACT_IDENTITY_SEND_FEATURE, COMPACTION_AWARENESS_FEATURE, SESSION_PROFILE_FEATURE, CONVERSATION_CONTRACT_FEATURE, FEDERATED_CONVERSATION_FEATURE, PERSON_PROVENANCE_FEATURE],
+          features: [EXTENSION_BUS_FEATURE, EXACT_SEND_FEATURE, EXACT_IDENTITY_SEND_FEATURE, SESSION_PROFILE_FEATURE, CONVERSATION_CONTRACT_FEATURE, FEDERATED_CONVERSATION_FEATURE, PERSON_PROVENANCE_FEATURE],
           session: info,
         });
         this.broadcastScoped({ type: "session_joined", session: info }, info, key, scopeId);
@@ -2382,39 +2382,8 @@ class ParleyBroker {
               changed = true;
             }
           }
-          // Context-usage fields: a number updates, an explicit null CLEARS (the
-          // value is unknown right after a compaction — delete rather than carry
-          // the stale-high value forward), undefined leaves the field untouched.
-          if (clientMessage.contextPct !== undefined) {
-            if (clientMessage.contextPct === null) {
-              if (session.info.contextPct !== undefined) { delete session.info.contextPct; changed = true; }
-            } else if (typeof clientMessage.contextPct !== "number") {
-              throw new Error("Invalid presence contextPct");
-            } else if (session.info.contextPct !== clientMessage.contextPct) {
-              session.info.contextPct = clientMessage.contextPct;
-              changed = true;
-            }
-          }
-          if (clientMessage.contextTokens !== undefined) {
-            if (clientMessage.contextTokens === null) {
-              if (session.info.contextTokens !== undefined) { delete session.info.contextTokens; changed = true; }
-            } else if (typeof clientMessage.contextTokens !== "number") {
-              throw new Error("Invalid presence contextTokens");
-            } else if (session.info.contextTokens !== clientMessage.contextTokens) {
-              session.info.contextTokens = clientMessage.contextTokens;
-              changed = true;
-            }
-          }
-          if (clientMessage.contextWindow !== undefined) {
-            if (clientMessage.contextWindow === null) {
-              if (session.info.contextWindow !== undefined) { delete session.info.contextWindow; changed = true; }
-            } else if (typeof clientMessage.contextWindow !== "number") {
-              throw new Error("Invalid presence contextWindow");
-            } else if (session.info.contextWindow !== clientMessage.contextWindow) {
-              session.info.contextWindow = clientMessage.contextWindow;
-              changed = true;
-            }
-          }
+          // Context usage (contextPct/contextTokens/contextWindow) is never stored or shared,
+          // even when an older client still sends it.
           const now = Date.now();
           session.info.lastActivity = now;
           if (changed || now - session.lastPresenceBroadcastAt >= PRESENCE_HEARTBEAT_MS) {

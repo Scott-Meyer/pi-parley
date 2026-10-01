@@ -17,4 +17,4 @@ Sessions are named by their names and messages by local numbers like `#12`; use 
 
 Discovery reflects this session's visibility, not every Pi process. Some remote peers support only text messages. Optional project launches report the request, the session observed, and message delivery separately.
 
-`pending`, `status`, and `read` expose more conversation context when needed. Retained text can outlive broker routing. Attachments are inline snapshots. A compaction notice means older conversational details may now be summarized; files and ongoing work are unchanged.
+`pending`, `status`, and `read` expose more conversation context when needed. Retained text can outlive broker routing. Attachments are inline snapshots.

@@ -575,44 +575,6 @@ test("oversized enriched deliveries are rejected before live, queued, or rebound
 });
 
 
-test("mailbox rechecks a previously fitting envelope when compaction enrichment changes while queued", { timeout: 30_000 }, async () => {
-  await withConversationBroker(async (_agentDir, connect) => {
-    const sender = await connect("sender-" + "n".repeat(1_000));
-    const receiverId = randomUUID();
-    const receiver = await connect("mailbox-reader", receiverId);
-    const baselineInbound = once(receiver, "message");
-    await sender.sendToSession(receiver.getSelfSession()!, { text: "establish receiver contact baseline" });
-    const [from, baseline] = await baselineInbound as [SessionInfo, Message];
-    receiver.acknowledgeMessageContact(baseline);
-    await receiver.listSessions();
-    await receiver.disconnect();
-    // Leave just ten bytes after the actual ordinary delivery envelope. A
-    // later compaction notice (including the known long sender name) cannot
-    // fit, although both the authored frame and initial queued envelope do.
-    const messageId = randomUUID();
-    const now = Date.now();
-    const emptyEnvelope = { type: "message", from, message: { id: messageId, timestamp: now, senderSequence: 2,
-      content: { text: "" }, brokerReceivedAt: now, brokerDeliveredAt: now, contactToken: "0".repeat(36) } };
-    const text = "x".repeat(MAX_FRAME_BYTES - Buffer.byteLength(JSON.stringify(emptyEnvelope)) - 10);
-    const queued = await sender.send(receiverId, { text, messageId });
-    assert.equal(queued.delivery, "queued", "the original fully enriched envelope fits at acceptance");
-    await sender.reportCompactionCompleted();
-    const expired = new Promise<string>(resolve => sender.onMessageReceipt((_from, receipt) => {
-      if (receipt.messageId === messageId && receipt.status === "expired") resolve(receipt.detail ?? "");
-    }));
-    const delivered: Message[] = [];
-    const replacement = await connect("mailbox-reader", receiverId, client => {
-      client.on("message", (_from, message) => delivered.push(message));
-    });
-    assert.match(await expired, /frame limit after receiver enrichment/);
-    assert.equal((await replacement.listSessions()).length, 2, "receiver remains connected rather than rejecting an oversized frame");
-    assert.equal(delivered.length, 0);
-    const replay = await sender.send(receiverId, { text, messageId });
-    assert.equal(replay.code, "E_MESSAGE_TOO_LARGE");
-    assert.equal(replay.outcomeKnown, true);
-  });
-});
-
 test("exact identities retain authorized offline mail and refuse all selector fallbacks, even across roster races", { timeout: 30_000 }, async () => {
   await withConversationBroker(async (_agentDir, connect) => {
     const sender = await connect("identity-sender");

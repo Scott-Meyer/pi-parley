@@ -30,7 +30,6 @@
     "session-profile.ts",
     "cwd.ts",
     "extension-api.ts",
-    "format-context.ts",
     "project-agent.ts",
     "reply-tracker.ts",
     "references.ts",
@@ -62,7 +61,7 @@
     "skills/**/*"
   ],
   "scripts": {
-    "test": "tsx --test broker/federation-protocol.test.ts broker/federation-roster.test.ts broker/federation-send.test.ts broker/federation-origin.test.ts broker/peer-link.test.ts broker/federation.integration.test.ts broker/federation-conversation.test.ts broker/federation-conversation.integration.test.ts broker/attachment.test.ts broker/attachment-roster-lifecycle.test.ts federation.test.ts extension-entry.test.ts broker/client.test.ts broker/client-liveness.test.ts broker/collaboration-state.test.ts broker/extension.test.ts broker/framing.test.ts broker/paths.test.ts broker/build.test.ts broker/process-lock.test.ts broker/runtime-claim.test.ts broker/runtime-lifecycle.test.ts broker/spawn.test.ts broker/subagent-acl.test.ts broker/delivery-feedback.test.ts config.test.ts conversation-history.test.ts cwd.test.ts format-context.test.ts pi-compat.test.ts session-profile.test.ts project-agent.test.ts reply-tracker.test.ts parley.integration.test.ts test/inline-message.test.ts test/overlay-width.test.ts test/session-id-prefixes.test.ts recipient-context.integration.test.ts federation-extension.integration.test.ts references.test.ts references.integration.test.ts",
+    "test": "tsx --test broker/federation-protocol.test.ts broker/federation-roster.test.ts broker/federation-send.test.ts broker/federation-origin.test.ts broker/peer-link.test.ts broker/federation.integration.test.ts broker/federation-conversation.test.ts broker/federation-conversation.integration.test.ts broker/attachment.test.ts broker/attachment-roster-lifecycle.test.ts federation.test.ts extension-entry.test.ts broker/client.test.ts broker/client-liveness.test.ts broker/collaboration-state.test.ts broker/extension.test.ts broker/framing.test.ts broker/paths.test.ts broker/build.test.ts broker/process-lock.test.ts broker/runtime-claim.test.ts broker/runtime-lifecycle.test.ts broker/spawn.test.ts broker/subagent-acl.test.ts broker/delivery-feedback.test.ts config.test.ts conversation-history.test.ts cwd.test.ts pi-compat.test.ts session-profile.test.ts project-agent.test.ts reply-tracker.test.ts parley.integration.test.ts test/inline-message.test.ts test/overlay-width.test.ts test/session-id-prefixes.test.ts recipient-context.integration.test.ts federation-extension.integration.test.ts references.test.ts references.integration.test.ts",
     "build:federation": "node scripts/build-federation.mjs",
     "prepack": "npm run build:federation",
     "test:host-compat": "node scripts/smoke-host-compat.mjs",

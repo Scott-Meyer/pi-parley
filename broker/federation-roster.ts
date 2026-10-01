@@ -220,9 +220,7 @@ function isProjection(value: unknown): value is FederationRosterSessionProjectio
     ...(value.description !== undefined ? { description: value.description as string } : {}),
     ...(value.runtimeFallbackAlias !== undefined ? { runtimeFallbackAlias: value.runtimeFallbackAlias } : {}),
     ...(value.status !== undefined ? { status: value.status } : {}),
-    ...(value.contextPct !== undefined ? { contextPct: value.contextPct } : {}),
-    ...(value.contextTokens !== undefined ? { contextTokens: value.contextTokens as number } : {}),
-    ...(value.contextWindow !== undefined ? { contextWindow: value.contextWindow as number } : {}),
+    // Context usage from older peers is accepted on the wire but never kept.
     ...(value.tmuxPane !== undefined ? { tmuxPane: value.tmuxPane } : {}),
   };
   return isSessionInfo(candidate) && serializedSize(value) <= MAX_SESSION_PROJECTION_BYTES;
@@ -323,9 +321,7 @@ function projectionFromSession(info: SessionInfo, conversation?: boolean): Feder
     startedAt: safeInteger(info.startedAt),
     lastActivity: safeInteger(info.lastActivity),
     ...(info.status !== undefined && isSafeBoundedText(info.status, 256, true) ? { status: info.status } : {}),
-    ...(info.contextPct !== undefined && Number.isFinite(info.contextPct) && info.contextPct >= 0 && info.contextPct <= 100 ? { contextPct: info.contextPct } : {}),
-    ...(info.contextTokens !== undefined && Number.isSafeInteger(info.contextTokens) && info.contextTokens >= 0 ? { contextTokens: info.contextTokens } : {}),
-    ...(info.contextWindow !== undefined && Number.isSafeInteger(info.contextWindow) && info.contextWindow >= 0 ? { contextWindow: info.contextWindow } : {}),
+    // Context usage is never shared with peer brokers.
     ...(info.tmuxPane !== undefined && isSafeBoundedText(info.tmuxPane, 128) ? { tmuxPane: info.tmuxPane } : {}),
   };
   if (isProjection(projection)) return projection;
