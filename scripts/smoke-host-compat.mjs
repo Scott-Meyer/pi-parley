@@ -32,8 +32,14 @@ const hosts = [
     },
   },
   {
-    label: "fork-current",
+    label: "fork-0.85",
     spec: "@earendil-works/pi-coding-agent@0.85.1",
+    packagePath: "@earendil-works/pi-coding-agent",
+    forbiddenPackagePaths: ["@mariozechner/pi-coding-agent", "@mariozechner/pi-tui"],
+  },
+  {
+    label: "fork-current",
+    spec: "@earendil-works/pi-coding-agent@1.0.0",
     packagePath: "@earendil-works/pi-coding-agent",
     forbiddenPackagePaths: ["@mariozechner/pi-coding-agent", "@mariozechner/pi-tui"],
   },
