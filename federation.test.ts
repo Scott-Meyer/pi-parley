@@ -161,6 +161,22 @@ test("a connected endpoint with an invalid control response reports sanitized br
   );
 });
 
+test("a carried stream that opens and ends without a byte reports no broker there, not a protocol failure", async () => {
+  // ssh -W and application tunnels open before they know whether anything
+  // listens on the far side; an empty stream is an absent broker.
+  const silent = () => new Duplex({
+    read() {},
+    write(_bytes, _encoding, callback) {
+      callback();
+      this.push(null);
+    },
+  });
+  await assert.rejects(
+    inspectBroker(access({ async open() { return silent(); } })),
+    (error: unknown) => error instanceof BrokerInspectionError && error.code === "E_BROKER_UNAVAILABLE",
+  );
+});
+
 test("inspection cancellation during joined stream teardown cannot publish a successful handle", async () => {
   const stream = new DeferredDestroyInspectionStream("install:550e8400-e29b-41d4-a716-446655440004");
   const cancellation = new AbortController();

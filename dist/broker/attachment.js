@@ -454,7 +454,11 @@ export async function attachPeerStreams(options) {
         if (!isBrokerStartPeerRequest(start) || !isBrokerAcceptPeerRequest(prepare))
             throw failure("E_INVALID_OPTIONS");
         timer = setTimeout(() => owned.stop({ status: "failure", error: failure("E_TIMEOUT") }), timeoutMs);
+        // Both brokers hear their request at once. A broker closes a connection
+        // that stays silent for a second, and the acceptor may be a slow carrier
+        // away; the initiator's hello simply waits here until the acceptor is ready.
         await owned.write(remote, frame(prepare));
+        await owned.write(local, frame(start));
         const prepared = await owned.readFrame(remote);
         if (!isBrokerAcceptPeerResult(prepared) || prepared.requestId !== prepare.requestId)
             throw failure("E_HANDSHAKE_FAILED");
@@ -462,7 +466,6 @@ export async function attachPeerStreams(options) {
             throw failure(prepared.code);
         if (prepared.linkId !== linkId)
             throw failure("E_HANDSHAKE_FAILED");
-        await owned.write(local, frame(start));
         const hello = await owned.readRawFrame(local);
         if (isBrokerStartPeerResult(hello.value) && hello.value.requestId === start.requestId && !hello.value.ok) {
             throw failure(hello.value.code);

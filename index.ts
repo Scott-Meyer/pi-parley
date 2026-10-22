@@ -38,6 +38,7 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import { sameCwd } from "./cwd.ts";
 import { formatPeerCompactionNotice } from "./compaction-awareness.ts";
 import { formatCancellationResult, formatDeliveryResult } from "./message-results.ts";
+import { SessionLinks } from "./link/session.ts";
 import {
   openProjectPane,
   ProjectLaunchError,
@@ -883,6 +884,8 @@ function installParleyExtension(
     state?: ParleyExtensionState;
   }>();
   let runtimeContext: ExtensionContext | null = null;
+  // Cross-computer links: told to the person, never added to the model's context.
+  const links = new SessionLinks((message) => { if (runtimeContext) notifyIfLive(runtimeContext, message, "info"); });
   let currentSessionId: string | null = null;
   let currentParleySessionId: string | null = null;
   let currentModel = "unknown";
@@ -3027,6 +3030,7 @@ function installParleyExtension(
       return;
     }
     startSessionRuntime(ctx);
+    links.start();
   });
   
   pi.on("session_shutdown", async () => {
@@ -3036,6 +3040,7 @@ function installParleyExtension(
     unsubscribeOutboxRequest();
     shuttingDown = true;
     disposed = true;
+    links.stop();
     failPendingOutboxRequests(runtimeGeneration, "session_ended", "Session shutting down");
     runtimeGeneration += 1;
     compactionReportFlush = null;
@@ -4030,6 +4035,8 @@ function installParleyExtension(
 • broadcast: Independent messages to visible local peers, not remote peers.
 • rename: Changes this session's name.
 • label: Gives a message a local name, like review or notes, usable wherever a message reference is.
+• link: Links this computer with others over SSH, so their sessions appear here. host adds one, as you'd give it to ssh, and links it now; recheck checks again (host, or everything); discover: true links computers this one has ssh connections to automatically. With none of these, shows the links.
+• unlink: Unlinks one computer and forgets it.
 
 Sessions and messages are named the way people would name them: a session by its name (name~2 when a different session later took a name you've already seen), a message by its number here, like #12. Use references as shown; parley keeps each one attached to what it first named. Receipts include sender and recipient, the message reference, delivery state, and nearby conversation context. Endpoint acceptance is not an acknowledgement from the colleague.`,
     promptSnippet: "Communicate with other Pi sessions.",
@@ -4038,7 +4045,7 @@ Sessions and messages are named the way people would name them: a session by its
     ],
 
     parameters: Type.Object({
-      action: StringEnum(["list", "list-cwd", "send", "broadcast", "ask", "reply", "pending", "status", "cancel", "rename", "read", "label"] as const, {
+      action: StringEnum(["list", "list-cwd", "send", "broadcast", "ask", "reply", "pending", "status", "cancel", "rename", "read", "label", "link", "unlink"] as const, {
         description: "Parley operation.",
       }),
       profile: Type.Optional(Type.Object({
@@ -4099,6 +4106,15 @@ Sessions and messages are named the way people would name them: a session by its
       })),
       name: Type.Optional(Type.String({
         description: "Canonical self-name for 'rename'.",
+      })),
+      host: Type.Optional(Type.String({
+        description: "For link/unlink: another computer, as you'd give it to ssh (an alias, user@host, optionally -p/-l/-i/-J/-F/-o).",
+      })),
+      recheck: Type.Optional(Type.Boolean({
+        description: "For link: check again now.",
+      })),
+      discover: Type.Optional(Type.Boolean({
+        description: "For link: turn automatic linking of computers this one has ssh connections to on or off.",
       })),
     }),
 
@@ -4180,6 +4196,14 @@ Sessions and messages are named the way people would name them: a session by its
         return {
           content: [{ type: "text" as const, text: `Action ${params.action} was not performed. ${profileError}` }],
           details: { error: true },
+        };
+      }
+
+      if (params.action === "link" || params.action === "unlink") {
+        const outcome = await links.tool(params as Parameters<SessionLinks["tool"]>[0]);
+        return {
+          content: [{ type: "text" as const, text: outcome.text }],
+          details: { ...(outcome.ok ? {} : { error: true }), ...(outcome.status ? { links: outcome.status } : {}), ...(outcome.host ? { host: outcome.host } : {}) },
         };
       }
 
@@ -5434,8 +5458,16 @@ Sessions and messages are named the way people would name them: a session by its
   }
 
   pi.registerCommand("parley", {
-    description: "Open session parley overlay to browse active sessions and send messages",
-    handler: async (_args, ctx) => openParleyOverlay(ctx),
+    description: "Open session parley overlay to browse active sessions and send messages; /parley link manages links with other computers",
+    handler: async (args, ctx) => {
+      const [first, ...rest] = (args ?? "").trim().split(/\s+/);
+      if (first?.toLowerCase() === "link") {
+        const outcome = await links.command(rest.join(" "));
+        notifyAliasCommand(ctx, outcome.text, outcome.ok ? "info" : "warning");
+        return;
+      }
+      return openParleyOverlay(ctx);
+    },
   });
 
   pi.registerCommand("parley-id", {

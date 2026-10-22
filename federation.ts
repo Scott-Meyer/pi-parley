@@ -374,11 +374,22 @@ async function requestBrokerSnapshot(
       stream.off("close", onClose);
       signal.removeEventListener("abort", onAbort);
     };
+    let receivedBytes = false;
     const fail = () => {
       if (settled) return;
       settled = true;
       cleanup();
       rejectSnapshot(new Error("Invalid broker inspection exchange"));
+    };
+    // A carried stream (ssh -W, an application tunnel) can open and then end
+    // without a byte when nothing listens on the far side. That is an absent
+    // broker, not a malformed one.
+    const failSilent = () => {
+      if (settled) return;
+      if (receivedBytes) { fail(); return; }
+      settled = true;
+      cleanup();
+      rejectSnapshot(new SilentBrokerStreamError());
     };
     const maybeResolve = () => {
       if (settled || !response || !writeFinished) return;
@@ -395,14 +406,15 @@ async function requestBrokerSnapshot(
     }, fail, BROKER_INSPECTION_MAX_FRAME_BYTES);
     const onData = (bytes: Buffer) => {
       if (!(bytes instanceof Uint8Array)) { fail(); return; }
+      if (bytes.byteLength > 0) receivedBytes = true;
       reader(Buffer.from(bytes));
       // Resolve only after the whole admitted chunk was checked, so a second
       // coalesced control frame cannot be ignored after a valid first frame.
       maybeResolve();
     };
-    const onError = () => fail();
-    const onEnd = () => { if (!response) fail(); };
-    const onClose = () => { if (!response) fail(); };
+    const onError = () => failSilent();
+    const onEnd = () => { if (!response) failSilent(); };
+    const onClose = () => { if (!response) failSilent(); };
     const onAbort = () => fail();
 
     stream.on("data", onData);
@@ -422,6 +434,12 @@ async function requestBrokerSnapshot(
       fail();
     }
   });
+}
+
+class SilentBrokerStreamError extends Error {
+  constructor() {
+    super("Broker stream ended before any response");
+  }
 }
 
 class CandidateInspectionError extends Error {
@@ -448,8 +466,8 @@ async function inspectCandidate(
     stream.on("error", guardError);
     try {
       return await requestBrokerSnapshot(stream, endpoint.stateId, signal);
-    } catch {
-      throw new CandidateInspectionError("protocol");
+    } catch (error) {
+      throw new CandidateInspectionError(error instanceof SilentBrokerStreamError ? "unavailable" : "protocol");
     }
   } finally {
     if (stream) {
