@@ -13,5 +13,8 @@ for (const key of Object.keys(env)) {
     || key.startsWith("FLIGHTDECK_") || key === "PI_CODING_AGENT_DIR" || key === "PI_CLIENT_SESSION_ID") delete env[key];
 }
 const tsxCli = join(dirname(createRequire(import.meta.url).resolve("tsx")), "cli.mjs");
-const child = spawn(process.execPath, [tsxCli, "--test", ...process.argv.slice(2)], { stdio: "inherit", env });
+// Integration files each start real brokers and sessions; all of them at once
+// on a busy machine starve each other past their deadlines.
+const concurrency = env.PARLEY_TEST_CONCURRENCY ?? "4";
+const child = spawn(process.execPath, [tsxCli, "--test", `--test-concurrency=${concurrency}`, ...process.argv.slice(2)], { stdio: "inherit", env });
 child.on("exit", (code, signal) => process.exit(signal ? 1 : code ?? 1));

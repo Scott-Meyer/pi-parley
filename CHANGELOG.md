@@ -18,7 +18,7 @@
 ### Fixed
 
 - `inspectBroker` reports `E_BROKER_UNAVAILABLE`, not `E_BROKER_PROTOCOL`, when a carried stream ends before any response, as `ssh -W` and application tunnels do when no broker is running at the far end.
-- `npm test` runs its files in an environment of their own, so running it from a Pi session or FlightDeck tab no longer joins the caller's Parley namespace.
+- `npm test` runs its files in an environment of their own, so running it from a Pi session or FlightDeck tab no longer joins the caller's Parley namespace. It also runs four files at a time (`PARLEY_TEST_CONCURRENCY` to change it); all at once, the broker-starting integration files starved each other and the suite never finished.
 
 ## 1.4.0 - 2026-09-30
 
