@@ -6,11 +6,12 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { spawn, type ChildProcess } from "node:child_process";
 import { once } from "node:events";
-import { copyFileSync, existsSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { copyFileSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import net from "node:net";
 import path from "node:path";
 import { getTsxCliPath } from "./broker/spawn.ts";
 import { getLinkPaths } from "./link/paths.ts";
+import { attachBrokers, createLocalBrokerAccess, inspectBroker } from "./dist/federation.js";
 import { createExtensionHarness, type CapturedToolResult } from "./test/extension-harness.ts";
 
 for (const key of Object.keys(process.env)) {
@@ -32,12 +33,42 @@ async function startBroker(agentDir: string): Promise<ChildProcess> {
   return child;
 }
 
-async function withAgentDir<T>(dir: string, work: () => Promise<T>): Promise<T> {
+async function withAgentDir<T>(dir: string, work: () => Promise<T>, scope?: string): Promise<T> {
   const previous = process.env.PI_CODING_AGENT_DIR;
   process.env.PI_CODING_AGENT_DIR = dir;
+  if (scope) process.env.PI_PARLEY_SCOPE_ID = scope;
   try { return await work(); } finally {
     if (previous === undefined) delete process.env.PI_CODING_AGENT_DIR; else process.env.PI_CODING_AGENT_DIR = previous;
+    delete process.env.PI_PARLEY_SCOPE_ID;
   }
+}
+
+function computers() {
+  const root = mkdtempSync("/tmp/pl-link-");
+  const laptopAgent = path.join(root, "laptop", ".pi", "agent");
+  const boxHome = path.join(root, "box");
+  const boxAgent = path.join(boxHome, ".pi", "agent");
+  const bin = path.join(root, "bin");
+  for (const dir of [laptopAgent, boxAgent, bin]) mkdirSync(dir, { recursive: true });
+  copyFileSync(path.join(repo, "test", "fake-ssh.mjs"), path.join(bin, "ssh"));
+  const savedPath = process.env.PATH;
+  process.env.PATH = `${bin}${path.delimiter}${process.env.PATH}`;
+  process.env.PI_PARLEY_TEST_SSH_HOMES = JSON.stringify({ box: boxHome });
+  process.env.PI_PARLEY_LINK_LABEL = "laptop";
+  process.env.PI_PARLEY_LINK_IDLE_MS = "500";
+  return {
+    root, laptopAgent, boxAgent,
+    async cleanup() {
+      await eventually(() => keeperGone(laptopAgent), "the keeper stops once no session is connected", 10_000).catch(() => {});
+      process.env.PATH = savedPath;
+      for (const key of ["PI_PARLEY_TEST_SSH_HOMES", "PI_PARLEY_LINK_LABEL", "PI_PARLEY_LINK_IDLE_MS"]) delete process.env[key];
+      rmSync(root, { recursive: true, force: true });
+    },
+  };
+}
+
+async function stopBrokers(brokers: ChildProcess[]) {
+  for (const broker of brokers) { if (broker.exitCode === null) { const exited = once(broker, "exit"); broker.kill("SIGTERM"); await exited; } }
 }
 
 async function eventually(check: () => Promise<boolean>, explanation: string, timeoutMs = 20_000) {
@@ -59,18 +90,7 @@ function keeperGone(agentDir: string): Promise<boolean> {
 
 test("a computer added by name is linked both ways, named by its label, and unlinking it removes it", { timeout: 90_000, skip: process.platform === "win32" }, async () => {
   const { default: extension } = await import("./index.ts");
-  const root = mkdtempSync("/tmp/pl-link-");
-  const laptopAgent = path.join(root, "laptop", ".pi", "agent");
-  const boxHome = path.join(root, "box");
-  const boxAgent = path.join(boxHome, ".pi", "agent");
-  const bin = path.join(root, "bin");
-  for (const dir of [laptopAgent, boxAgent, bin]) mkdirSync(dir, { recursive: true });
-  copyFileSync(path.join(repo, "test", "fake-ssh.mjs"), path.join(bin, "ssh"));
-  const saved = { PATH: process.env.PATH };
-  process.env.PATH = `${bin}${path.delimiter}${process.env.PATH}`;
-  process.env.PI_PARLEY_TEST_SSH_HOMES = JSON.stringify({ box: boxHome });
-  process.env.PI_PARLEY_LINK_LABEL = "laptop";
-  process.env.PI_PARLEY_LINK_IDLE_MS = "500";
+  const { laptopAgent, boxAgent, cleanup } = computers();
 
   const notes: string[] = [];
   const ui = new Proxy({ notify: (message: string) => notes.push(message) }, {
@@ -122,10 +142,59 @@ test("a computer added by name is linked both ways, named by its label, and unli
       "the box's sessions leave the laptop's list once unlinked");
   } finally {
     for (const harness of [here, there]) await harness.emitLifecycle("session_shutdown").catch(() => {});
-    await eventually(() => keeperGone(laptopAgent), "the keeper stops once no session is connected", 10_000).catch(() => {});
-    for (const broker of brokers) { if (broker.exitCode === null) { const exited = once(broker, "exit"); broker.kill("SIGTERM"); await exited; } }
-    process.env.PATH = saved.PATH;
-    for (const key of ["PI_PARLEY_TEST_SSH_HOMES", "PI_PARLEY_LINK_LABEL", "PI_PARLEY_LINK_IDLE_MS"]) delete process.env[key];
-    if (!existsSync(path.join(root, "keep"))) rmSync(root, { recursive: true, force: true });
+    await stopBrokers(brokers);
+    await cleanup();
+  }
+});
+
+test("the SSH link and another owner's link for its own sessions sit side by side, and neither knocks the other off", { timeout: 90_000, skip: process.platform === "win32" }, async () => {
+  const { default: extension } = await import("./index.ts");
+  const { laptopAgent, boxAgent, cleanup } = computers();
+  const sessions = [
+    { harness: createExtensionHarness("writer", { sessionId: "writer-session" }), agentDir: laptopAgent },
+    { harness: createExtensionHarness("reviewer", { sessionId: "reviewer-session" }), agentDir: boxAgent },
+    // An application (FlightDeck, say) puts its own sessions in a scope and links that scope itself.
+    { harness: createExtensionHarness("app-writer", { sessionId: "app-writer-session" }), agentDir: laptopAgent, scope: "app" },
+    { harness: createExtensionHarness("app-reviewer", { sessionId: "app-reviewer-session" }), agentDir: boxAgent, scope: "app" },
+  ];
+  const [writer, , appWriter] = sessions;
+  const call = (session: typeof writer, params: Record<string, unknown>) => withAgentDir(session!.agentDir, () =>
+    session!.harness.tools.find((tool) => tool.name === "parley")!.execute("link-call", params, new AbortController().signal, undefined, session!.harness.ctx), session!.scope);
+  const listed = async (session: typeof writer) => text(await call(session, { action: "list" }));
+  const brokers: ChildProcess[] = [];
+  const appLinks: Awaited<ReturnType<typeof attachBrokers>>[] = [];
+  const app = [{ localScopeId: "app", localScopeAlias: "app", remoteScopeAlias: "app" }];
+  const appAttach = async () => {
+    const [laptop, box] = await Promise.all([laptopAgent, boxAgent].map((agentDir) => inspectBroker(createLocalBrokerAccess({ agentDir }))));
+    return attachBrokers({ initiator: { broker: laptop!, originLabel: "laptop", scopeBindings: app }, acceptor: { broker: box!, originLabel: "box", scopeBindings: app } });
+  };
+  try {
+    brokers.push(await startBroker(laptopAgent), await startBroker(boxAgent));
+    for (const session of sessions) {
+      await withAgentDir(session.agentDir, async () => {
+        extension(session.harness.pi as never);
+        await session.harness.emitLifecycle("session_start");
+      }, session.scope);
+      assert.notEqual((await call(session, { action: "list" })).details?.error, true);
+    }
+    appLinks.push(await appAttach());
+    await eventually(async () => /• box:[^\n]*app-reviewer/.test(await listed(appWriter)), "the application's link carries its sessions");
+
+    assert.match(text(await call(writer, { action: "link", host: "box" })), /box is linked/);
+    await eventually(async () => /• box:[^\n]*reviewer/.test(await listed(writer)), "the SSH link carries ordinary sessions");
+    assert.match(await listed(appWriter), /• box:[^\n]*app-reviewer/, "the application's sessions are still linked");
+    assert.doesNotMatch(await listed(writer), /app-reviewer/, "each link carries only its own sessions");
+
+    // Later, a second owner tries to link the application's sessions too: refused, nothing dropped.
+    await new Promise((r) => setTimeout(r, 10_500));
+    await assert.rejects(appAttach(), (error: unknown) => (error as { code?: string }).code === "E_ALREADY_CONNECTED");
+    await new Promise((r) => setTimeout(r, 3_500));
+    assert.match(await listed(appWriter), /• box:[^\n]*app-reviewer/, "an answering link is kept");
+    assert.match(await listed(writer), /• box:[^\n]*reviewer/);
+  } finally {
+    for (const link of appLinks) await link.close();
+    for (const { harness } of sessions) await harness.emitLifecycle("session_shutdown").catch(() => {});
+    await stopBrokers(brokers);
+    await cleanup();
   }
 });

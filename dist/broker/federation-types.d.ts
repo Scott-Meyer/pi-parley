@@ -16,6 +16,11 @@ export declare const FEDERATION_SEND_FEATURE: "peer-send-v1";
 export declare const FEDERATION_EXACT_SEND_FEATURE: "peer-send-exact-v1";
 /** Optional single-hop text asks/replies with authenticated retained identity. */
 export declare const FEDERATION_CONVERSATION_FEATURE: "peer-conversation-text-v1";
+/** Optional: this broker holds one link per remote broker per set of local
+ * scopes, so owners of different scopes link the same pair side by side. */
+export declare const FEDERATION_SCOPED_LINKS_FEATURE: "peer-links-by-scope-v1";
+/** Optional: peer_ping / peer_pong, so a broker can ask whether a link still has someone behind it. */
+export declare const FEDERATION_PING_FEATURE: "peer-ping-v1";
 export declare const FEDERATION_CAPABILITY_MIN_LENGTH = 32;
 export declare const FEDERATION_CAPABILITY_MAX_LENGTH = 128;
 export declare const FEDERATION_CORRELATION_ID_MAX_LENGTH = 128;
@@ -27,7 +32,7 @@ export declare const FEDERATION_SCOPE_ALIAS_MAX_LENGTH = 64;
 export declare const FEDERATION_SESSION_ID_MAX_LENGTH = 512;
 export declare const FEDERATION_LOCAL_SCOPE_ID_MAX_LENGTH = 256;
 export declare const FEDERATION_REQUIRED_FEATURES: readonly ["peer-identity-v1", "peer-single-hop-v1"];
-export declare const FEDERATION_SUPPORTED_FEATURES: readonly ["peer-identity-v1", "peer-single-hop-v1", "peer-roster-v1", "peer-send-v1", "peer-send-exact-v1", "peer-conversation-text-v1"];
+export declare const FEDERATION_SUPPORTED_FEATURES: readonly ["peer-identity-v1", "peer-single-hop-v1", "peer-roster-v1", "peer-send-v1", "peer-send-exact-v1", "peer-conversation-text-v1", "peer-links-by-scope-v1", "peer-ping-v1"];
 export type FederationRequiredFeature = typeof FEDERATION_REQUIRED_FEATURES[number];
 export interface FederationOrigin {
     /** Stable installation identity, for example `host:penguin`. */

@@ -659,6 +659,21 @@ export class FederationRosterState {
     this.notifyDiff(previous, next);
   }
 
+  /** Ask the peer to send its roster again without changing what this side
+   * expects: any answer shows someone is still behind the link. */
+  requestPeerResponse(linkId: string): void {
+    const state = this.links.get(linkId);
+    if (!state) return;
+    this.options.send(state.link, {
+      type: "peer_roster_resync_request",
+      protocol: FEDERATION_PROTOCOL_NAME,
+      version: FEDERATION_PROTOCOL_VERSION,
+      originId: state.link.localOrigin.id,
+      ...(state.importOriginEpoch ? { expectedOriginEpoch: state.importOriginEpoch } : {}),
+      expectedSequence: Math.max(1, state.importSequence + 1),
+    });
+  }
+
   private requestResync(state: LinkRosterState): void {
     if (!state.awaitingSnapshot) state.awaitingSnapshot = true;
     state.resyncRequested = true;

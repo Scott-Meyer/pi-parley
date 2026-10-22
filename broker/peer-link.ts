@@ -4,7 +4,9 @@ import { createMessageReader, writeMessage } from "./framing.ts";
 import {
   FEDERATION_PROTOCOL_NAME,
   FEDERATION_PROTOCOL_VERSION,
+  FEDERATION_PING_FEATURE,
   FEDERATION_REQUIRED_FEATURES,
+  FEDERATION_SCOPED_LINKS_FEATURE,
   FEDERATION_SUPPORTED_FEATURES,
   type BrokerAcceptPeerRequest,
   type BrokerDialPeerRequest,
@@ -27,13 +29,19 @@ import {
 
 const PEER_HANDSHAKE_TIMEOUT_MS = 5_000;
 const MAX_PEER_LINKS = 16;
-/** A link to an origin that has lived this long is replaced by a newly authorized one rather than
- * defended. When a remote broker restarts or its controller changes, the old link's socket can stay
- * open on this side with nothing behind it, and refusing the new link would strand that peer. The
- * preferred-direction rule still settles genuine simultaneous attaches, which happen within moments. */
-const REPLACEABLE_LINK_AGE_MS = 10_000;
-function isReplaceable(link: FederationPeerLink): boolean {
-  return Date.now() - link.connectedAt >= REPLACEABLE_LINK_AGE_MS;
+/** Two links that would carry the same local scope to the same remote broker
+ * conflict. Within this long of each other they are a simultaneous attach,
+ * settled by preferred direction. After it, the existing link is defended:
+ * the newcomer is refused, and the refusal asks the existing link whether
+ * anyone is still behind it. A link that stays silent is closed, so a link
+ * left lingering by a restarted peer or controller clears for the retry. */
+const SIMULTANEOUS_ATTACH_MS = 10_000;
+const LIVENESS_PROBE_MS = 3_000;
+function isSettled(link: FederationPeerLink): boolean {
+  return Date.now() - link.connectedAt >= SIMULTANEOUS_ATTACH_MS;
+}
+function sharesLocalScope(left: readonly FederationScopeBinding[], right: readonly FederationScopeBinding[]): boolean {
+  return left.some((binding) => right.some((other) => other.localScopeId === binding.localScopeId));
 }
 const PEER_FRAME_RATE_CAPACITY = 240;
 const PEER_FRAME_REFILL_PER_SECOND = 120;
@@ -73,6 +81,8 @@ export interface PeerLinkManagerOptions {
   onLinkUp?: (link: FederationPeerLink) => void;
   onLinkDown?: (link: FederationPeerLink) => void;
   onPeerMessage?: (link: FederationPeerLink, value: unknown) => void;
+  /** Make the peer send something back, for links that predate peer_ping. */
+  requestPeerResponse?: (link: FederationPeerLink) => void;
 }
 
 function isValidNegotiatedFeatures(negotiated: readonly string[], offered: readonly string[]): boolean {
@@ -103,7 +113,9 @@ function rejection(hello: PeerHello, code: FederationFailureCode, error: string)
 /** Owns peer authority preparation, handshake, deterministic link choice, and lifecycle. */
 export class PeerLinkManager {
   private readonly linksById = new Map<string, FederationPeerLink>();
-  private readonly linkIdByRemoteOrigin = new Map<string, string>();
+  private readonly linkIdsByRemoteOrigin = new Map<string, Set<string>>();
+  private readonly lastHeardAt = new Map<string, number>();
+  private readonly probing = new Map<string, NodeJS.Timeout>();
   private readonly activatedLinkIds = new Set<string>();
   private readonly outboundFrameLimits = new Map<string, { tokens: number; lastRefillAt: number }>();
   private localOrigin: FederationOrigin | undefined;
@@ -153,16 +165,8 @@ export class PeerLinkManager {
     if (this.linksById.has(hello.linkId)) {
       return { ack: rejection(hello, "E_ALREADY_CONNECTED", "Peer link ID is already connected") };
     }
-    const existing = this.getLinkForRemoteOrigin(hello.origin.id);
-    if (existing && !isReplaceable(existing) && (
-      existing.direction === "inbound"
-      || !this.isPreferredDirection("inbound", prepared.localOrigin.id, prepared.remoteOrigin.id)
-    )) {
-      return { ack: rejection(hello, "E_ALREADY_CONNECTED", "The existing peer link has the deterministic preferred direction") };
-    }
-    if (!existing && this.linksById.size >= MAX_PEER_LINKS) {
-      return { ack: rejection(hello, "E_ALREADY_CONNECTED", "Peer link limit reached") };
-    }
+    const refusal = this.admission("inbound", prepared, hello.features);
+    if (refusal) return { ack: rejection(hello, "E_ALREADY_CONNECTED", refusal) };
 
     const negotiatedFeatures = FEDERATION_SUPPORTED_FEATURES.filter((feature) => hello.features.includes(feature));
     const link: FederationPeerLink = {
@@ -209,14 +213,8 @@ export class PeerLinkManager {
     if (this.linksById.has(value.linkId)) {
       throw new FederationPeerError("E_ALREADY_CONNECTED", "Peer link ID is already connected");
     }
-    const existing = this.getLinkForRemoteOrigin(value.remoteOrigin.id);
-    if (existing && !isReplaceable(existing) && (existing.direction === "outbound"
-      || !this.isPreferredDirection("outbound", value.localOrigin.id, value.remoteOrigin.id))) {
-      throw new FederationPeerError("E_ALREADY_CONNECTED", "The existing peer link has the deterministic preferred direction");
-    }
-    if (!existing && this.linksById.size >= MAX_PEER_LINKS) {
-      throw new FederationPeerError("E_ALREADY_CONNECTED", "Peer link limit reached");
-    }
+    const refusal = this.admission("outbound", value);
+    if (refusal) throw new FederationPeerError("E_ALREADY_CONNECTED", refusal);
     return {
       linkId: value.linkId, localOrigin: this.localOrigin ?? value.localOrigin,
       remoteOrigin: value.remoteOrigin, scopeBindings: value.scopeBindings,
@@ -249,10 +247,6 @@ export class PeerLinkManager {
     }
     if (!isValidNegotiatedFeatures(value.features, FEDERATION_SUPPORTED_FEATURES)) {
       throw new FederationPeerError("E_FEATURE_UNSUPPORTED", "Peer acknowledged invalid or unoffered features");
-    }
-    const existing = this.getLinkForRemoteOrigin(prepared.remoteOrigin.id);
-    if (!existing && this.linksById.size >= MAX_PEER_LINKS) {
-      throw new FederationPeerError("E_ALREADY_CONNECTED", "Peer link limit reached");
     }
     const link: FederationPeerLink = {
       ...prepared, direction: "outbound", socket, features: value.features, connectedAt: Date.now(),
@@ -317,6 +311,7 @@ export class PeerLinkManager {
             return;
           }
           try {
+            if (this.heard(link, value)) return;
             this.options.onPeerMessage(link, value);
           } catch (error) {
             socket.destroy(error instanceof Error ? error : new Error(String(error)));
@@ -405,6 +400,7 @@ export class PeerLinkManager {
   handlePostHandshakeMessage(linkId: string, value: unknown): void {
     const link = this.linksById.get(linkId);
     if (!link) throw new FederationPeerError("E_INVALID_REQUEST", "Unknown peer link");
+    if (this.heard(link, value)) return;
     if (!this.options.onPeerMessage) {
       throw new FederationPeerError("E_FEATURE_UNSUPPORTED", "Federation peer frames are not supported by this broker");
     }
@@ -438,9 +434,72 @@ export class PeerLinkManager {
     }
   }
 
-  private getLinkForRemoteOrigin(remoteOriginId: string): FederationPeerLink | undefined {
-    const linkId = this.linkIdByRemoteOrigin.get(remoteOriginId);
-    return linkId ? this.linksById.get(linkId) : undefined;
+  private linksToOrigin(remoteOriginId: string): FederationPeerLink[] {
+    return [...this.linkIdsByRemoteOrigin.get(remoteOriginId) ?? []]
+      .map((linkId) => this.linksById.get(linkId))
+      .filter((link): link is FederationPeerLink => link !== undefined);
+  }
+
+  /** Why a new link may not join, or undefined when it may. Conflicting links
+   * it would win (a simultaneous attach in its preferred direction) are left
+   * for registerLink to replace. peerFeatures is what the other broker offered,
+   * when known: one that holds a single link per broker can't take a second. */
+  private admission(
+    direction: FederationPeerLink["direction"],
+    candidate: { localOrigin: FederationOrigin; remoteOrigin: FederationOrigin; scopeBindings: FederationScopeBinding[] },
+    peerFeatures?: readonly string[],
+  ): string | undefined {
+    const existing = this.linksToOrigin(candidate.remoteOrigin.id);
+    const conflicting = existing.filter((link) => sharesLocalScope(link.scopeBindings, candidate.scopeBindings));
+    for (const link of conflicting) {
+      if (isSettled(link)) {
+        this.probe(link);
+        return "This computer is already linked with that one for these sessions; the existing link is being checked";
+      }
+      if (link.direction === direction || this.isPreferredDirection(link.direction, link.localOrigin.id, link.remoteOrigin.id)
+        || !this.isPreferredDirection(direction, candidate.localOrigin.id, candidate.remoteOrigin.id)) {
+        return "The existing peer link has the deterministic preferred direction";
+      }
+    }
+    const alongside = existing.filter((link) => !conflicting.includes(link));
+    if (alongside.length > 0 && peerFeatures && !peerFeatures.includes(FEDERATION_SCOPED_LINKS_FEATURE)) {
+      return "That computer's Parley holds one link per computer and is already linked with this one; update Parley there";
+    }
+    if (conflicting.length === 0 && this.linksById.size >= MAX_PEER_LINKS) return "Peer link limit reached";
+    return undefined;
+  }
+
+  /** Ask a settled link whether anyone is behind it; close it if nobody answers. */
+  private probe(link: FederationPeerLink): void {
+    if (this.probing.has(link.linkId)) return;
+    const askedAt = Date.now();
+    if (link.features.includes(FEDERATION_PING_FEATURE)) {
+      try { writeMessage(link.socket, { type: "peer_ping", protocol: FEDERATION_PROTOCOL_NAME, version: FEDERATION_PROTOCOL_VERSION, nonce: randomUUID() }); } catch { /* silence decides */ }
+    } else {
+      // Older peers answer a roster resynchronization request instead.
+      try { this.options.requestPeerResponse?.(link); } catch { /* silence decides */ }
+    }
+    const timer = setTimeout(() => {
+      this.probing.delete(link.linkId);
+      if (!this.linksById.has(link.linkId)) return;
+      if ((this.lastHeardAt.get(link.linkId) ?? 0) >= askedAt) return;
+      this.closeLink(link.linkId);
+    }, LIVENESS_PROBE_MS);
+    timer.unref?.();
+    this.probing.set(link.linkId, timer);
+  }
+
+  /** Every frame from a peer is evidence someone is behind the link. Pings are answered here. */
+  private heard(link: FederationPeerLink, value: unknown): boolean {
+    this.lastHeardAt.set(link.linkId, Date.now());
+    if (!link.features.includes(FEDERATION_PING_FEATURE) || typeof value !== "object" || value === null) return false;
+    const type = (value as { type?: unknown }).type;
+    if (type === "peer_pong") return true;
+    if (type !== "peer_ping") return false;
+    const nonce = (value as { nonce?: unknown }).nonce;
+    if (typeof nonce !== "string" || nonce.length > 64) return false;
+    writeMessage(link.socket, { type: "peer_pong", protocol: FEDERATION_PROTOCOL_NAME, version: FEDERATION_PROTOCOL_VERSION, nonce });
+    return true;
   }
 
   private isPreferredDirection(
@@ -458,21 +517,21 @@ export class PeerLinkManager {
     if (this.localOrigin && this.localOrigin.id !== link.localOrigin.id) {
       throw new FederationPeerError("E_ORIGIN_MISMATCH", "Local federation origin is already fixed for this broker");
     }
-    const existing = this.getLinkForRemoteOrigin(link.remoteOrigin.id);
-    if (existing) {
-      if (!isReplaceable(existing) && (
-        this.isPreferredDirection(existing.direction, existing.localOrigin.id, existing.remoteOrigin.id)
-        || !this.isPreferredDirection(link.direction, link.localOrigin.id, link.remoteOrigin.id)
-      )) {
-        throw new FederationPeerError("E_ALREADY_CONNECTED", "The existing peer link has the deterministic preferred direction");
-      }
+    const refusal = this.admission(link.direction, link, link.features);
+    if (refusal) throw new FederationPeerError("E_ALREADY_CONNECTED", refusal);
+    // What remains in conflict is a simultaneous attach this link wins.
+    for (const existing of this.linksToOrigin(link.remoteOrigin.id)) {
+      if (!sharesLocalScope(existing.scopeBindings, link.scopeBindings)) continue;
       this.unregisterLink(existing);
       existing.socket.destroy();
       this.options.onLinkDown?.(existing);
     }
     this.localOrigin ??= link.localOrigin;
     this.linksById.set(link.linkId, link);
-    this.linkIdByRemoteOrigin.set(link.remoteOrigin.id, link.linkId);
+    const ids = this.linkIdsByRemoteOrigin.get(link.remoteOrigin.id) ?? new Set<string>();
+    ids.add(link.linkId);
+    this.linkIdsByRemoteOrigin.set(link.remoteOrigin.id, ids);
+    this.lastHeardAt.set(link.linkId, Date.now());
     if (link.direction === "outbound") {
       this.outboundFrameLimits.set(link.linkId, { tokens: PEER_FRAME_RATE_CAPACITY, lastRefillAt: Date.now() });
     }
@@ -505,8 +564,11 @@ export class PeerLinkManager {
     this.activatedLinkIds.delete(link.linkId);
     this.outboundFrameLimits.delete(link.linkId);
     this.linksById.delete(link.linkId);
-    if (this.linkIdByRemoteOrigin.get(link.remoteOrigin.id) === link.linkId) {
-      this.linkIdByRemoteOrigin.delete(link.remoteOrigin.id);
-    }
+    this.lastHeardAt.delete(link.linkId);
+    clearTimeout(this.probing.get(link.linkId));
+    this.probing.delete(link.linkId);
+    const ids = this.linkIdsByRemoteOrigin.get(link.remoteOrigin.id);
+    ids?.delete(link.linkId);
+    if (ids?.size === 0) this.linkIdsByRemoteOrigin.delete(link.remoteOrigin.id);
   }
 }

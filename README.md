@@ -158,6 +158,8 @@ Registered only with the required pi-subagents child bridge metadata and no nati
 
 **`rename`** — `rename` sets this session's canonical Pi name through `name`. Subagents are scoped to their supervisor tree.
 
+**`link` / `unlink`** — Links this computer with others over SSH (see [Other computers](#other-computers)). `host` adds one and answers once it's linked or says why not; `recheck` checks one or all again; `discover` turns automatic linking on or off; with none of these it shows the links. `unlink` stops linking one computer and forgets it.
+
 ### Directory targeting and project launch
 
 For `send`/`ask`, `to` alone resolves within the visible roster. `cwd` addresses a local directory: alone it selects the sole local peer there; with `to` it constrains lookup to that directory. `openProjectPaneIfMissing: true` enables a launch attempt when no matching peer exists.
@@ -167,6 +169,26 @@ Parley uses a generic launcher, not a built-in terminal manager. It selects a vi
 The provider API receives an ordinary parley message containing `{ type: "pi-parley/project-launch-request", root, command, focus }`. A configured command receives the raw root in `PI_PARLEY_PROJECT_ROOT`; a bare `{root}` placeholder is replaced with a shell-quoted path. There is no default command.
 
 Results preserve separate observations: **launch request accepted or command started**, **new peer registration observed**, and **message accepted**. A later failure does not erase earlier stages. The v1 request carries no requested name or registration correlation: it observes a sole new local peer in the project, cannot prove that a particular launch created it, and reports ambiguity when several appear. Ending the registration wait does not cancel startup; repeating a launch can create another visible surface.
+
+## Other computers
+
+Parley can link this computer with the others you work on over SSH, so their sessions show up here and yours show up there. It's off until you ask for it, and it uses your own `ssh`: nothing is installed or opened on the network, and a computer needs only Pi with Parley.
+
+```
+/parley link on                 # link computers this one already has ssh connections to
+/parley link add build-vm       # or name one, as you'd type it after ssh
+/parley link                    # what's linked, and why anything isn't
+/parley link recheck [host]     # check again now, e.g. after starting Pi there
+/parley link remove build-vm    # stop linking it, and don't find it again
+```
+
+With discovery on, Parley notices the computers you're already connected to (a terminal running `ssh build-vm`, an editor's remote mode) and links the ones that have Parley. You get a notification, "Parley linked build-vm"; the model is told nothing. Linked computers are remembered and kept linked, retrying when they're asleep or unreachable. Tools that use ssh as a pipe, such as git, rsync and scp, are left alone, as are port forwards and other one-off options; only the options that say where and as whom are repeated.
+
+Sessions on this computer keep their own names. Sessions elsewhere carry their computer's label: `build-vm:pi-parley:Ellis`. Every computer is linked with every other one, through this one where needed, and every computer is "this computer" to itself; none is the main one.
+
+A computer has to be reachable without a prompt: if `ssh build-vm` asks for a password or a host-key decision, Parley says so instead of asking. It links the sessions FlightDeck and other applications haven't put in a scope of their own (`PI_PARLEY_SCOPE_ID`); those applications link their scopes themselves, alongside.
+
+Each computer runs one small link keeper while Pi sessions are open there. It holds the links, shares one SSH connection per computer, and stops shortly after the last session ends. Its state lives in `parley/links.json`, its log in `parley/link.log`.
 
 ### Nobody's context is shared
 
@@ -402,6 +424,8 @@ When both brokers negotiate `peer-roster-v1`, each link exchanges an authoritati
 
 A bounded, flushed dispatch journal records attempts before dispatch. Uncertain outcomes survive broker-process crashes/restarts and reconnects without automatic replay; only a positively correlated preacceptance nondelivery verdict can rearm an attempt. Retained uncertainty still blocks an unchanged legacy retry if its name now resolves locally or the target upgrades to conversations; preflight checks the original identity before conversion. Capability downgrade does not turn a retained receipt into known nondelivery. Caller-supplied scalar identities are durably associated with converted handles before preparation returns; association alone is not dispatch, and both identities share one admission record. Retained identities remain unknown/non-retryable when discovery or preflight cannot recover a verdict, while fresh operations remain known-unsent before dispatch. Passive lookup creates no journal; an incomplete final append preserves the verified prefix and allows unrelated local work while disabling new federated dispatch. Unreadable or corrupt complete history is not treated as absence. Persistence failure or exhausted retention fails closed before a new dispatch. This is a broker-process recovery guarantee, not a promise of recovery after host power loss or filesystem loss. If an answer arrives before a lost ask acknowledgement, the blocking tool returns the answer while keeping transport acceptance explicitly unknown.
 
+A broker holds one link per remote broker per set of local scopes. Links carrying different scopes sit side by side, so independent owners (FlightDeck for its scope, the SSH link keeper for ordinary sessions) link the same pair of computers without knowing about each other; both brokers negotiate this as `peer-links-by-scope-v1`, and a broker that can't hold two refuses the second. A new link for scopes an existing link already carries is a simultaneous attach for its first 10 seconds, settled by preferred direction. After that, the existing link is defended: the newcomer is refused with `E_ALREADY_CONNECTED`, and the refusal asks the existing link whether anyone is still behind it (`peer-ping-v1`, or a roster resynchronization request for older peers). A link that stays silent for 3 seconds is closed, so one left lingering by a restarted peer or controller clears for the retry.
+
 The broker owns a persisted canonical federation origin (adopted from the first controller-supplied id or minted as `install:<uuid>`), exposed with live scope enumeration through the trusted-local `broker_list_scopes` control; every dial/accept must present exactly it.
 
 Caller-owned endpoint snapshots additionally require `peer-send-exact-v1`: replacement endpoints fail with `E_TARGET_REBOUND`, and legacy links reject pinned sends rather than silently delivering to a replacement. Ordinary re-resolvable sends remain compatible with `peer-send-v1`. Remote attachments, supersession, queued mailboxes, broadcast, extension channels, compaction awareness, and multi-hop routing are outside this slice. Identity transport, roster replication, direct sends, and conversations negotiate independently; rolling older local clients keep their original metadata schema.
@@ -463,6 +487,14 @@ Parley is live conversation between working AI sessions. [Threadroom](https://gi
 ├── reply-tracker.ts      # Retained incoming context and explicit reply selection
 ├── conversation-history.ts # Journaled conversation recovery
 ├── message-results.ts    # Model-visible delivery and withdrawal outcomes
+├── link/                 # Linking computers over SSH
+│   ├── keeper.ts         # This computer's link keeper process
+│   ├── client.ts         # A session's connection to the keeper
+│   ├── session.ts        # link/unlink tool actions and /parley link
+│   ├── ssh.ts            # Broker access over the person's OpenSSH
+│   ├── discover.ts       # Computers this one has ssh connections to
+│   ├── protocol.ts       # Keeper requests, results and events
+│   └── paths.ts          # Keeper state and control endpoint
 ├── broker/
 │   ├── broker.ts         # Broker process and connection roles
 │   ├── client.ts         # ParleyClient class

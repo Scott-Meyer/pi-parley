@@ -402,6 +402,7 @@ class ParleyBroker {
         this.scheduleShutdownCheck();
       },
       onPeerMessage: (link, value) => this.handleFederationPeerMessage(link, value),
+      requestPeerResponse: (link) => this.federationRoster.requestPeerResponse(link.linkId),
     });
     this.federationRoster = new FederationRosterState({
       originEpoch: this.federationOriginEpoch,

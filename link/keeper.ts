@@ -251,9 +251,11 @@ async function keepLinked(pair: Pair) {
         inspectBroker(b.access, { signal, timeoutMs: 20_000 }),
       ]);
       if (!claimOrigin(a, left.origin.id) || !claimOrigin(b, right.origin.id)) { void reconcile(); return; }
+      // The acceptor decides first, seeing what the other broker supports, so
+      // this computer's broker (as current as this keeper) accepts.
       const attachment = await attachBrokers({
-        initiator: { broker: left, originLabel: a.label, scopeBindings: SCOPES },
-        acceptor: { broker: right, originLabel: b.label, scopeBindings: SCOPES },
+        initiator: { broker: right, originLabel: b.label, scopeBindings: SCOPES },
+        acceptor: { broker: left, originLabel: a.label, scopeBindings: SCOPES },
         signal,
         timeoutMs: 25_000,
       });

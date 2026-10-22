@@ -76,8 +76,9 @@ test("inbound hello must match independently prepared origin and local scope aut
   socket.destroy();
 });
 
-test("a new link from a peer replaces its old one once the old one has been up a while", (t) => {
-  const manager = new PeerLinkManager();
+test("a settled link is defended while someone answers on it, and cleared for the retry once nobody does", (t) => {
+  t.mock.timers.enable({ apis: ["Date", "setTimeout"], now: Date.now() });
+  const manager = new PeerLinkManager({ onPeerMessage: () => {} });
   const oldSocket = new net.Socket();
   const first = manager.acceptInbound(oldSocket, hello("link_old_12345678"), manager.prepareInbound(preparation("link_old_12345678")));
   assert.equal(first.ack.accepted, true);
@@ -86,14 +87,49 @@ test("a new link from a peer replaces its old one once the old one has been up a
   const racing = manager.acceptInbound(new net.Socket(), hello("link_race_12345678"), manager.prepareInbound(preparation("link_race_12345678")));
   assert.equal(racing.ack.accepted, false);
 
-  // After the peer's broker restarts, this side can still hold the old link's socket with nothing behind it.
-  // A newly authorized link to the same origin must not be refused because of it.
-  t.mock.timers.enable({ apis: ["Date"], now: Date.now() + 11_000 });
+  // Later, another owner tries to link the same scopes: refused while the existing link answers.
+  t.mock.timers.tick(11_000);
+  const rival = manager.acceptInbound(new net.Socket(), hello("link_rival_12345678"), manager.prepareInbound(preparation("link_rival_12345678")));
+  assert.equal(rival.ack.accepted, false);
+  if (!rival.ack.accepted) assert.match(rival.ack.error, /already linked/);
+  t.mock.timers.tick(1_000);
+  manager.handlePostHandshakeMessage(first.link!.linkId, { type: "peer_roster_snapshot" });
+  t.mock.timers.tick(3_000);
+  assert.equal(manager.size, 1);
+  assert.equal(oldSocket.destroyed, false, "a link that answered stays");
+
+  // After the peer's broker restarts, this side can still hold the old link's socket with nothing
+  // behind it. The refusal finds that out, and the next attempt gets in.
+  t.mock.timers.tick(11_000);
+  const refused = manager.acceptInbound(new net.Socket(), hello("link_retry_12345678"), manager.prepareInbound(preparation("link_retry_12345678")));
+  assert.equal(refused.ack.accepted, false);
+  t.mock.timers.tick(3_000);
+  assert.equal(oldSocket.destroyed, true, "the silent link's socket is closed");
+  assert.equal(manager.size, 0);
   const replacement = manager.acceptInbound(new net.Socket(), hello("link_new_12345678"), manager.prepareInbound(preparation("link_new_12345678")));
   assert.equal(replacement.ack.accepted, true, JSON.stringify(replacement.ack));
-  assert.equal(manager.size, 1, "the stale link is gone, not kept alongside");
-  assert.equal(oldSocket.destroyed, true, "the stale link's socket is closed");
   t.mock.timers.reset();
+});
+
+test("links carrying different local scopes to the same broker sit side by side, if that broker can hold both", () => {
+  const manager = new PeerLinkManager();
+  const scoped = [...FEDERATION_SUPPORTED_FEATURES];
+  const otherBindings = [{ localScopeId: null, localScopeAlias: "default-remote", remoteScopeAlias: "default-local" }];
+  const otherMappings = [{ localScopeAlias: "default-local", remoteScopeAlias: "default-remote" }];
+  const team = manager.acceptInbound(new net.Socket(), { ...hello("link_team_12345678"), features: scoped },
+    manager.prepareInbound(preparation("link_team_12345678")));
+  assert.equal(team.ack.accepted, true);
+  const everyone = manager.acceptInbound(new net.Socket(), { ...hello("link_every_12345678"), scopeMappings: otherMappings, features: scoped },
+    manager.prepareInbound({ ...preparation("link_every_12345678"), scopeBindings: otherBindings }));
+  assert.equal(everyone.ack.accepted, true, JSON.stringify(everyone.ack));
+  assert.equal(manager.size, 2);
+
+  // A broker that holds one link per broker would drop the first to take the second: refuse instead.
+  const older = manager.acceptInbound(new net.Socket(), { ...hello("link_older_12345678"), scopeMappings: [{ localScopeAlias: "x-local", remoteScopeAlias: "x-remote" }] },
+    manager.prepareInbound({ ...preparation("link_older_12345678"), scopeBindings: [{ localScopeId: "x", localScopeAlias: "x-remote", remoteScopeAlias: "x-local" }] }));
+  assert.equal(older.ack.accepted, false);
+  if (!older.ack.accepted) assert.match(older.ack.error, /update Parley there/);
+  assert.equal(manager.size, 2);
 });
 
 async function createAckServer(

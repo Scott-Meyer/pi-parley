@@ -16,6 +16,11 @@ export const FEDERATION_SEND_FEATURE = "peer-send-v1";
 export const FEDERATION_EXACT_SEND_FEATURE = "peer-send-exact-v1";
 /** Optional single-hop text asks/replies with authenticated retained identity. */
 export const FEDERATION_CONVERSATION_FEATURE = "peer-conversation-text-v1";
+/** Optional: this broker holds one link per remote broker per set of local
+ * scopes, so owners of different scopes link the same pair side by side. */
+export const FEDERATION_SCOPED_LINKS_FEATURE = "peer-links-by-scope-v1";
+/** Optional: peer_ping / peer_pong, so a broker can ask whether a link still has someone behind it. */
+export const FEDERATION_PING_FEATURE = "peer-ping-v1";
 export const FEDERATION_CAPABILITY_MIN_LENGTH = 32;
 export const FEDERATION_CAPABILITY_MAX_LENGTH = 128;
 export const FEDERATION_CORRELATION_ID_MAX_LENGTH = 128;
@@ -36,4 +41,6 @@ export const FEDERATION_SUPPORTED_FEATURES = [
     FEDERATION_SEND_FEATURE,
     FEDERATION_EXACT_SEND_FEATURE,
     FEDERATION_CONVERSATION_FEATURE,
+    FEDERATION_SCOPED_LINKS_FEATURE,
+    FEDERATION_PING_FEATURE,
 ];
