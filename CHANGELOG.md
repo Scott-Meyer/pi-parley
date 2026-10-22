@@ -6,8 +6,11 @@
 
 - Linking computers over SSH, without FlightDeck. `/parley link on` links the computers this one already has ssh connections to; `/parley link add <host>` names one; `recheck` and `remove` manage them. The parley tool's `link` and `unlink` actions do the same for models. Each computer runs a small link keeper while Pi sessions are open there, links every pair of computers like FlightDeck does, remembers linked computers, and notifies the person (not the model) when one is linked. It links sessions without a `PI_PARLEY_SCOPE_ID`; applications with their own scope keep linking it themselves.
 
+- `scripts/omp-compat/link.sh` checks linking computers from an OMP session (checked with OMP 18.12.6).
+
 ### Changed
 
+- The OMP ask/reply check accepts OMP 18.12 delivering the reply before the asker's next model call.
 - Links carrying different local scopes to the same broker now sit side by side (`peer-links-by-scope-v1`), so two owners can link the same pair of computers for different sessions.
 - An existing link is no longer replaced just because it is 10 seconds old. A newcomer for the same scopes is refused with `E_ALREADY_CONNECTED`, and the refusal checks the existing link (`peer-ping-v1`, or a roster resynchronization request for older peers); one that stays silent for 3 seconds is closed, so the retry gets in. Two owners can no longer knock each other's links off.
 - An attach sends the initiator its start request at once instead of after the acceptor is prepared. A slow carrier to the acceptor no longer lets the initiator's broker close the silent connection.

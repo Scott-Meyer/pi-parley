@@ -15,6 +15,9 @@ function reply(messages) {
   if (last?.role === "tool") return { text: `done: ${textOf(last).slice(0, 80).replace(/\s+/g, " ")}` };
   const lastUser = [...messages].reverse().find((message) => message.role === "user");
   const latest = lastUser ? textOf(lastUser) : "";
+  if (latest.includes("OMP-BOX register")) return toolCall("parley", { action: "status", profile: { name: "omp-box", description: "Waiting on the other computer" } });
+  if (latest.includes("OMP-LINK add")) return toolCall("parley", { action: "link", host: "box" });
+  if (latest.includes("OMP-LINK list")) return toolCall("parley", { action: "list" });
   if (latest.includes("OMP-B register")) return toolCall("parley", { action: "status", profile: { name: "omp-b", description: "Answering the OMP compatibility check" } });
   if (latest.includes("OMP-A ask")) return toolCall("parley", { action: "ask", to: "omp-b", message: "OMP-PING-4417 what is the fixture word?", blocking: false });
   // Check the answer first: a reply's header quotes the question it answers.

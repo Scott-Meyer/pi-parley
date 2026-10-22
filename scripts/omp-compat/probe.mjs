@@ -34,7 +34,9 @@ try {
   const b = start("b"); await b.ready; b.prompt("OMP-B register");
   await until(() => requests().some((r) => r.decision.text?.startsWith("done:") && r.messages.some((m) => m.text.includes("OMP-B register"))), 30000, "B to register as omp-b");
   const a = start("a"); await a.ready; a.prompt("OMP-A ask");
-  await until(() => seen("OMP-A ask", null) && requests().some((r) => r.messages.some((m) => m.text.includes("OMP-A ask")) && r.decision.text?.startsWith("done:")), 30000, "A's ask to be sent");
+  // The ask's own tool result proves it was sent. OMP may deliver the reply before A's next
+  // model call, so A's turn can end on the answer rather than on a "done:" line.
+  await until(() => requests().some((r) => r.messages.some((m) => m.role === "tool" && m.text.includes("Ask sent"))), 30000, "A's ask to be sent");
   await until(() => seen("OMP-PING-4417", "reply"), 30000, "B to receive the ask and reply");
   await until(() => requests().some((r) => r.decision.text === "received the answer"), 30000, "A to receive the reply");
   outcome = "pass";
