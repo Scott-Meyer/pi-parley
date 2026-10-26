@@ -224,9 +224,10 @@ async function connectionSharing(ssh: string, destination: SshDestination, optio
   const controlPath = /^controlpath\s+(.+)$/m.exec(config.stdout)?.[1]?.trim();
   if (config.code === 0 && controlPath && controlPath !== "none") return [];
   mkdirSync(options.controlDir, { recursive: true, mode: 0o700 });
-  // Unix socket paths are short; %C is already a hash of the connection.
-  const tag = createHash("sha256").update(destinationKey(destination)).digest("hex").slice(0, 8);
-  return ["-o", `ControlPath=${join(options.controlDir, `${tag}-%C`).slice(0, 100)}`, "-o", "ControlPersist=120"];
+  // Unix socket paths are short (104 bytes on macOS), and ssh appends a
+  // temporary suffix of about 17 characters while it sets up the master.
+  const tag = createHash("sha256").update(destinationKey(destination)).digest("hex").slice(0, 16);
+  return ["-o", `ControlPath=${join(options.controlDir, tag)}`, "-o", "ControlPersist=120"];
 }
 
 interface SshResult { code: number | null; stdout: string; stderr: string; bytes: Buffer }

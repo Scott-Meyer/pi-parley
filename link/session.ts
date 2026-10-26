@@ -26,17 +26,21 @@ export class SessionLinks {
   private connecting: Promise<LinkKeeperConnection> | undefined;
   private timer: NodeJS.Timeout | undefined;
   private active = false;
+  /** This session's environment as it started: which agent directory, which defaults. */
+  private env: NodeJS.ProcessEnv = { ...process.env };
 
   /** notify reaches the person only (UI), never the model. byDefault says whether
    * this session links computers when nobody has said otherwise. */
   constructor(private readonly notify: (message: string) => void, private readonly byDefault: () => boolean = () => false) {}
 
   /** Stay connected to the keeper whenever this computer links with others. */
-  start(): void {
+  start(env: NodeJS.ProcessEnv = process.env): void {
     this.active = true;
+    this.env = { ...env };
+    const byDefault = this.byDefault();
     const tick = () => {
       if (!this.active) return;
-      if (!this.connection && !this.connecting && linksConfigured(process.env, this.byDefault())) void this.connect().catch(() => {});
+      if (!this.connection && !this.connecting && linksConfigured(this.env, byDefault)) void this.connect().catch(() => {});
     };
     tick();
     this.timer = setInterval(tick, CONFIG_CHECK_MS);
@@ -52,7 +56,7 @@ export class SessionLinks {
 
   private connect(): Promise<LinkKeeperConnection> {
     if (this.connection) return Promise.resolve(this.connection);
-    this.connecting ??= connectLinkKeeper({ discoverByDefault: this.byDefault() }).then((connection) => {
+    this.connecting ??= connectLinkKeeper({ env: this.env, discoverByDefault: this.byDefault() }).then((connection) => {
       if (!this.active) { connection.close(); throw new Error("session ended"); }
       this.connection = connection;
       connection.onEvent((event) => {

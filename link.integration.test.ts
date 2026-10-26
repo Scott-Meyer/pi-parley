@@ -38,7 +38,7 @@ async function withAgentDir<T>(dir: string, work: () => Promise<T>, scope?: stri
   process.env.PI_CODING_AGENT_DIR = dir;
   if (scope) process.env.PI_PARLEY_SCOPE_ID = scope;
   try { return await work(); } finally {
-    if (previous === undefined) delete process.env.PI_CODING_AGENT_DIR; else process.env.PI_CODING_AGENT_DIR = previous;
+    process.env.PI_CODING_AGENT_DIR = previous;
     delete process.env.PI_PARLEY_SCOPE_ID;
   }
 }
@@ -53,6 +53,9 @@ function computers() {
   copyFileSync(path.join(repo, "test", "fake-ssh.mjs"), path.join(bin, "ssh"));
   const savedPath = process.env.PATH;
   process.env.PATH = `${bin}${path.delimiter}${process.env.PATH}`;
+  // Anything that resolves an agent directory outside withAgentDir lands here,
+  // never in the real ~/.pi/agent of whoever runs the tests.
+  process.env.PI_CODING_AGENT_DIR = path.join(root, "elsewhere", ".pi", "agent");
   process.env.PI_PARLEY_TEST_SSH_HOMES = JSON.stringify({ box: boxHome });
   process.env.PI_PARLEY_LINK_LABEL = "laptop";
   process.env.PI_PARLEY_LINK_IDLE_MS = "500";
@@ -61,6 +64,7 @@ function computers() {
     async cleanup() {
       await eventually(() => keeperGone(laptopAgent), "the keeper stops once no session is connected", 10_000).catch(() => {});
       process.env.PATH = savedPath;
+      delete process.env.PI_CODING_AGENT_DIR;
       for (const key of ["PI_PARLEY_TEST_SSH_HOMES", "PI_PARLEY_LINK_LABEL", "PI_PARLEY_LINK_IDLE_MS"]) delete process.env[key];
       if (process.env.PI_PARLEY_TEST_KEEP) console.log(`kept ${root}`); else rmSync(root, { recursive: true, force: true });
     },
