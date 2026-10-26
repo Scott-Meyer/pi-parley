@@ -34,3 +34,12 @@ test("ssh used as a pipe or a control channel isn't a computer someone works on"
     "ssh",
   ]) assert.equal(destinationFromArgv(argv(line)), undefined, line);
 });
+
+test("herdr's saved machines read as ssh destinations", async () => {
+  const { herdrTarget } = await import("./discover.ts");
+  assert.deepEqual(herdrTarget("build-vm"), { options: [], host: "build-vm" });
+  assert.deepEqual(herdrTarget("ssh://me@lab.example:2222"), { options: ["-p", "2222"], host: "me@lab.example" });
+  assert.deepEqual(herdrTarget("ssh://lab.example"), { options: [], host: "lab.example" });
+  assert.equal(herdrTarget("ssh://me:secret@lab.example"), undefined, "herdr rejects passwords in targets; so does Parley");
+  assert.equal(herdrTarget("-oProxyCommand=evil"), undefined);
+});

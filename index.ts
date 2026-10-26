@@ -41,6 +41,7 @@ import { formatPeerCompactionNotice } from "./compaction-awareness.ts";
 import { formatCancellationResult, formatDeliveryResult } from "./message-results.ts";
 import { SessionLinks } from "./link/session.ts";
 import { linkSuggestions } from "./link/completions.ts";
+import { registerHerdrNames } from "./herdr/names.ts";
 import {
   openProjectPane,
   ProjectLaunchError,
@@ -886,6 +887,9 @@ function installParleyExtension(
     state?: ParleyExtensionState;
   }>();
   let runtimeContext: ExtensionContext | null = null;
+  // In a herdr pane, the session's name follows herdr's and the other way round.
+  if (config.enabled && config.herdrNames) registerHerdrNames(pi, { sessionRenamesArrive: sessionInfoChangesReachExtensions() });
+
   // Cross-computer links: told to the person, never added to the model's context.
   // Linking is on by default, except where an application links this session
   // itself (FlightDeck tabs) and for subagents, which share their parent's computer.

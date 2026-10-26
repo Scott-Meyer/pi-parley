@@ -18,7 +18,7 @@ import {
 import { createMessageReader, writeMessage } from "../broker/framing.ts";
 import { tryAcquireProcessLock } from "../broker/process-lock.ts";
 import { ensureParleyRuntimeDir } from "../broker/paths.ts";
-import { destinationFromArgv, listSshProcesses } from "./discover.ts";
+import { destinationFromArgv, listHerdrMachines, listSshProcesses } from "./discover.ts";
 import { getLinkPaths } from "./paths.ts";
 import type { LinkEvent, LinkHostState, LinkHostStatus, LinkRequest, LinkResponse, LinkStatus } from "./protocol.ts";
 import {
@@ -305,6 +305,13 @@ function sides(): Side[] {
   return list;
 }
 
+// herdr's saved machines change rarely; ask now and then, not every pass.
+let herdrCache: { at: number; machines: SshDestination[] } | undefined;
+async function herdrMachines(): Promise<SshDestination[]> {
+  if (!herdrCache || Date.now() - herdrCache.at > 60_000) herdrCache = { at: Date.now(), machines: await listHerdrMachines() };
+  return herdrCache.machines;
+}
+
 let reconciling = false;
 let reconcileAgain = false;
 async function reconcile(): Promise<void> {
@@ -320,9 +327,11 @@ async function reconcile(): Promise<void> {
       }
       if (discovering()) {
         try {
-          for (const proc of await listSshProcesses()) {
-            if (ownChildren.has(proc.pid)) continue;
-            const destination = destinationFromArgv(proc.argv);
+          const seen = [
+            ...(await listSshProcesses()).filter((proc) => !ownChildren.has(proc.pid)).map((proc) => destinationFromArgv(proc.argv)),
+            ...await herdrMachines(),
+          ];
+          for (const destination of seen) {
             if (!destination) continue;
             const key = destinationKey(destination);
             if (config.ignored.includes(key) || hosts.has(key)) continue;

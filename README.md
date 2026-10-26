@@ -184,13 +184,17 @@ Parley links this computer with the others you work on over SSH, so their sessio
 
 `/parley` completes as you type, through the verbs and then the hosts in your ssh config. `/intercom` is the same command, for people coming from pi-intercom.
 
-With discovery on, Parley notices the computers you're already connected to (a terminal running `ssh build-vm`, an editor's remote mode) and links the ones that have Parley. You get a notification, "Parley linked build-vm"; the model is told nothing. Linked computers are remembered and kept linked, retrying when they're asleep or unreachable. Tools that use ssh as a pipe, such as git, rsync and scp, are left alone, as are port forwards and other one-off options; only the options that say where and as whom are repeated.
+With discovery on, Parley notices the computers you're already connected to (a terminal running `ssh build-vm`, an editor's remote mode, the machines saved in [herdr](https://herdr.dev)) and links the ones that have Parley. You get a notification, "Parley linked build-vm"; the model is told nothing. Linked computers are remembered and kept linked, retrying when they're asleep or unreachable. Tools that use ssh as a pipe, such as git, rsync and scp, are left alone, as are port forwards and other one-off options; only the options that say where and as whom are repeated.
 
 Sessions on this computer keep their own names. Sessions elsewhere carry their computer's label: `build-vm:pi-parley:Ellis`. Every computer is linked with every other one, through this one where needed, and every computer is "this computer" to itself; none is the main one.
 
 A computer has to be reachable without a prompt: if `ssh build-vm` asks for a password or a host-key decision, Parley says so instead of asking. It links the sessions FlightDeck and other applications haven't put in a scope of their own (`PI_PARLEY_SCOPE_ID`); those applications link their scopes themselves, alongside.
 
 Each computer runs one small link keeper while Pi sessions are open there. It holds the links, shares one SSH connection per computer, and stops shortly after the last session ends. Its state lives in `parley/links.json`, its log in `parley/link.log`.
+
+## herdr
+
+In a [herdr](https://herdr.dev) pane, a session is named after where it lives, `<workspace>:<tab>` (or the pane's own label when it has one), the way FlightDeck names its tabs' sessions. Renaming the workspace, tab or pane in herdr renames the session, and renaming the session (`/name`, `/alias`, the parley tool's `rename`) renames herdr's: the tab when the session's pane is the tab's only one, otherwise just that pane's label, so another pane's tab never changes under it. A resumed session keeps its name and herdr follows. Subagents in the pane get `<workspace>:<tab>:<name>` and rename nothing. `"herdrNames": false` in `config.json` turns this off.
 
 ### Nobody's context is shared
 
@@ -491,6 +495,9 @@ Parley is live conversation between working AI sessions. [Threadroom](https://gi
 ├── reply-tracker.ts      # Retained incoming context and explicit reply selection
 ├── conversation-history.ts # Journaled conversation recovery
 ├── message-results.ts    # Model-visible delivery and withdrawal outcomes
+├── herdr/                # Session names in step with herdr's
+│   ├── names.ts          # The naming rules and their lifecycle
+│   └── socket.ts         # herdr's socket API: requests and pushed events
 ├── link/                 # Linking computers over SSH
 │   ├── keeper.ts         # This computer's link keeper process
 │   ├── client.ts         # A session's connection to the keeper

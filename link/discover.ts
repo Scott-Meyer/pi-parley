@@ -83,3 +83,36 @@ function parseProcessLines(stdout: string, split: (line: string) => string[]): S
   }
   return found;
 }
+
+/** Machines saved in herdr (`herdr machine list`), enabled ones only. herdr's
+ * targets are an ssh alias or `ssh://[user@]host[:port]`. No herdr: none. */
+export async function listHerdrMachines(herdr = "herdr"): Promise<SshDestination[]> {
+  let stdout: string;
+  try {
+    ({ stdout } = await run(herdr, ["machine", "list", "--json"], { timeout: 5_000, windowsHide: true, maxBuffer: 1024 * 1024 }));
+  } catch {
+    return [];
+  }
+  let machines: unknown;
+  try { machines = JSON.parse(stdout); } catch { return []; }
+  if (!Array.isArray(machines)) return [];
+  const found: SshDestination[] = [];
+  for (const machine of machines as { target?: unknown; enabled?: unknown }[]) {
+    if (machine?.enabled !== true || typeof machine.target !== "string") continue;
+    const destination = herdrTarget(machine.target);
+    if (destination) found.push(destination);
+  }
+  return found;
+}
+
+export function herdrTarget(target: string): SshDestination | undefined {
+  const trimmed = target.trim();
+  if (!trimmed.startsWith("ssh://")) {
+    return /^[^\s-][^\s]*$/.test(trimmed) ? Object.freeze({ options: Object.freeze([]), host: trimmed }) : undefined;
+  }
+  let url: URL;
+  try { url = new URL(trimmed); } catch { return undefined; }
+  if (!url.hostname || url.password) return undefined;
+  const host = url.username ? `${decodeURIComponent(url.username)}@${url.hostname}` : url.hostname;
+  return Object.freeze({ options: Object.freeze(url.port ? ["-p", url.port] : []), host });
+}
