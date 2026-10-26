@@ -7,6 +7,8 @@ import { spawn, spawnSync } from "node:child_process";
 import { once } from "node:events";
 
 const repo = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+// Smoke sessions must never go looking for this machine's real ssh connections.
+process.env.PI_PARLEY_LINK_BY_DEFAULT = "0";
 // Keep actual Unix socket paths within macOS's short sockaddr_un limit.
 const scratch = mkdtempSync(join(tmpdir(), "pl-host-"));
 const packed = join(scratch, "packed");

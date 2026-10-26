@@ -7,6 +7,8 @@ OMP_BIN=$(command -v "${OMP_BIN:-omp}")
 echo "Using $("$OMP_BIN" --version)"
 WORK=$(mktemp -d "${TMPDIR:-/tmp}/parley-omp.XXXXXX")
 export HOME="$WORK/home" PI_CODING_AGENT_DIR="$WORK/home/.omp/agent" OMP_SKIP_SETUP=1
+# Never go looking for this machine's real ssh connections.
+export PI_PARLEY_LINK_BY_DEFAULT=0
 mkdir -p "$PI_CODING_AGENT_DIR" "$WORK/project"
 PORT=$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1])')
 cat >"$PI_CODING_AGENT_DIR/models.yml" <<YAML

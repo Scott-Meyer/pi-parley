@@ -12,6 +12,8 @@ for (const key of Object.keys(env)) {
   if ((key.startsWith("PI_PARLEY_") && !key.startsWith("PI_PARLEY_TEST_")) || key.startsWith("PI_SUBAGENT_")
     || key.startsWith("FLIGHTDECK_") || key === "PI_CODING_AGENT_DIR" || key === "PI_CLIENT_SESSION_ID") delete env[key];
 }
+// Sessions in tests must never go looking for this machine's real ssh connections.
+env.PI_PARLEY_LINK_BY_DEFAULT = "0";
 const tsxCli = join(dirname(createRequire(import.meta.url).resolve("tsx")), "cli.mjs");
 // Integration files each start real brokers and sessions; all of them at once
 // on a busy machine starve each other past their deadlines.

@@ -10,6 +10,10 @@ on:
 permissions:
   contents: read
 
+env:
+  # Test sessions must never go looking for the runner's ssh connections.
+  PI_PARLEY_LINK_BY_DEFAULT: "0"
+
 jobs:
   runtime:
     name: Runtime and federation (${{ matrix.os }})

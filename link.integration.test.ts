@@ -62,7 +62,7 @@ function computers() {
       await eventually(() => keeperGone(laptopAgent), "the keeper stops once no session is connected", 10_000).catch(() => {});
       process.env.PATH = savedPath;
       for (const key of ["PI_PARLEY_TEST_SSH_HOMES", "PI_PARLEY_LINK_LABEL", "PI_PARLEY_LINK_IDLE_MS"]) delete process.env[key];
-      rmSync(root, { recursive: true, force: true });
+      if (process.env.PI_PARLEY_TEST_KEEP) console.log(`kept ${root}`); else rmSync(root, { recursive: true, force: true });
     },
   };
 }
@@ -194,6 +194,47 @@ test("the SSH link and another owner's link for its own sessions sit side by sid
   } finally {
     for (const link of appLinks) await link.close();
     for (const { harness } of sessions) await harness.emitLifecycle("session_shutdown").catch(() => {});
+    await stopBrokers(brokers);
+    await cleanup();
+  }
+});
+
+test("with nothing set up, a session links the computer this one already has an ssh session open to, and says so", { timeout: 90_000, skip: process.platform === "win32" }, async () => {
+  const { default: extension } = await import("./index.ts");
+  const { laptopAgent, boxAgent, cleanup } = computers();
+  process.env.PI_PARLEY_LINK_BY_DEFAULT = "1";
+  // Someone's terminal: `ssh box`, still connected. (A process that ps shows as ssh.)
+  const terminal = spawn(process.execPath, ["-e", "setTimeout(()=>{},120000)", "box"], { argv0: "ssh", stdio: "ignore" });
+  const notes: string[] = [];
+  const ui = new Proxy({ notify: (message: string) => notes.push(message) }, {
+    get: (target, key) => (key in target ? (target as any)[key] : () => undefined),
+  });
+  const here = createExtensionHarness("writer", { sessionId: "writer-session", hasUI: true, ui });
+  const there = createExtensionHarness("reviewer", { sessionId: "reviewer-session" });
+  const call = (harness: typeof here, agentDir: string, params: Record<string, unknown>) => withAgentDir(agentDir, () =>
+    harness.tools.find((tool) => tool.name === "parley")!.execute("link-call", params, new AbortController().signal, undefined, harness.ctx));
+  const brokers: ChildProcess[] = [];
+  try {
+    brokers.push(await startBroker(laptopAgent), await startBroker(boxAgent));
+    // The box's session starts first, so its own keeper (also on by default) has nothing to find.
+    for (const [harness, agentDir] of [[there, boxAgent], [here, laptopAgent]] as const) {
+      await withAgentDir(agentDir, async () => {
+        extension(harness.pi as never);
+        await harness.emitLifecycle("session_start");
+      });
+      assert.notEqual((await call(harness, agentDir, { action: "list" })).details?.error, true);
+    }
+    await eventually(async () => /• box:[^\n]*reviewer/.test(text(await call(here, laptopAgent, { action: "list" }))),
+      "the box's session appears without anyone adding it", 40_000);
+    assert.ok(notes.includes("Parley linked box"), `the person hears about it: ${notes.join(" | ")}`);
+    assert.match(text(await call(here, laptopAgent, { action: "link" })), /• box \(box, found\): linked/);
+
+    // Turning it off is remembered; the computer it found stays linked until removed.
+    assert.match(text(await call(here, laptopAgent, { action: "link", discover: false })), /ssh connections to: off/);
+  } finally {
+    terminal.kill();
+    delete process.env.PI_PARLEY_LINK_BY_DEFAULT;
+    for (const harness of [here, there]) await harness.emitLifecycle("session_shutdown").catch(() => {});
     await stopBrokers(brokers);
     await cleanup();
   }

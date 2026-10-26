@@ -48,7 +48,8 @@ interface RememberedHost {
 }
 interface Config {
   version: 1;
-  discover: boolean;
+  /** Set by /parley link on|off; absent means this computer's default. */
+  discover?: boolean;
   hosts: RememberedHost[];
   /** Removed by the person or an AI; not found automatically again until added. */
   ignored: string[];
@@ -59,15 +60,18 @@ function readConfig(): Config {
     const parsed = JSON.parse(readFileSync(paths.config, "utf8"));
     return {
       version: 1,
-      discover: parsed.discover === true,
+      ...(typeof parsed.discover === "boolean" ? { discover: parsed.discover } : {}),
       hosts: Array.isArray(parsed.hosts) ? parsed.hosts.filter((h: any) => typeof h?.destination === "string")
         .map((h: any) => ({ destination: h.destination, via: h.via === "found" ? "found" : "added" })) : [],
       ignored: Array.isArray(parsed.ignored) ? parsed.ignored.filter((d: unknown) => typeof d === "string") : [],
     };
   } catch {
-    return { version: 1, discover: false, hosts: [], ignored: [] };
+    return { version: 1, hosts: [], ignored: [] };
   }
 }
+
+/** Whether discovery is on: as last set, else the default the starting session passed. */
+const discovering = () => config.discover ?? process.env.PI_PARLEY_LINK_DISCOVER_DEFAULT === "1";
 
 let config = readConfig();
 function saveConfig() {
@@ -314,7 +318,7 @@ async function reconcile(): Promise<void> {
         const destination = parseSshDestination(entry.destination);
         if (destination) hostFor(destination, entry.via);
       }
-      if (config.discover) {
+      if (discovering()) {
         try {
           for (const proc of await listSshProcesses()) {
             if (ownChildren.has(proc.pid)) continue;
@@ -376,7 +380,7 @@ function hostStatus(host: Host): LinkHostStatus {
 
 function status(): LinkStatus {
   return Object.freeze({
-    discover: config.discover,
+    discover: discovering(),
     label: localLabel,
     hosts: [...hosts.values()].map(hostStatus),
     relays: [...pairs.values()].filter((p) => p.a !== local).map((p) => ({
@@ -414,7 +418,7 @@ async function handle(request: LinkRequest): Promise<LinkResponse> {
     case "discover": {
       config.discover = request.on === true;
       saveConfig();
-      if (!config.discover) {
+      if (!discovering()) {
         // Found hosts that never linked aren't kept; remembered ones stay.
         for (const host of [...hosts.values()]) if (!remembered(host)) forgetHost(host);
       }

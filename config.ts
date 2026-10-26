@@ -56,6 +56,13 @@ export interface ParleyConfig {
   
   /** Show reply hint in incoming messages (default: true) */
   replyHint: boolean;
+
+  /** Link computers this one has ssh connections to unless someone turned it off with
+   * /parley link off, or an application (FlightDeck) links this session itself (default: true) */
+  linkByDefault: boolean;
+
+  /** In a herdr pane, keep the session's name and herdr's pane/tab names in step (default: true) */
+  herdrNames: boolean;
 }
 
 export function getConfigPath(parleyDir: string = getParleyDirPath()): string {
@@ -78,6 +85,8 @@ const defaults: ParleyConfig = {
   inboundTrigger: "always",
   enabled: true,
   replyHint: true,
+  linkByDefault: true,
+  herdrNames: true,
 };
 
 function readConfig(fallback?: (error: Error, parsed: unknown) => ParleyConfig): ParleyConfig {
@@ -125,6 +134,12 @@ function readConfig(fallback?: (error: Error, parsed: unknown) => ParleyConfig):
         throw new Error(`"confirmSend" must be a boolean`);
       }
       config.confirmSend = parsedConfig.confirmSend;
+    }
+
+    for (const key of ["linkByDefault", "herdrNames"] as const) {
+      if (!Object.hasOwn(parsedConfig, key)) continue;
+      if (typeof parsedConfig[key] !== "boolean") throw new Error(`"${key}" must be a boolean`);
+      config[key] = parsedConfig[key] as boolean;
     }
 
     if (Object.hasOwn(parsedConfig, "enabled")) {
@@ -211,6 +226,7 @@ export function loadRuntimeConfig(reportError: (error: Error) => void): ParleyCo
       enabled: !explicitlyDisabled,
       inboundTrigger: "never",
       confirmSend: true,
+      linkByDefault: false,
     };
   });
 }

@@ -887,7 +887,14 @@ function installParleyExtension(
   }>();
   let runtimeContext: ExtensionContext | null = null;
   // Cross-computer links: told to the person, never added to the model's context.
-  const links = new SessionLinks((message) => { if (runtimeContext) notifyIfLive(runtimeContext, message, "info"); });
+  // Linking is on by default, except where an application links this session
+  // itself (FlightDeck tabs) and for subagents, which share their parent's computer.
+  const links = new SessionLinks(
+    (message) => { if (runtimeContext) notifyIfLive(runtimeContext, message, "info"); },
+    () => (process.env.PI_PARLEY_LINK_BY_DEFAULT?.trim() ? process.env.PI_PARLEY_LINK_BY_DEFAULT.trim() !== "0" : config.linkByDefault)
+      && !process.env.FLIGHTDECK_TAB_ID?.trim() && !process.env.FLIGHTDECK_PANE_ID?.trim()
+      && !process.env[SUBAGENT_CHILD_AGENT_ENV]?.trim() && process.env.PI_SUBAGENT_CHILD !== "1",
+  );
   let currentSessionId: string | null = null;
   let currentParleySessionId: string | null = null;
   let currentModel = "unknown";

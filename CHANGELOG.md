@@ -6,6 +6,10 @@
 
 - `/parley` completes as you type: on its own it lists everything it does (`sessions`, `link`, `id`, `alias`), then continues through `link` verbs and the computers in your ssh config or already linked.
 - `/intercom` is the same command as `/parley`, for people coming from pi-intercom.
+
+### Changed
+
+- Linking computers is on by default: a session links the computers this one has ssh connections to and tells the person when one is linked. FlightDeck tabs (FlightDeck links those) and subagents don't; `/parley link off` turns it off for this computer and `"linkByDefault": false` in `config.json` turns the default off. An unreadable config falls back to off.
 - In fullscreen mode, clicking a received message or a sent message's row opens it, and clicking again shuts it. A clicked message stays as you left it when Pi redraws.
 
 ## 1.5.0 - 2026-10-22

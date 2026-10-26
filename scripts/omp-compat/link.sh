@@ -12,6 +12,8 @@ LAPTOP="$WORK/laptop" BOX="$WORK/box"
 mkdir -p "$LAPTOP/.omp/agent" "$BOX/.omp/agent" "$WORK/project" "$WORK/bin"
 cp "$ROOT/test/fake-ssh.mjs" "$WORK/bin/ssh"
 export PATH="$WORK/bin:$PATH" PI_PARLEY_TEST_SSH_HOMES="{\"box\":\"$BOX\"}" PI_PARLEY_LINK_LABEL=laptop PI_PARLEY_LINK_IDLE_MS=1000 OMP_SKIP_SETUP=1
+# Never go looking for this machine's real ssh connections.
+export PI_PARLEY_LINK_BY_DEFAULT=0
 unset PI_CODING_AGENT_DIR
 PORT=$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1])')
 for home in "$LAPTOP" "$BOX"; do

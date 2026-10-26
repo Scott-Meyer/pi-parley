@@ -30,23 +30,25 @@ export interface LinkKeeperConnection {
   close(): void;
 }
 
-/** Whether this computer has asked to link with others: discovery on, or any computer remembered. */
-export function linksConfigured(env: NodeJS.ProcessEnv = process.env): boolean {
-  try {
-    const parsed = JSON.parse(readFileSync(getLinkPaths(env).config, "utf8"));
-    return parsed?.discover === true || (Array.isArray(parsed?.hosts) && parsed.hosts.length > 0);
-  } catch {
-    return false;
-  }
+/** Whether this computer links with others: any computer remembered, or discovery on,
+ * as last set with /parley link on|off, else byDefault. */
+export function linksConfigured(env: NodeJS.ProcessEnv = process.env, byDefault = false): boolean {
+  let parsed: { discover?: unknown; hosts?: unknown } | undefined;
+  try { parsed = JSON.parse(readFileSync(getLinkPaths(env).config, "utf8")); } catch { parsed = undefined; }
+  if (Array.isArray(parsed?.hosts) && parsed.hosts.length > 0) return true;
+  return typeof parsed?.discover === "boolean" ? parsed.discover : byDefault;
 }
 
 const KEEPER_PATH = join(dirname(fileURLToPath(import.meta.url)), "keeper.ts");
 const EXTENSION_DIR = join(dirname(fileURLToPath(import.meta.url)), "..");
 
-function startKeeper(env: NodeJS.ProcessEnv) {
+function startKeeper(env: NodeJS.ProcessEnv, discoverByDefault: boolean) {
   const paths = getLinkPaths(env);
   ensureParleyRuntimeDir(paths.parleyDir);
-  const childEnv = { ...env, PI_CODING_AGENT_DIR: getAgentDirPath(env), NODE_NO_WARNINGS: "1" };
+  const childEnv = {
+    ...env, PI_CODING_AGENT_DIR: getAgentDirPath(env), NODE_NO_WARNINGS: "1",
+    PI_PARLEY_LINK_DISCOVER_DEFAULT: discoverByDefault ? "1" : "0",
+  };
   if (process.platform === "win32") {
     const launcher = writeWindowsHiddenLauncher(
       getWindowsBrokerCommandLine(KEEPER_PATH, EXTENSION_DIR),
@@ -71,8 +73,9 @@ function connectOnce(path: string): Promise<net.Socket> {
 }
 
 /** Connects to this computer's keeper, starting it when it isn't running. */
-export async function connectLinkKeeper(options: { env?: NodeJS.ProcessEnv; timeoutMs?: number } = {}): Promise<LinkKeeperConnection> {
-  const env = options.env ?? process.env;
+export async function connectLinkKeeper(options: { env?: NodeJS.ProcessEnv; timeoutMs?: number; discoverByDefault?: boolean } = {}): Promise<LinkKeeperConnection> {
+  // A snapshot: where this session's agent directory is mustn't change mid-connect.
+  const env = { ...(options.env ?? process.env) };
   const paths = getLinkPaths(env);
   const deadline = Date.now() + (options.timeoutMs ?? 10_000);
   let socket: net.Socket | undefined;
@@ -82,7 +85,7 @@ export async function connectLinkKeeper(options: { env?: NodeJS.ProcessEnv; time
       socket = await connectOnce(paths.control);
     } catch (error) {
       if (Date.now() > deadline) throw new Error("Parley's link keeper didn't start", { cause: error });
-      if (!started) { startKeeper(env); started = true; }
+      if (!started) { startKeeper(env, options.discoverByDefault === true); started = true; }
       await new Promise((r) => setTimeout(r, 150));
     }
   }
