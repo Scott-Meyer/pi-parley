@@ -182,6 +182,8 @@ Parley can link this computer with the others you work on over SSH, so their ses
 /parley link remove build-vm    # stop linking it, and don't find it again
 ```
 
+`/parley` completes as you type, through the verbs and then the hosts in your ssh config. `/intercom` is the same command, for people coming from pi-intercom.
+
 With discovery on, Parley notices the computers you're already connected to (a terminal running `ssh build-vm`, an editor's remote mode) and links the ones that have Parley. You get a notification, "Parley linked build-vm"; the model is told nothing. Linked computers are remembered and kept linked, retrying when they're asleep or unreachable. Tools that use ssh as a pipe, such as git, rsync and scp, are left alone, as are port forwards and other one-off options; only the options that say where and as whom are repeated.
 
 Sessions on this computer keep their own names. Sessions elsewhere carry their computer's label: `build-vm:pi-parley:Ellis`. Every computer is linked with every other one, through this one where needed, and every computer is "this computer" to itself; none is the main one.

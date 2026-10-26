@@ -5,7 +5,7 @@ import { stripVTControlCharacters } from "node:util";
 import { visibleWidth } from "@mariozechner/pi-tui";
 import { formatPeerCompactionNotice } from "../compaction-awareness.ts";
 import { formatDeliveryResult } from "../message-results.ts";
-import { InlineMessageComponent } from "../ui/inline-message.ts";
+import { InlineMessageComponent, messageExpanded } from "../ui/inline-message.ts";
 import type { Message, SessionInfo } from "../types.ts";
 
 const theme = {
@@ -265,4 +265,45 @@ test("a delivery receipt carrying a rebound compaction notice names every identi
   assert.match(receipt, /^Message sent as observer to Bob~2\.\nMessage: #1/);
   assert.match(receipt, /Note: Bob~2 \(message was requested for Bob\) has compacted since you last talked/);
   assert.doesNotMatch(receipt, /\[session|builder/, "no raw identity, and never another session's reference");
+});
+
+test("in fullscreen mode a click opens a received message, and it stays open when its row is rebuilt", () => {
+  const long = { ...message, id: "message-click", content: { text: `${"word ".repeat(40)}final-sentence` } };
+  const collapsed = new InlineMessageComponent(from, long, theme as any, undefined, undefined, !messageExpanded(long.id, false));
+  assert.doesNotMatch(collapsed.render(60).join("\n"), /final-sentence/);
+  assert.match(collapsed.render(60).join("\n"), /Click or Ctrl\+O to expand/);
+
+  assert.deepEqual(collapsed.handleMouse({ type: "click", button: "left" }), { handled: true, render: true });
+  assert.match(collapsed.render(60).join("\n"), /final-sentence/);
+
+  // Pi rebuilds message rows (theme changes, Ctrl+O); the click is remembered.
+  const rebuilt = new InlineMessageComponent(from, long, theme as any, undefined, undefined, !messageExpanded(long.id, false));
+  assert.match(rebuilt.render(60).join("\n"), /final-sentence/);
+
+  rebuilt.handleMouse({ type: "click", button: "left" });
+  assert.equal(messageExpanded(long.id, true), false, "a second click shuts it, even under Ctrl+O");
+  assert.equal(collapsed.handleMouse({ type: "press", button: "left" }), undefined, "only clicks; drags stay text selection");
+});
+
+test("in fullscreen mode a click opens a sent message's row to its full text", async () => {
+  const { default: extension } = await import("../index.ts");
+  const { createExtensionHarness } = await import("./extension-harness.ts");
+  const harness = createExtensionHarness("sender");
+  extension(harness.pi as never);
+  const tool = harness.tools.find((candidate) => candidate.name === "parley")! as any;
+  const plain = { fg: (_: string, text: string) => text, bold: (text: string) => text };
+  const args = { action: "send", to: "reviewer", message: `${"context ".repeat(30)}the-ending` };
+  let invalidations = 0;
+  const context: any = { args, state: {}, expanded: false, invalidate: () => { invalidations += 1; } };
+  const row = () => tool.renderCall(args, plain, context);
+
+  assert.doesNotMatch(row().render(200).join("\n"), /the-ending/);
+  row().handleMouse({ type: "click", button: "left" });
+  assert.equal(invalidations, 1, "the row redraws");
+  assert.match(row().render(200).join("\n"), /the-ending/);
+
+  // The result line belongs to the same row and shuts it again.
+  const result = tool.renderResult({ content: [{ type: "text", text: "Sent" }], details: { messageId: "m-1" } }, { isPartial: false }, plain, context);
+  result.handleMouse({ type: "click", button: "left" });
+  assert.doesNotMatch(row().render(200).join("\n"), /the-ending/);
 });

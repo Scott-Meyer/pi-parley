@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- `/parley` completes as you type: on its own it lists everything it does (`sessions`, `link`, `id`, `alias`), then continues through `link` verbs and the computers in your ssh config or already linked.
+- `/intercom` is the same command as `/parley`, for people coming from pi-intercom.
+- In fullscreen mode, clicking a received message or a sent message's row opens it, and clicking again shuts it. A clicked message stays as you left it when Pi redraws.
+
 ## 1.5.0 - 2026-10-22
 
 ### Added

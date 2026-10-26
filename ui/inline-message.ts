@@ -1,4 +1,5 @@
 import type { Component } from "@mariozechner/pi-tui";
+import type { TuiMouseEvent, TuiMouseEventResult } from "./mouse.ts";
 import { truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@mariozechner/pi-tui";
 import type { Theme } from "@mariozechner/pi-coding-agent";
 import type { SessionInfo, Message } from "../types.ts";
@@ -12,6 +13,14 @@ export interface InlineMessageReferences {
   present?(text: string): string;
   /** Typed naming for a session identity, as the compaction notice needs it. */
   sessionName?(id: string, name?: string): string;
+}
+
+/** Messages someone clicked open or shut, so a rebuilt row keeps that state. */
+const clickedOpen = new Map<string, boolean>();
+
+/** Whether a message row is open: what a click last said, else the global expand setting. */
+export function messageExpanded(messageId: string, expandedByDefault: boolean): boolean {
+  return clickedOpen.get(messageId) ?? expandedByDefault;
 }
 
 export class InlineMessageComponent implements Component {
@@ -44,6 +53,14 @@ export class InlineMessageComponent implements Component {
   }
 
   invalidate(): void {}
+
+  /** In fullscreen mode, a click opens or shuts this message. */
+  handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
+    if (event.type !== "click" || event.button !== "left") return undefined;
+    this.collapsed = !this.collapsed;
+    clickedOpen.set(this.message.id, !this.collapsed);
+    return { handled: true, render: true };
+  }
 
   render(width: number): string[] {
     const lines: string[] = [];
@@ -87,7 +104,7 @@ export class InlineMessageComponent implements Component {
       if (this.message.provenance?.type === "session_person") meta.push("Written by the person there");
       if (this.message.replyTo && !this.message.expectsReply) meta.push(`Reply to ${replyToLabel}`);
       if (this.message.peerCompaction) meta.push("Sender compacted since prior direct contact");
-      meta.push("Ctrl+O to expand");
+      meta.push("Click or Ctrl+O to expand");
 
       lines.push(frameLine(this.theme.fg("dim", ` ${meta.join(" · ")}`)));
       lines.push(this.theme.fg("muted", `╰${borderChar.repeat(bodyWidth)}╯`));

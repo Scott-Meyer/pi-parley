@@ -45,6 +45,7 @@ export function createExtensionHarness(sessionName: string | (() => string) = "c
   const events = new EventEmitter();
   const lifecycleHandlers = new Map<string, Array<(event: unknown, ctx: unknown) => unknown>>();
   const commands = new Map<string, (args: string, ctx: unknown) => unknown>();
+  const commandDefinitions = new Map<string, { description?: string; getArgumentCompletions?: (prefix: string) => unknown }>();
   const shortcuts = new Map<string, (ctx: unknown) => unknown>();
   const tools: CapturedTool[] = [];
   let currentSessionName = typeof sessionName === "function" ? sessionName() : sessionName;
@@ -82,8 +83,9 @@ export function createExtensionHarness(sessionName: string | (() => string) = "c
     },
     getActiveTools: () => [...activeToolNames],
     setActiveTools: (names: string[]) => { activeToolNames = [...names]; },
-    registerCommand: (name: string, command: { handler: (args: string, ctx: unknown) => unknown }) => {
+    registerCommand: (name: string, command: { handler: (args: string, ctx: unknown) => unknown; getArgumentCompletions?: (prefix: string) => unknown }) => {
       commands.set(name, command.handler);
+      commandDefinitions.set(name, command);
     },
     registerShortcut: (key: string, shortcut: { handler: (ctx: unknown) => unknown }) => {
       shortcuts.set(key, shortcut.handler);
@@ -127,6 +129,7 @@ export function createExtensionHarness(sessionName: string | (() => string) = "c
     ctx,
     tools,
     commands,
+    commandDefinitions,
     shortcuts,
     entries,
     sentMessages,

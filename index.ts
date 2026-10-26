@@ -7,7 +7,8 @@ import { ParleyClient, type SendOptions, type SendResult } from "./broker/client
 import { spawnBrokerIfNeeded } from "./broker/spawn.ts";
 import { SessionListOverlay } from "./ui/session-list.ts";
 import { ComposeOverlay, type ComposeResult } from "./ui/compose.ts";
-import { InlineMessageComponent } from "./ui/inline-message.ts";
+import { InlineMessageComponent, messageExpanded } from "./ui/inline-message.ts";
+import { ClickToExpand } from "./ui/click-to-expand.ts";
 import { getAskTimeoutMs, loadRuntimeConfig, type ParleyConfig } from "./config.ts";
 import { COMPACTION_AWARENESS_FEATURE, EXTENSION_BUS_FEATURE, SESSION_PROFILE_FEATURE } from "./types.ts";
 import type { Attachment, BrokerMessage, Message, MessageControl, MessageReceipt, MessageReceiptStatus, PeerCompactionNotice, SessionInfo, SessionRegistration } from "./types.ts";
@@ -39,6 +40,7 @@ import { sameCwd } from "./cwd.ts";
 import { formatPeerCompactionNotice } from "./compaction-awareness.ts";
 import { formatCancellationResult, formatDeliveryResult } from "./message-results.ts";
 import { SessionLinks } from "./link/session.ts";
+import { linkSuggestions } from "./link/completions.ts";
 import {
   openProjectPane,
   ProjectLaunchError,
@@ -3292,7 +3294,7 @@ function installParleyExtension(
   pi.registerMessageRenderer("parley_message", (message, options, theme) => {
     const details = message.details as { from: SessionInfo; message: Message; replyCommand?: string; bodyText?: string } | undefined;
     if (!details) return undefined;
-    return new InlineMessageComponent(details.from, details.message, theme, details.replyCommand, details.bodyText, !options.expanded, {
+    return new InlineMessageComponent(details.from, details.message, theme, details.replyCommand, details.bodyText, !messageExpanded(details.message.id, options.expanded), {
       session: (from) => references.current.sessionRef(from),
       message: (id) => references.current.messageRef(id),
       present: (text) => references.current.present(text),
@@ -5247,10 +5249,14 @@ Sessions and messages are named the way people would name them: a session by its
       if (attachmentCount > 0) {
         text += " " + theme.fg("dim", `(${attachmentCount} attachment${attachmentCount === 1 ? "" : "s"})`);
       }
-      if (messagePreview) {
+      const open = rowExpanded(context);
+      const fullMessage = typeof args.message === "string" ? args.message.trim() : "";
+      if (open && fullMessage) {
+        text += "\n" + fullMessage.split("\n").map((line) => "  " + theme.fg("text", line)).join("\n");
+      } else if (messagePreview) {
         text += "\n  " + theme.fg("dim", messagePreview);
       }
-      return new Text(text, 0, 0);
+      return clickToExpand(new Text(text, 0, 0), context);
     },
     renderResult(result, { isPartial }, theme, context) {
       const details = result.details as { delivered?: boolean; error?: boolean; messageId?: string; replyMessageId?: string; reason?: string; senderIdentity?: string; outcomeKnown?: boolean; unknownCount?: number } | undefined;
@@ -5269,14 +5275,15 @@ Sessions and messages are named the way people would name them: a session by its
       const uncertain = details?.outcomeKnown === false || (details?.unknownCount ?? 0) > 0;
       let text = uncertain ? theme.fg("warning", "? ") : failed ? theme.fg("error", "✗ ") : theme.fg("success", "✓ ");
       text += theme.fg(uncertain ? "warning" : failed ? "error" : "text", references.current.present(result.content.filter((item) => item.type === "text").map((item) => item.text).join("\n")));
-      if (details?.messageId && !context.expanded) {
+      const open = rowExpanded(context);
+      if (details?.messageId && !open) {
         const messageRef = references.current.messageRef(details.messageId);
         if (!text.includes(messageRef)) text += theme.fg("dim", ` (${messageRef})`);
       }
-      if (details?.reason && context.expanded) {
+      if (details?.reason && open) {
         text += "\n" + theme.fg("dim", `Reason: ${details.reason}`);
       }
-      return new Text(text, 0, 0);
+      return clickToExpand(new Text(text, 0, 0), context);
     },
   }));
 
@@ -5457,18 +5464,29 @@ Sessions and messages are named the way people would name them: a session by its
     }
   }
 
-  pi.registerCommand("parley", {
-    description: "Open session parley overlay to browse active sessions and send messages; /parley link manages links with other computers",
-    handler: async (args, ctx) => {
-      const [first, ...rest] = (args ?? "").trim().split(/\s+/);
-      if (first?.toLowerCase() === "link") {
-        const outcome = await links.command(rest.join(" "));
-        notifyAliasCommand(ctx, outcome.text, outcome.ok ? "info" : "warning");
-        return;
+  // `/parley` is the front door: on its own it opens the sessions overlay, and
+  // completion lists everything else it can do, verb by verb.
+  const parleyCommand = {
+    description: "Browse sessions and send a message; type a space for links to other computers, your contact, and your name",
+    getArgumentCompletions: (prefix: string) => parleyCommandSuggestions(prefix),
+    handler: async (args: string, ctx: ExtensionContext) => {
+      const text = (args ?? "").trim();
+      const [first = "", ...rest] = text.split(/\s+/);
+      switch (first.toLowerCase()) {
+        case "link": {
+          const outcome = await links.command(rest.join(" "));
+          notifyAliasCommand(ctx, outcome.text, outcome.ok ? "info" : "warning");
+          return;
+        }
+        case "id": return insertParleyId(ctx, rest.join(" "));
+        case "alias": return setParleyAlias(rest.join(" "), ctx);
+        default: return openParleyOverlay(ctx);
       }
-      return openParleyOverlay(ctx);
     },
-  });
+  };
+  pi.registerCommand("parley", parleyCommand);
+  // People coming from pi-intercom reach for /intercom.
+  pi.registerCommand("intercom", { ...parleyCommand, description: `Parley: ${parleyCommand.description}` });
 
   pi.registerCommand("parley-id", {
     description: "Insert this session's parley contact into the editor (--id for the stable canonical target)",
@@ -5494,6 +5512,47 @@ Sessions and messages are named the way people would name them: a session by its
   // is installed. A failed factory therefore cannot expose a channel owned by
   // a registration that the host will discard.
   pi.events.emit(PARLEY_EXTENSION_REGISTRY_READY_EVENT, { version: 1 });
+}
+
+const PARLEY_COMMAND_VERBS = [
+  { value: "sessions", label: "sessions", description: "Browse sessions and send a message (same as /parley alone)" },
+  { value: "link ", label: "link", description: "Link this computer with others over SSH" },
+  { value: "id", label: "id", description: "Insert this session's contact into the editor (--id for the canonical target)" },
+  { value: "alias ", label: "alias", description: "Set or show this session's name (alias menu to choose)" },
+] as const;
+
+function parleyCommandSuggestions(prefix: string): { value: string; label: string; description?: string }[] | null {
+  const match = /^(\S*)(\s+([\s\S]*))?$/.exec(prefix);
+  const verb = (match?.[1] ?? "").toLowerCase();
+  if (match?.[2] === undefined) {
+    const items = PARLEY_COMMAND_VERBS.filter((item) => item.label.startsWith(verb));
+    return items.length > 0 ? items.map((item) => ({ ...item })) : null;
+  }
+  if (verb === "link") {
+    const items = linkSuggestions(match[3] ?? "").map((item) => ({ ...item, value: `link ${item.value}` }));
+    return items.length > 0 ? items : null;
+  }
+  if (verb === "alias" && "menu".startsWith((match[3] ?? "").trim())) {
+    return [{ value: "alias menu", label: "menu", description: "Choose a name from a menu" }];
+  }
+  return null;
+}
+
+/** A parley tool row is open when Ctrl+O opened every row, or a click opened this one. */
+function rowExpanded(context: { expanded?: boolean; state?: unknown } | undefined): boolean {
+  const clicked = (context?.state as { clickedOpen?: boolean } | undefined)?.clickedOpen;
+  return clicked ?? Boolean(context?.expanded);
+}
+
+/** In fullscreen mode, a click on a parley tool row opens or shuts it, call and result together. */
+function clickToExpand(child: Text, context: { expanded?: boolean; state?: unknown; invalidate?: () => void } | undefined) {
+  if (!context) return child;
+  return new ClickToExpand(child, () => {
+    const state = (context.state ?? {}) as { clickedOpen?: boolean };
+    state.clickedOpen = !rowExpanded(context);
+    context.state = state;
+    context.invalidate?.();
+  });
 }
 
 export default registerParleyExtension;
