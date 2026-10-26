@@ -891,11 +891,15 @@ function installParleyExtension(
   if (config.enabled && config.herdrNames) registerHerdrNames(pi, { sessionRenamesArrive: sessionInfoChangesReachExtensions() });
 
   // Cross-computer links: told to the person, never added to the model's context.
-  // Linking is on by default, except where an application links this session
-  // itself (FlightDeck tabs) and for subagents, which share their parent's computer.
+  // Linking is on by default for a person's interactive sessions. Not where an
+  // application links the session itself (FlightDeck tabs), not for subagents,
+  // which share their parent's computer, and not for headless runs, scripts or
+  // test runners, which shouldn't go looking for a machine's ssh connections.
+  let linkSessionInteractive = false;
   const links = new SessionLinks(
     (message) => { if (runtimeContext) notifyIfLive(runtimeContext, message, "info"); },
     () => (process.env.PI_PARLEY_LINK_BY_DEFAULT?.trim() ? process.env.PI_PARLEY_LINK_BY_DEFAULT.trim() !== "0" : config.linkByDefault)
+      && linkSessionInteractive && !process.env.NODE_TEST_CONTEXT
       && !process.env.FLIGHTDECK_TAB_ID?.trim() && !process.env.FLIGHTDECK_PANE_ID?.trim()
       && !process.env[SUBAGENT_CHILD_AGENT_ENV]?.trim() && process.env.PI_SUBAGENT_CHILD !== "1",
   );
@@ -3043,6 +3047,7 @@ function installParleyExtension(
       return;
     }
     startSessionRuntime(ctx);
+    try { linkSessionInteractive = ctx.hasUI === true; } catch { linkSessionInteractive = false; }
     links.start();
   });
   

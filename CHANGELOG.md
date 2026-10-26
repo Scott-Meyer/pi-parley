@@ -9,7 +9,7 @@
 
 ### Changed
 
-- Linking computers is on by default: a session links the computers this one has ssh connections to and tells the person when one is linked. FlightDeck tabs (FlightDeck links those) and subagents don't; `/parley link off` turns it off for this computer and `"linkByDefault": false` in `config.json` turns the default off. An unreadable config falls back to off.
+- Linking computers is on by default in interactive sessions (not headless runs, scripts or test runners): a session links the computers this one has ssh connections to and tells the person when one is linked. FlightDeck tabs (FlightDeck links those) and subagents don't; `/parley link off` turns it off for this computer and `"linkByDefault": false` in `config.json` turns the default off. An unreadable config falls back to off.
 - In a herdr pane, the session is named `<workspace>:<tab>` (or the pane's label) and follows herdr's renames; renaming the session renames the tab when its pane is the tab's only one, otherwise just the pane's label. Resumed sessions keep their name; subagents rename nothing. `"herdrNames": false` turns it off. Checked against herdr 0.9.5.
 - With discovery on, the machines saved in herdr (`herdr machine list`) are linked too.
 - In fullscreen mode, clicking a received message or a sent message's row opens it, and clicking again shuts it. A clicked message stays as you left it when Pi redraws.

@@ -207,6 +207,9 @@ test("with nothing set up, a session links the computer this one already has an 
   const { default: extension } = await import("./index.ts");
   const { laptopAgent, boxAgent, cleanup } = computers();
   process.env.PI_PARLEY_LINK_BY_DEFAULT = "1";
+  // A person's interactive session, not a test runner's.
+  const testContext = process.env.NODE_TEST_CONTEXT;
+  delete process.env.NODE_TEST_CONTEXT;
   // Someone's terminal: `ssh box`, still connected. (A process that ps shows as ssh.)
   const terminal = spawn(process.execPath, ["-e", "setTimeout(()=>{},120000)", "box"], { argv0: "ssh", stdio: "ignore" });
   const notes: string[] = [];
@@ -220,7 +223,7 @@ test("with nothing set up, a session links the computer this one already has an 
   const brokers: ChildProcess[] = [];
   try {
     brokers.push(await startBroker(laptopAgent), await startBroker(boxAgent));
-    // The box's session starts first, so its own keeper (also on by default) has nothing to find.
+    // The box's session is headless, so it doesn't go looking on its own.
     for (const [harness, agentDir] of [[there, boxAgent], [here, laptopAgent]] as const) {
       await withAgentDir(agentDir, async () => {
         extension(harness.pi as never);
@@ -238,6 +241,7 @@ test("with nothing set up, a session links the computer this one already has an 
   } finally {
     terminal.kill();
     delete process.env.PI_PARLEY_LINK_BY_DEFAULT;
+    if (testContext !== undefined) process.env.NODE_TEST_CONTEXT = testContext;
     for (const harness of [here, there]) await harness.emitLifecycle("session_shutdown").catch(() => {});
     await stopBrokers(brokers);
     await cleanup();

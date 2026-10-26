@@ -172,7 +172,7 @@ Results preserve separate observations: **launch request accepted or command sta
 
 ## Other computers
 
-Parley links this computer with the others you work on over SSH, so their sessions show up here and yours show up there. It uses your own `ssh`: nothing is installed or opened on the network, and a computer needs only Pi with Parley. It's on by default, except in FlightDeck tabs (FlightDeck links those itself) and subagents; `/parley link off` turns it off for this computer, and `"linkByDefault": false` in `config.json` turns the default off.
+Parley links this computer with the others you work on over SSH, so their sessions show up here and yours show up there. It uses your own `ssh`: nothing is installed or opened on the network, and a computer needs only Pi with Parley. It's on by default for interactive sessions, except in FlightDeck tabs (FlightDeck links those itself) and subagents; headless runs, scripts and test runners don't go looking unless asked. `/parley link off` turns it off for this computer, and `"linkByDefault": false` in `config.json` turns the default off.
 
 ```
 /parley link on                 # link computers this one already has ssh connections to (the default)
@@ -232,7 +232,7 @@ Create `~/.pi/agent/parley/config.json`:
 | `confirmSend` | false | Show a confirmation dialog before ordinary sends from an interactive session with UI; caller-supplied `replyTo` skips it |
 | `inboundTrigger` | `"always"` | Auto-trigger policy for unsolicited broker messages: `"always"`, `"replies"`, or `"never"`. Requested asynchronous answers, withdrawal notices, and local in-process subagent relay events have explicit delivery paths. |
 | `enabled` | true | Enable/disable parley entirely |
-| `linkByDefault` | true | Link computers this one has ssh connections to, unless `/parley link off` was used or the session is in a FlightDeck tab or a subagent. `PI_PARLEY_LINK_BY_DEFAULT=0` overrides it for one process tree |
+| `linkByDefault` | true | Interactive sessions link computers this one has ssh connections to, unless `/parley link off` was used or the session is in a FlightDeck tab or a subagent. `PI_PARLEY_LINK_BY_DEFAULT=0` overrides it for one process tree |
 | `herdrNames` | true | In a herdr pane, keep the session's name and herdr's names in step |
 | `replyHint` | true | Include a reply affordance for incoming asks in the rendered message |
 | `status` | — | Optional custom status suffix shown after the automatic lifecycle status, for example `thinking · researching` |
