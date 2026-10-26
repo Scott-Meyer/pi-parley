@@ -5,7 +5,16 @@
     "url": "git+https://github.com/Scott-Meyer/pi-parley.git"
   },
   "version": "1.6.0",
+  "description": "Conversations between Pi coding-agent sessions: named peers, asks and replies, honest delivery receipts, and sessions on your other computers over SSH.",
+  "author": "Scott Meyer (https://github.com/Scott-Meyer)",
+  "contributors": [
+    "Nico Bailon (https://github.com/nicobailon)"
+  ],
   "license": "MIT",
+  "homepage": "https://github.com/Scott-Meyer/pi-parley#readme",
+  "bugs": {
+    "url": "https://github.com/Scott-Meyer/pi-parley/issues"
+  },
   "type": "module",
   "main": "index.ts",
   "exports": {
@@ -79,7 +88,14 @@
     "typecheck": "tsc --noEmit --module nodenext --moduleResolution nodenext --target es2022 --strict --skipLibCheck --allowImportingTsExtensions --types node federation.ts extension.ts index.ts pi-compat.ts compaction-awareness.ts session-profile.ts broker/federation-types.ts broker/federation-protocol.ts broker/federation-roster.ts broker/federation-send.ts broker/federation-conversation.ts broker/attachment.ts broker/federation-origin.ts broker/peer-link.ts broker/broker.ts broker/collaboration-state.ts link/client.ts link/completions.ts link/discover.ts link/keeper.ts link/paths.ts link/protocol.ts link/session.ts link/ssh.ts herdr/names.ts herdr/socket.ts ui/*.ts"
   },
   "keywords": [
-    "pi-package"
+    "pi-package",
+    "pi-extension",
+    "pi-coding-agent",
+    "oh-my-pi",
+    "ai-agents",
+    "multi-agent",
+    "coding-agent",
+    "agent-communication"
   ],
   "pi": {
     "extensions": [

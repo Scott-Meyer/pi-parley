@@ -1,0 +1,11 @@
+name: Idea or request
+description: Something Parley could do, or do better.
+labels: [enhancement]
+body:
+  - type: textarea
+    id: idea
+    attributes:
+      label: What would you like to be able to do?
+      description: Start from what you're trying to accomplish; we'll work out the shape together.
+    validations:
+      required: true

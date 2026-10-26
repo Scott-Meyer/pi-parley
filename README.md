@@ -553,3 +553,15 @@ For an update that changes broker code:
 3. Reconnect clients to start the broker from the updated installation. Check its new health instance ID/PID and startup package/source snapshot, then verify the roster and real messaging. The snapshot describes startup files, not dependency binaries or concurrently edited module contents. Federation controllers must reconnect their links.
 
 There is no automatic version-based broker replacement. A client must not restart or downgrade a shared broker merely because its own installation differs.
+
+## Contributing
+
+Bug reports and ideas are welcome in [issues](https://github.com/Scott-Meyer/pi-parley/issues); [CONTRIBUTING.md](CONTRIBUTING.md) covers running the tests and what a change needs. Security problems go through [private vulnerability reporting](SECURITY.md) instead.
+
+## Credits
+
+Parley began in March 2026 as a fork of [pi-intercom](https://github.com/nicobailon/pi-intercom) by [Nico Bailon](https://github.com/nicobailon). It has since grown into its own project: a broker built around conversations and delivery receipts, human-readable references, federation and linking computers over SSH. Nico's original copyright stays in [LICENSE](LICENSE), and `/intercom` still opens Parley for anyone coming from pi-intercom. Thanks, Nico.
+
+## License
+
+MIT. See [LICENSE](LICENSE).

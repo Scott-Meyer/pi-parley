@@ -1,0 +1,23 @@
+name: Something isn't working
+description: Parley did something unexpected, or didn't do something it should.
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened, and what you expected
+      description: Tool results, receipts or `/parley link` output help a lot. Please remove anything private.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: How to make it happen
+  - type: input
+    id: versions
+    attributes:
+      label: Versions
+      description: Parley (`npm ls pi-parley` or the release), Pi or OMP, and the operating system.
+      placeholder: "pi-parley 1.6.0, Pi 1.2.0, macOS 26"
+    validations:
+      required: true
