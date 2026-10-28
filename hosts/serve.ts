@@ -78,6 +78,7 @@ export async function serveHost(host: Host): Promise<void> {
     const hookSession = typeof payload.session_id === "string" ? payload.session_id : undefined;
     if (hookSession) {
       wakeTarget = hookSession;
+      control.claim(hookSession);
       if (!sessionId) { sessionId = hookSession; learnedSessionId?.(hookSession); }
     }
     if (event === "UserPromptSubmit") session?.setBusy(true);
@@ -87,7 +88,8 @@ export async function serveHost(host: Host): Promise<void> {
     if (output && event === "Stop") session?.setBusy(true);
     return output ? { output } : {};
   };
-  const stopControl = serveControl(hostPid, onHook);
+  const control = serveControl(hostPid, cwd, onHook);
+  if (sessionId) control.claim(sessionId);
 
   let ready!: (session: HostedSession) => void;
   const sessionReady = new Promise<HostedSession>((resolve) => { ready = resolve; });
@@ -105,18 +107,21 @@ export async function serveHost(host: Host): Promise<void> {
 
   if (!sessionId) {
     // SessionStart may have come before we listened; otherwise wait briefly for
-    // it. A host without hooks still gets a session.
-    sessionId = takeEarlySessionId(hostPid) ?? await Promise.race([
+    // it. A host without hooks still gets a session. (Health checks such as
+    // `claude mcp list` start the server without a session and stop within
+    // this wait, so they never appear as sessions.)
+    sessionId = takeEarlySessionId(hostPid, cwd) ?? await Promise.race([
       sessionIdKnown,
       new Promise<string>((resolve) => {
         const started = Date.now();
         const poll = setInterval(() => {
-          const early = takeEarlySessionId(hostPid);
+          const early = takeEarlySessionId(hostPid, cwd);
           if (early || Date.now() - started > 4_000) { clearInterval(poll); resolve(early ?? `${host.id}-${randomUUID()}`); }
         }, 100);
       }),
     ]);
   }
+  if (!sessionId.startsWith(`${host.id}-`)) control.claim(sessionId);
   const agentDir = getAgentDirPath(process.env);
   session = await startHostedSession({
     sessionId,
@@ -131,7 +136,7 @@ export async function serveHost(host: Host): Promise<void> {
   async function shutdown() {
     if (stopping) return;
     stopping = true;
-    stopControl();
+    control.close();
     await session?.stop().catch(() => {});
     process.exit(0);
   }

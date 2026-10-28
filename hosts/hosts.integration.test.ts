@@ -170,3 +170,44 @@ test("in Codex, the server learns its thread from the first hook, wakes it with 
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+test("two Codex sessions under one shared app server each get their own hooks and wakes", { timeout: 60_000, skip: process.platform === "win32" }, async () => {
+  const root = mkdtempSync("/tmp/pl-hosts-");
+  const agentDir = path.join(root, "agent");
+  const queued = path.join(root, "queued.jsonl");
+  const fakeCodex = path.join(root, "codex");
+  mkdirSync(agentDir, { recursive: true });
+  // One line per queued message: "<thread> <message on one line>".
+  writeFileSync(fakeCodex, `#!/bin/sh\nif [ "$1" = queue ] && [ "$2" = --help ]; then exit 0; fi\nprintf '%s %s\\n' "$3" "$(printf '%s' "$5" | tr '\\n' ' ')" >> ${queued}\n`);
+  chmodSync(fakeCodex, 0o755);
+  const env = cleanEnv({ PI_CODING_AGENT_DIR: agentDir, PI_PARLEY_CODEX_BIN: fakeCodex });
+  // Like Codex's daemon: one parent (this process) for both sessions' servers and hooks.
+  const projects = ["alpha", "beta"].map((name) => { const dir = path.join(root, name); mkdirSync(dir); return dir; });
+  const servers = projects.map((cwd) => spawn(process.execPath, [bin, "mcp", "codex"], { cwd, stdio: ["pipe", "pipe", "pipe"], env }));
+  const clients = servers.map(mcpClient);
+  const hook = (event: string, cwd: string, threadId: string) => new Promise<string>((resolve) => {
+    const child = spawn(process.execPath, [bin, "hook", event], { cwd, stdio: ["pipe", "pipe", "inherit"], env });
+    let out = ""; child.stdout!.on("data", (d) => { out += d; });
+    child.on("close", () => resolve(out.trim()));
+    child.stdin!.end(JSON.stringify({ hook_event_name: event, session_id: threadId, cwd }));
+  });
+  let other: Awaited<ReturnType<typeof colleague>> | undefined;
+  try {
+    await Promise.all(clients.map((client) => client.start()));
+    await new Promise((r) => setTimeout(r, 500));
+    await hook("SessionStart", projects[1]!, "thread-beta");
+    await hook("SessionStart", projects[0]!, "thread-alpha");
+    await Promise.all(clients.map((client) => client.request("tools/list")));
+    other = await colleague(agentDir, root);
+    await eventually(async () => /alpha:codex[\s\S]*beta:codex|beta:codex[\s\S]*alpha:codex/.test((await other!.session.call({ action: "list" })).text), "both sessions appear");
+    await other.session.call({ action: "send", to: "alpha:codex", message: "for alpha" });
+    await other.session.call({ action: "send", to: "beta:codex", message: "for beta" });
+    await eventually(() => { try { const text = readFileSync(queued, "utf8"); return /^thread-alpha .*for alpha/m.test(text) && /^thread-beta .*for beta/m.test(text) && !/^thread-alpha .*for beta/m.test(text); } catch { return false; } },
+      "each message is queued into its own session's thread");
+  } finally {
+    await other?.session.stop();
+    delete process.env.PI_CODING_AGENT_DIR;
+    for (const server of servers) server.kill("SIGTERM");
+    rmSync(root, { recursive: true, force: true });
+  }
+});
