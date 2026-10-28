@@ -141,7 +141,8 @@ test("in Codex, the server learns its thread from the first hook, wakes it with 
     const child = spawn(process.execPath, [bin, "hook", event], { stdio: ["pipe", "pipe", "inherit"], env });
     let out = ""; child.stdout!.on("data", (d) => { out += d; });
     child.on("close", () => resolve(out.trim()));
-    child.stdin!.end(JSON.stringify({ hook_event_name: event, session_id: "thread-42", ...payload }));
+    // Codex hooks say which folder the session works in.
+    child.stdin!.end(JSON.stringify({ hook_event_name: event, session_id: "thread-42", cwd: root, ...payload }));
   });
   let other: Awaited<ReturnType<typeof colleague>> | undefined;
   try {
@@ -152,6 +153,7 @@ test("in Codex, the server learns its thread from the first hook, wakes it with 
     assert.equal(listed.result.tools[0]?.name, "parley", stderr);
 
     other = await colleague(agentDir, root);
+    await eventually(async () => new RegExp(`• ${path.basename(root)}:codex `).test((await other!.session.call({ action: "list" })).text), "the Codex session joins");
     await other.session.call({ action: "send", to: `${path.basename(root)}:codex`, message: "deploy finished" });
     await eventually(() => { try { return /queue --thread thread-42 --message [\s\S]*deploy finished/.test(readFileSync(queued, "utf8")); } catch { return false; } },
       "the message is queued into the thread the hook named");
