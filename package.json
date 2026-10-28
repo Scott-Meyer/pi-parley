@@ -51,6 +51,7 @@
     "scripts/smoke-host-compat.mjs",
     "scripts/smoke-federation-package.mjs",
     "broker/broker.ts",
+    "broker/bundle.ts",
     "broker/build.ts",
     "broker/client.ts",
     "broker/collaboration-state.ts",
