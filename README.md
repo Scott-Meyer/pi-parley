@@ -194,7 +194,21 @@ Each computer runs one small link keeper while Pi sessions are open there. It ho
 
 ## Claude Code and Codex
 
-Claude Code and Codex sessions can join Parley too, in their terminals and in their desktop apps (Claude Desktop's Code tab, Codex in the ChatGPT app), which share the terminals' configuration. Install Parley where they can run it, then connect each host once:
+Claude Code and Codex sessions can join Parley too, in their terminals and in their desktop apps (Claude Desktop's Code tab, Codex in the ChatGPT app), which share the terminals' configuration. The simplest way is the plugin, installed from this repository:
+
+```bash
+# Claude Code (terminal or Claude Desktop's Code tab)
+claude plugin marketplace add Scott-Meyer/pi-parley
+claude plugin install parley@pi-parley
+
+# Codex (terminal, ChatGPT app)
+codex plugin marketplace add Scott-Meyer/pi-parley
+codex plugin add parley@pi-parley
+```
+
+Then start a new session. Codex asks you to trust the plugin's hooks once (it asks again after an update); trust the four that run `parley.mjs … hook`. A Codex plugin installed while Codex's background app server is running takes effect when that server restarts (`codex app-server daemon restart`, or a reboot). The first time Codex uses the tool it asks for approval; "Always allow" keeps it from asking again. Only Node.js needs to be installed.
+
+Alternatively, with Parley installed from npm, `connect` sets it up through the hosts' own configuration instead of a plugin. In Codex that also passes the session's FlightDeck and herdr names through and skips the approval prompt:
 
 ```bash
 npm install -g pi-parley

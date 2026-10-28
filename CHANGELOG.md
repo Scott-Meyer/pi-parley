@@ -4,6 +4,7 @@
 
 ### Added
 
+- A Claude Code and Codex plugin, installed from this repository (`claude plugin marketplace add Scott-Meyer/pi-parley`, `codex plugin marketplace add Scott-Meyer/pi-parley`). It's self-contained, so only Node.js is needed. Codex's pre-started spare servers never appear as sessions, and the server a session's tool calls come through takes it over.
 - Claude Code and Codex sessions join Parley, in their terminals and desktop apps (Claude Desktop's Code tab, Codex in the ChatGPT app). `parley connect claude|codex` sets it up and `parley disconnect` removes it. Each runs the same Parley extension a Pi session does, inside an MCP server, so the `parley` tool, references, receipts, naming and links are the same. Idle Claude sessions are woken through Claude's own cross-session inbox and idle Codex sessions with `codex queue`; hooks hand over anything else at turn boundaries.
 
 ## 1.6.0 - 2026-10-26

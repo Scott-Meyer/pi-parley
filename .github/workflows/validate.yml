@@ -47,6 +47,9 @@ jobs:
       - run: npm ci
       - run: npm run build:federation
       - run: git diff --exit-code -- dist
+      - run: npm run build:plugin
+      - name: Require the committed plugin to match its source
+        run: git diff --exit-code -- plugins .claude-plugin .agents && test -z "$(git status --porcelain=v1 --untracked-files=all -- plugins .claude-plugin .agents)"
       - name: Require every generated facade artifact to be tracked
         run: test -z "$(git status --porcelain=v1 --untracked-files=all -- dist)"
       - run: npm test -- --test-timeout=120000

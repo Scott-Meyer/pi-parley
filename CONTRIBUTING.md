@@ -23,3 +23,5 @@ To try a change in Pi, install the checkout (`pi install /path/to/pi-parley`) an
 ## Releases
 
 Maintainers release by tagging `vX.Y.Z` on `main`; GitHub Actions validates and publishes to npm.
+
+`npm version <x.y.z> --no-git-tag-version` also rebuilds the federation facade (`dist/`) and the Claude Code and Codex plugin (`plugins/parley`, installed from this repository as-is), so they're committed with the release. CI fails if either doesn't match its source. After a change to anything the plugin bundles, run `npm run build:plugin` and commit the result.
