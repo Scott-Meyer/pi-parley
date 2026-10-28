@@ -1,4 +1,6 @@
 node_modules/
+# The plugin build ships its native file-lock addon; plugins are installed from git as-is.
+!plugins/parley/node_modules/
 *.log
 .DS_Store
 

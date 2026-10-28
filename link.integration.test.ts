@@ -38,7 +38,8 @@ async function withAgentDir<T>(dir: string, work: () => Promise<T>, scope?: stri
   process.env.PI_CODING_AGENT_DIR = dir;
   if (scope) process.env.PI_PARLEY_SCOPE_ID = scope;
   try { return await work(); } finally {
-    process.env.PI_CODING_AGENT_DIR = previous;
+    // Assigning undefined would store the string "undefined".
+    if (previous === undefined) delete process.env.PI_CODING_AGENT_DIR; else process.env.PI_CODING_AGENT_DIR = previous;
     delete process.env.PI_PARLEY_SCOPE_ID;
   }
 }
