@@ -303,8 +303,10 @@ function flightDeckLinksHere(): boolean {
   const home = process.env.PI_PARLEY_FLIGHTDECK_HOME?.trim() || join(homedir(), ".flightdeck");
   for (const name of ["parley-link.json", "parley-link-debug.json"]) {
     try {
-      const status = JSON.parse(readFileSync(join(home, name), "utf8")) as { updatedAt?: string };
+      const status = JSON.parse(readFileSync(join(home, name), "utf8")) as { updatedAt?: string; pid?: number };
       if (status.updatedAt && Date.now() - Date.parse(status.updatedAt) < 60_000) return true;
+      // A link process that's alive owns its links even when its heartbeat lags.
+      if (typeof status.pid === "number" && status.pid > 1) { try { process.kill(status.pid, 0); return true; } catch { /* gone */ } }
     } catch { /* not running here */ }
   }
   return false;
