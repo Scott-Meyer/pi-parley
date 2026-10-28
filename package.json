@@ -63,6 +63,7 @@
     "broker/federation-conversation.ts",
     "broker/attachment.ts",
     "broker/federation-origin.ts",
+    "broker/merged-scopes.ts",
     "broker/peer-link.ts",
     "broker/paths.ts",
     "broker/protocol.ts",

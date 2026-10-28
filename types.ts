@@ -93,6 +93,9 @@ export interface SessionInfo {
    *  name, which is mutable — so a peer can live-resolve the current window
    *  from it via tmux when it needs to introspect or drive that pane. */
   tmuxPane?: string;
+  /** Where the session lives, as a person would say it: "Pi in FlightDeck",
+   *  "Claude Desktop", "Codex in the ChatGPT app". Display metadata only. */
+  app?: string;
   /** ACL fork: true when this session is a pi-subagents delegated child.
    *  Set from local PI_SUBAGENT_* env vars at registration; the broker never
    *  infers this from name/shape heuristics. */

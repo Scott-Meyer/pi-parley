@@ -25,6 +25,8 @@ export interface Host {
   hookOutput(event: string, text: string): Record<string, unknown> | undefined;
   /** MCP capabilities beyond tools. */
   readonly capabilities?: Record<string, unknown>;
+  /** Where the session lives, as a person would say it. */
+  app(env: NodeJS.ProcessEnv): string;
 }
 
 /** A Pi session that started this host passes its own Parley identity down;
@@ -72,6 +74,7 @@ export async function serveHost(host: Host): Promise<void> {
   const session = await createHostedSession({
     cwd,
     defaultName: defaultName(host, cwd, process.env),
+    app: host.app(process.env),
     stateFile: (id) => join(getParleyDirPath(agentDir), "hosts", host.id, `${id.replace(/[^A-Za-z0-9_.-]/g, "_")}.jsonl`),
     deliver,
   });

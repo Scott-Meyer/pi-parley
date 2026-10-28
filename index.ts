@@ -64,11 +64,30 @@ export interface ParleyExtensionOptions {
     candidate: string | undefined,
     context: ParleyPresenceNameContext,
   ) => string;
+  /** Where this session lives, as a person would say it ("Claude Desktop",
+   * "Codex in the ChatGPT app"). Shown on list rows; worked out from the
+   * environment when not given ("Pi in FlightDeck", "Oh My Pi in herdr"). */
+  readonly app?: string;
 }
 
 interface ParleyExtensionConfiguration {
   resolvePresenceName?: ParleyExtensionOptions["resolvePresenceName"];
   presenceNameResolutionStarted: boolean;
+  app?: string;
+}
+
+/** Where a session runs: the terminal-like place it lives in, if any. */
+export function sessionPlace(env: NodeJS.ProcessEnv = process.env): string | undefined {
+  if (env.FLIGHTDECK_TAB_ID?.trim() || env.FLIGHTDECK_PANE_ID?.trim()) return "FlightDeck";
+  if (env.HERDR_ENV === "1") return "herdr";
+  if (env.TMUX_PANE?.trim()) return "tmux";
+  return undefined;
+}
+
+function detectApp(env: NodeJS.ProcessEnv = process.env): string {
+  const agent = process.versions.bun ? "Oh My Pi" : "Pi";
+  const place = sessionPlace(env);
+  return place ? `${agent} in ${place}` : agent;
 }
 
 const PARLEY_TOOL_NAME = "parley";
@@ -741,7 +760,8 @@ function formatSessionListRow(session: SessionInfo, currentCwd: string, isSelf: 
   const suffix = tags.length ? ` [${tags.join(", ")}]` : "";
   const pane = session.tmuxPane ? ` · tmux ${session.tmuxPane}` : "";
   const description = session.description ? ` — ${session.description}` : "";
-  return `• ${reference}${description} — ${session.cwd} (${session.model}${pane})${suffix}`;
+  const about = [session.model && session.model !== "unknown" ? session.model : undefined, session.app].filter(Boolean).join(" · ") || session.model;
+  return `• ${reference}${description} — ${session.cwd} (${about}${pane})${suffix}`;
 }
 function previewText(value: unknown, maxLength = 72): string | undefined {
   if (typeof value !== "string") {
@@ -788,8 +808,12 @@ function normalizeParleyExtensionOptions(options: ParleyExtensionOptions | undef
   if (options.resolvePresenceName !== undefined && typeof options.resolvePresenceName !== "function") {
     throw new TypeError("resolvePresenceName must be a function");
   }
+  if (options.app !== undefined && (typeof options.app !== "string" || !options.app.trim() || options.app.length > 64)) {
+    throw new TypeError("app must be a short label (1-64 characters)");
+  }
   return Object.freeze({
     ...(options.resolvePresenceName ? { resolvePresenceName: options.resolvePresenceName } : {}),
+    ...(options.app ? { app: options.app.trim() } : {}),
   });
 }
 
@@ -797,6 +821,7 @@ function configureParleyExtension(
   configuration: ParleyExtensionConfiguration,
   options: ParleyExtensionOptions,
 ): void {
+  if (options.app) configuration.app = options.app;
   const resolver = options.resolvePresenceName;
   if (!resolver || resolver === configuration.resolvePresenceName) return;
   if (configuration.resolvePresenceName) {
@@ -1597,6 +1622,7 @@ function installParleyExtension(
       lastActivity: Date.now(),
       status: currentStatus(),
       ...(tmuxPane ? { tmuxPane } : {}),
+      app: configuration.app ?? detectApp(),
       ...(localExtensions.size > 0
         ? {
             extensions: currentExtensionCapabilities(),

@@ -21,6 +21,8 @@ export const FEDERATION_CONVERSATION_FEATURE = "peer-conversation-text-v1";
 export const FEDERATION_SCOPED_LINKS_FEATURE = "peer-links-by-scope-v1";
 /** Optional: peer_ping / peer_pong, so a broker can ask whether a link still has someone behind it. */
 export const FEDERATION_PING_FEATURE = "peer-ping-v1";
+/** Optional: roster entries may say where a session lives (SessionInfo.app). */
+export const FEDERATION_APP_FEATURE = "peer-roster-app-v1";
 export const FEDERATION_CAPABILITY_MIN_LENGTH = 32;
 export const FEDERATION_CAPABILITY_MAX_LENGTH = 128;
 export const FEDERATION_CORRELATION_ID_MAX_LENGTH = 128;
@@ -43,4 +45,5 @@ export const FEDERATION_SUPPORTED_FEATURES = [
     FEDERATION_CONVERSATION_FEATURE,
     FEDERATION_SCOPED_LINKS_FEATURE,
     FEDERATION_PING_FEATURE,
+    FEDERATION_APP_FEATURE,
 ];

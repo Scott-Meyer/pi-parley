@@ -158,8 +158,9 @@ test("in Codex, the server learns its thread from the first hook, wakes it with 
     // When Codex can't queue, the next turn boundary hands the message over.
     writeFileSync(path.join(root, "refuse"), "");
     await other.session.call({ action: "send", to: `${path.basename(root)}:codex`, message: "tests failing on main" });
-    await new Promise((r) => setTimeout(r, 500));
-    const stop = JSON.parse(await hook("Stop", {}));
+    let handed = "";
+    await eventually(async () => (handed = await hook("Stop", {})) !== "", "the next turn boundary hands the message over");
+    const stop = JSON.parse(handed);
     assert.equal(stop.decision, "block");
     assert.match(stop.reason, /tests failing on main/);
     assert.equal(await hook("Stop", {}), "", "handed over once");

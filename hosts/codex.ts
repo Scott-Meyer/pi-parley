@@ -6,6 +6,7 @@
 // turn when it's idle; without it, messages wait for the next turn boundary.
 import { execFile, execFileSync } from "node:child_process";
 import { promisify } from "node:util";
+import { sessionPlace } from "../index.ts";
 import type { Host } from "./serve.ts";
 
 const run = promisify(execFile);
@@ -28,6 +29,8 @@ export function codexHost(env: NodeJS.ProcessEnv = process.env, version = "0"): 
         return false;
       }
     },
+    app: (current) => startedByChatGptApp() ? "Codex in the ChatGPT app"
+      : sessionPlace(current) ? `Codex in ${sessionPlace(current)}` : "Codex",
     hookOutput: (event, text) => event === "Stop"
       ? { decision: "block", reason: text }
       : { hookSpecificOutput: { hookEventName: event, additionalContext: text } },
@@ -42,5 +45,14 @@ function resumedThread(): string | undefined {
     return /\bresume\s+([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\b/.exec(args)?.[1];
   } catch {
     return undefined;
+  }
+}
+
+/** The ChatGPT app runs Codex sessions through its own bundled app server. */
+function startedByChatGptApp(): boolean {
+  try {
+    return /ChatGPT\.app\//.test(execFileSync("ps", ["-o", "command=", "-p", String(process.ppid)], { encoding: "utf8", timeout: 2_000 }));
+  } catch {
+    return false;
   }
 }

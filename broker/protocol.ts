@@ -180,6 +180,11 @@ export function isMessage(value: unknown): value is Message {
     || (Array.isArray(value.content.attachments) && value.content.attachments.every(isAttachment));
 }
 
+/** A short, printable label for where a session lives. */
+export function isAppLabel(value: unknown): value is string {
+  return typeof value === "string" && value.trim().length > 0 && value.length <= 64 && !/[\p{Cc}\p{Cf}]/u.test(value);
+}
+
 export function isSessionInfo(value: unknown): value is SessionInfo {
   if (!isRecord(value)) {
     return false;
@@ -226,6 +231,9 @@ export function isSessionInfo(value: unknown): value is SessionInfo {
   }
 
   if (value.tmuxPane !== undefined && typeof value.tmuxPane !== "string") {
+    return false;
+  }
+  if (value.app !== undefined && !isAppLabel(value.app)) {
     return false;
   }
 
@@ -334,6 +342,9 @@ export function isSessionRegistration(value: unknown): value is SessionRegistrat
     return false;
   }
   if (value.tmuxPane !== undefined && typeof value.tmuxPane !== "string") {
+    return false;
+  }
+  if (value.app !== undefined && !isAppLabel(value.app)) {
     return false;
   }
   if (value.isSubagent !== undefined && typeof value.isSubagent !== "boolean") {

@@ -16,6 +16,7 @@ import {
   type BrokerConnectTarget,
 } from "./paths.ts";
 import { getAskTimeoutMs } from "../config.ts";
+import { effectiveScope, loadMergedScopes } from "./merged-scopes.ts";
 import { sameCwd } from "../cwd.ts";
 import { COMPACTION_AWARENESS_FEATURE, CONVERSATION_CONTRACT_FEATURE, FEDERATED_CONVERSATION_FEATURE, EXACT_SEND_FEATURE, EXACT_IDENTITY_SEND_FEATURE, EXTENSION_BUS_FEATURE, PERSON_PROVENANCE_FEATURE, SESSION_PROFILE_FEATURE } from "../types.ts";
 import type { CancellationState, DeliveryDetails, DeliveryState, SessionInfo, Message, BrokerMessage, ExtensionCapability, MessageControl, PeerCompactionNotice } from "../types.ts";
@@ -76,6 +77,7 @@ import {
 } from "./federation-types.ts";
 
 const PARLEY_DIR = getParleyDirPath();
+const MERGED_SCOPES = loadMergedScopes(PARLEY_DIR);
 const LISTEN_TARGET = getBrokerListenTarget();
 const PID_PATH = join(PARLEY_DIR, "broker.pid");
 const PORT_PATH = getBrokerPortFilePath(PARLEY_DIR);
@@ -129,7 +131,10 @@ interface ConnectedSession {
   socket: net.Socket;
   info: SessionInfo;
   key: string;
+  /** The roster it's in here (a merged scope joins the ordinary one). */
   scopeId?: string;
+  /** The scope it named; federation exports it under that, as before merging. */
+  namedScopeId?: string;
   lastPresenceBroadcastAt: number;
   ownerOrder: number;
   extensions?: ExtensionCapability[];
@@ -406,6 +411,7 @@ class ParleyBroker {
     });
     this.federationRoster = new FederationRosterState({
       originEpoch: this.federationOriginEpoch,
+      rosterScope: (scopeId) => effectiveScope(scopeId ?? undefined, MERGED_SCOPES) ?? null,
       listLocalSessions: () => this.listLocallyOwnedFederationSessions(),
       send: (link, frame) => this.writeBrokerFrame(link.socket, frame),
       onImportedChange: (change) => this.handleImportedRosterChange(change),
@@ -1007,7 +1013,7 @@ class ParleyBroker {
       ownership: "local" as const,
       exportEligible: !session.info.isSubagent,
       conversationCapable: this.supportsRemoteConversations(session),
-      localScopeId: session.scopeId ?? null,
+      localScopeId: session.namedScopeId ?? null,
       info: session.info,
     }));
   }
@@ -1049,7 +1055,8 @@ class ParleyBroker {
   private summarizeScopes(): BrokerScopeSummary[] {
     const counts = new Map<string | null, number>();
     for (const session of this.sessions.values()) {
-      counts.set(session.scopeId ?? null, (counts.get(session.scopeId ?? null) ?? 0) + 1);
+      // By the scope sessions named, so a controller can see who still names an old one.
+      counts.set(session.namedScopeId ?? null, (counts.get(session.namedScopeId ?? null) ?? 0) + 1);
     }
     return [...counts.entries()]
       .map(([scopeId, liveSessions]) => ({ scopeId, liveSessions }))
@@ -1075,7 +1082,7 @@ class ParleyBroker {
   }
 
   private conversationEndpoints(link: FederationPeerLink, local: ConnectedSession, imported: ImportedFederatedSession): { local: ConversationEndpoint; remote: ConversationEndpoint } | undefined {
-    const tuple = this.federationRoster.findExportedTuple(link.linkId, local.scopeId ?? null, local.info.id);
+    const tuple = this.federationRoster.findExportedTuple(link.linkId, local.namedScopeId ?? null, local.info.id);
     if (!tuple || !this.supportsRemoteConversations(local) || !local.info.endpointEpoch || !imported.info.endpointEpoch) return;
     return {
       local: { originId: link.localOrigin.id, originEpoch: this.federationOriginEpoch,
@@ -1122,7 +1129,8 @@ class ParleyBroker {
       fail("E_SEND_INVALID", "Target scope alias was never exported on this link");
       return;
     }
-    const target = this.sessions.get(scopedSessionKey(binding.localScopeId ?? undefined, frame.targetStableSessionId));
+    // A binding for a merged scope reaches sessions in the ordinary roster here.
+    const target = this.sessions.get(scopedSessionKey(effectiveScope(binding.localScopeId ?? undefined, MERGED_SCOPES), frame.targetStableSessionId));
     if (!target || !sameScope(target.scopeId, sender.localScopeId ?? undefined) || !canSeeSession(sender.info, target.info)) {
       fail("E_SEND_TARGET_NOT_FOUND", "Target session is not visible to the sending session on this broker");
       return;
@@ -1342,7 +1350,7 @@ class ParleyBroker {
     }
     // The sender must be exported on that link; restricted subagents and other
     // hidden sessions are not visible to remote peers.
-    const senderTuple = this.federationRoster.findExportedTuple(link.linkId, fromSession.scopeId ?? null, fromSession.info.id);
+    const senderTuple = this.federationRoster.findExportedTuple(link.linkId, fromSession.namedScopeId ?? null, fromSession.info.id);
     if (!senderTuple) {
       reject("This session is not visible to remote peers", "E_SEND_UNAUTHORIZED");
       return;
@@ -1587,7 +1595,8 @@ class ParleyBroker {
           }
           id = clientMessage.sessionId;
         }
-        const scopeId = normalizeScopeId(clientMessage.scopeId);
+        const namedScopeId = normalizeScopeId(clientMessage.scopeId);
+        const scopeId = effectiveScope(namedScopeId, MERGED_SCOPES);
         const key = scopedSessionKey(scopeId, id);
         const session = clientMessage.session;
         const extensions = session.extensions;
@@ -1641,6 +1650,7 @@ class ParleyBroker {
           lastActivity: session.lastActivity,
           ...(session.status !== undefined ? { status: session.status } : {}),
           ...(session.tmuxPane !== undefined ? { tmuxPane: session.tmuxPane } : {}),
+          ...(session.app !== undefined ? { app: session.app } : {}),
           ...(session.isSubagent !== undefined ? { isSubagent: session.isSubagent } : {}),
           ...(session.supervisorSessionId !== undefined ? { supervisorSessionId: session.supervisorSessionId } : {}),
           ...(session.supervisorName !== undefined ? { supervisorName: session.supervisorName } : {}),
@@ -1653,6 +1663,7 @@ class ParleyBroker {
           info,
           key,
           ...(scopeId ? { scopeId } : {}),
+          ...(namedScopeId ? { namedScopeId } : {}),
           lastPresenceBroadcastAt: Date.now(),
           ownerOrder: previous?.ownerOrder ?? this.nextOwnerOrder++,
           extensions,

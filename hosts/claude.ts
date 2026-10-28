@@ -7,6 +7,7 @@
 // a message the inbox didn't take is handed over at the next turn boundary.
 import { randomBytes } from "node:crypto";
 import net from "node:net";
+import { sessionPlace } from "../index.ts";
 import type { Host } from "./serve.ts";
 
 export function claudeHost(env: NodeJS.ProcessEnv = process.env, version = "0"): Host {
@@ -16,6 +17,9 @@ export function claudeHost(env: NodeJS.ProcessEnv = process.env, version = "0"):
     initialSessionId: () => env.CLAUDE_CODE_SESSION_ID?.trim() || undefined,
     cwd: () => env.CLAUDE_PROJECT_DIR?.trim() || process.cwd(),
     wake: (text) => sendToInbox(env, text),
+    // Claude Desktop's Code tab says so in CLAUDE_CODE_ENTRYPOINT ("claude-desktop…").
+    app: (current) => /desktop/i.test(current.CLAUDE_CODE_ENTRYPOINT ?? "") ? "Claude Desktop"
+      : sessionPlace(current) ? `Claude Code in ${sessionPlace(current)}` : "Claude Code",
     hookOutput: (event, text) => event === "Stop"
       ? { decision: "block", reason: text }
       : { hookSpecificOutput: { hookEventName: event, additionalContext: text } },

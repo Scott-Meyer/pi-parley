@@ -6,7 +6,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { spawn, type ChildProcess } from "node:child_process";
 import { once } from "node:events";
-import { copyFileSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { copyFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import net from "node:net";
 import path from "node:path";
 import { getTsxCliPath } from "./broker/spawn.ts";
@@ -243,6 +243,60 @@ test("with nothing set up, a session links the computer this one already has an 
     delete process.env.PI_PARLEY_LINK_BY_DEFAULT;
     if (testContext !== undefined) process.env.NODE_TEST_CONTEXT = testContext;
     for (const harness of [here, there]) await harness.emitLifecycle("session_shutdown").catch(() => {});
+    await stopBrokers(brokers);
+    await cleanup();
+  }
+});
+
+test("during the switch away from an app scope, a merged computer shows everyone once, and a not-yet-merged one keeps what it had", { timeout: 90_000, skip: process.platform === "win32" }, async () => {
+  const { default: extension } = await import("./index.ts");
+  const { laptopAgent, boxAgent, cleanup } = computers();
+  // The box's broker is still on the old rules: its "flightdeck" scope stays separate.
+  mkdirSync(path.join(boxAgent, "parley"), { recursive: true });
+  writeFileSync(path.join(boxAgent, "parley", "config.json"), JSON.stringify({ mergedScopes: [] }));
+  const sessions = [
+    { name: "old-tab", agentDir: laptopAgent, scope: "flightdeck" },
+    { name: "new-tab", agentDir: laptopAgent },
+    { name: "box-old-tab", agentDir: boxAgent, scope: "flightdeck" },
+    { name: "box-new-tab", agentDir: boxAgent },
+  ].map((spec) => ({ ...spec, harness: createExtensionHarness(spec.name, { sessionId: `${spec.name}-session` }) }));
+  const listed = async (name: string) => {
+    const session = sessions.find((candidate) => candidate.name === name)!;
+    return text(await withAgentDir(session.agentDir, () => session.harness.tools.find((tool) => tool.name === "parley")!
+      .execute("merge-call", { action: "list" }, new AbortController().signal, undefined, session.harness.ctx), session.scope));
+  };
+  const brokers: ChildProcess[] = [];
+  let link: Awaited<ReturnType<typeof attachBrokers>> | undefined;
+  try {
+    brokers.push(await startBroker(laptopAgent), await startBroker(boxAgent));
+    for (const session of sessions) {
+      await withAgentDir(session.agentDir, async () => {
+        extension(session.harness.pi as never);
+        await session.harness.emitLifecycle("session_start");
+      }, session.scope);
+      await listed(session.name); // connects now, in its own agent directory and scope
+    }
+    const both = [
+      { localScopeId: "flightdeck", localScopeAlias: "flightdeck", remoteScopeAlias: "flightdeck" },
+      { localScopeId: null, localScopeAlias: "default", remoteScopeAlias: "default" },
+    ];
+    const [laptop, box] = await Promise.all([laptopAgent, boxAgent].map((agentDir) => inspectBroker(createLocalBrokerAccess({ agentDir }))));
+    link = await attachBrokers({ initiator: { broker: laptop!, originLabel: "laptop", scopeBindings: both }, acceptor: { broker: box!, originLabel: "box", scopeBindings: both } });
+
+    if (process.env.PI_PARLEY_TEST_DEBUG) { await new Promise((r) => setTimeout(r, 3000)); for (const s2 of sessions) console.log(`--- ${s2.name}\n${await listed(s2.name)}`); }
+    // On the merged laptop, old and new tabs are one roster, and each box session appears once.
+    for (const name of ["old-tab", "new-tab"]) {
+      await eventually(async () => /box:box-old-tab/.test(await listed(name)) && /box:box-new-tab/.test(await listed(name)), `${name} sees both box sessions`);
+      const rows = await listed(name);
+      assert.match(rows, new RegExp(`• ${name === "old-tab" ? "new-tab" : "old-tab"} `), `${name} sees the other laptop tab`);
+      assert.equal(rows.match(/box:box-old-tab/g)?.length, 1, "once, not once per binding");
+    }
+    // The box hasn't merged yet: its old tab still sees the laptop's old tab, as before.
+    await eventually(async () => /laptop:old-tab/.test(await listed("box-old-tab")), "the box's old tab keeps its old peers");
+    assert.match(await listed("box-new-tab"), /laptop:new-tab/);
+  } finally {
+    await link?.close();
+    for (const { harness } of sessions) await harness.emitLifecycle("session_shutdown").catch(() => {});
     await stopBrokers(brokers);
     await cleanup();
   }

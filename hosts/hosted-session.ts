@@ -26,6 +26,8 @@ export interface HostedSessionOptions {
   readonly model?: string;
   /** Used when the session has no name yet. */
   readonly defaultName: string;
+  /** Where the session lives, for list rows ("Claude Desktop"). */
+  readonly app?: string;
   /** Where a session's history lives (JSON lines), by its host session id. */
   readonly stateFile: (sessionId: string) => string;
   readonly deliver: (delivery: Delivery) => void;
@@ -139,7 +141,7 @@ export async function createHostedSession(options: HostedSessionOptions): Promis
   }
 
   const { registerParleyExtension } = await import("../index.ts");
-  registerParleyExtension(pi as never);
+  registerParleyExtension(pi as never, options.app ? { app: options.app } : {});
   const tool = tools.find((candidate) => candidate.name === "parley");
   if (!tool) throw new Error("Parley registered no parley tool");
 

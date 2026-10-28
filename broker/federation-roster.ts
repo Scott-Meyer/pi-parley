@@ -4,6 +4,7 @@ import {
   FEDERATION_PROTOCOL_NAME,
   FEDERATION_PROTOCOL_VERSION,
   FEDERATION_ROSTER_FEATURE,
+  FEDERATION_APP_FEATURE,
   FEDERATION_CONVERSATION_FEATURE,
   FEDERATION_SEND_FEATURE,
   FEDERATION_EXACT_SEND_FEATURE,
@@ -45,6 +46,7 @@ export interface FederationRosterSessionProjection {
   contextTokens?: number;
   contextWindow?: number;
   tmuxPane?: string;
+  app?: string;
 }
 
 export interface FederationRosterEntry {
@@ -133,6 +135,8 @@ export interface FederationRosterOptions {
   send: (link: FederationPeerLink, frame: FederationRosterFrame) => void;
   onImportedChange?: (change: ImportedRosterChange) => void;
   onLinkError?: (link: FederationPeerLink, error: FederationRosterError) => void;
+  /** The local roster sessions imported for a binding's scope join (a merged scope joins the ordinary one). */
+  rosterScope?: (localScopeId: string | null) => string | null;
 }
 
 interface LinkRosterState {
@@ -192,8 +196,9 @@ function isSequence(value: unknown): value is number {
 function isProjection(value: unknown): value is FederationRosterSessionProjection {
   if (!isRecord(value) || !hasOnlyKeys(value, ["cwd", "model", "pid", "startedAt", "lastActivity"], [
     "conversation", "endpointEpoch", "name", "description", "runtimeFallbackAlias", "status",
-    "contextPct", "contextTokens", "contextWindow", "tmuxPane",
+    "contextPct", "contextTokens", "contextWindow", "tmuxPane", "app",
   ])) return false;
+  if (value.app !== undefined && (typeof value.app !== "string" || value.app.trim().length === 0 || value.app.length > 64 || /[\p{Cc}\p{Cf}]/u.test(value.app))) return false;
   if (!isSafeBoundedText(value.cwd, 4096, true) || !isSafeBoundedText(value.model, 256, true)) return false;
   if (!Number.isSafeInteger(value.pid) || (value.pid as number) < 0) return false;
   if (!Number.isSafeInteger(value.startedAt) || (value.startedAt as number) < 0) return false;
@@ -222,6 +227,7 @@ function isProjection(value: unknown): value is FederationRosterSessionProjectio
     ...(value.status !== undefined ? { status: value.status } : {}),
     // Context usage from older peers is accepted on the wire but never kept.
     ...(value.tmuxPane !== undefined ? { tmuxPane: value.tmuxPane } : {}),
+    ...(value.app !== undefined ? { app: value.app as string } : {}),
   };
   return isSessionInfo(candidate) && serializedSize(value) <= MAX_SESSION_PROJECTION_BYTES;
 }
@@ -305,7 +311,7 @@ export function isFederationRosterFrame(value: unknown): value is FederationRost
   return isPeerRosterSnapshot(value) || isPeerRosterDelta(value) || isPeerRosterResyncRequest(value);
 }
 
-function projectionFromSession(info: SessionInfo, conversation?: boolean): FederationRosterSessionProjection {
+function projectionFromSession(info: SessionInfo, conversation?: boolean, shareApp = false): FederationRosterSessionProjection {
   const safeInteger = (value: number): number => Number.isSafeInteger(value) && value >= 0 ? value : 0;
   const cwd = isSafeBoundedText(info.cwd, 4096, true) ? info.cwd : "";
   const model = isSafeBoundedText(info.model, 256, true) ? info.model : "unknown";
@@ -323,6 +329,8 @@ function projectionFromSession(info: SessionInfo, conversation?: boolean): Feder
     ...(info.status !== undefined && isSafeBoundedText(info.status, 256, true) ? { status: info.status } : {}),
     // Context usage is never shared with peer brokers.
     ...(info.tmuxPane !== undefined && isSafeBoundedText(info.tmuxPane, 128) ? { tmuxPane: info.tmuxPane } : {}),
+    // Only peers that negotiated it accept the field; older ones would reject the entry.
+    ...(shareApp && info.app !== undefined ? { app: info.app } : {}),
   };
   if (isProjection(projection)) return projection;
   // Preserve identity/presentation fields when possible, but shrink legacy
@@ -586,7 +594,7 @@ export class FederationRosterState {
         const entry: FederationRosterEntry = {
           scopeAlias: binding.localScopeAlias,
           stableSessionId: local.info.id,
-          session: projectionFromSession(local.info, link.features.includes(FEDERATION_CONVERSATION_FEATURE) ? local.conversationCapable === true : undefined),
+          session: projectionFromSession(local.info, link.features.includes(FEDERATION_CONVERSATION_FEATURE) ? local.conversationCapable === true : undefined, link.features.includes(FEDERATION_APP_FEATURE)),
         };
         if (!isRosterEntry(entry)) throw new FederationRosterError("Local session cannot be represented in federation");
         result.set(rosterKey(entry.scopeAlias, entry.stableSessionId), entry);
@@ -699,6 +707,9 @@ export class FederationRosterState {
       const qualifiedId = this.qualifiedIdForRemote(link, entry.scopeAlias, entry.stableSessionId);
       if (result.has(qualifiedId)) throw new FederationRosterError("Duplicate qualified session identity in roster frame");
       const { conversation: endpointConversation, ...projection } = entry.session;
+      if (projection.app !== undefined && !link.features.includes(FEDERATION_APP_FEATURE)) {
+        throw new FederationRosterError("Session app labels were not negotiated on this link");
+      }
       if (endpointConversation !== undefined && !link.features.includes(FEDERATION_CONVERSATION_FEATURE)) {
         throw new FederationRosterError("Endpoint conversation capability was not negotiated on this link");
       }
@@ -716,7 +727,7 @@ export class FederationRosterState {
           remoteStableSessionId: entry.stableSessionId,
         },
       };
-      result.set(qualifiedId, { linkId: link.linkId, originEpoch, localScopeId: binding.localScopeId, info });
+      result.set(qualifiedId, { linkId: link.linkId, originEpoch, localScopeId: this.options.rosterScope ? this.options.rosterScope(binding.localScopeId) : binding.localScopeId, info });
     }
     return result;
   }
