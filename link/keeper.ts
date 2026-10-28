@@ -9,7 +9,8 @@
 //   node --import tsx link/keeper.ts
 import { appendFileSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import net from "node:net";
-import { hostname } from "node:os";
+import { homedir, hostname } from "node:os";
+import { join } from "node:path";
 import type { ChildProcess } from "node:child_process";
 import {
   attachBrokers, createLocalBrokerAccess, inspectBroker,
@@ -295,8 +296,26 @@ async function keepLinked(pair: Pair) {
   }
 }
 
+/** FlightDeck links its computers itself (parley-link, heartbeat every few
+ * seconds). Two owners for the same pairs would refuse each other, so the
+ * keeper stands aside while FlightDeck's link is running here. */
+function flightDeckLinksHere(): boolean {
+  const home = process.env.PI_PARLEY_FLIGHTDECK_HOME?.trim() || join(homedir(), ".flightdeck");
+  for (const name of ["parley-link.json", "parley-link-debug.json"]) {
+    try {
+      const status = JSON.parse(readFileSync(join(home, name), "utf8")) as { updatedAt?: string };
+      if (status.updatedAt && Date.now() - Date.parse(status.updatedAt) < 60_000) return true;
+    } catch { /* not running here */ }
+  }
+  return false;
+}
+
 function sides(): Side[] {
   const list: Side[] = [local];
+  if (flightDeckLinksHere()) {
+    for (const host of hosts.values()) if (host.ssh && host.state !== "same-computer") setState(host, "waiting", "FlightDeck links this computer; Parley's own links stand aside");
+    return list;
+  }
   for (const host of hosts.values()) {
     if (!host.ssh || host.state === "same-computer" || host.state === "no-parley" || host.checking) continue;
     if (!remembered(host)) continue;

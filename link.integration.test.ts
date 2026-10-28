@@ -301,3 +301,33 @@ test("during the switch away from an app scope, a merged computer shows everyone
     await cleanup();
   }
 });
+
+test("on a computer where FlightDeck links its sessions, Parley's own link keeper stands aside", { timeout: 60_000, skip: process.platform === "win32" }, async () => {
+  const { default: extension } = await import("./index.ts");
+  const { root, laptopAgent, boxAgent, cleanup } = computers();
+  const flightdeck = path.join(root, "flightdeck");
+  mkdirSync(flightdeck, { recursive: true });
+  writeFileSync(path.join(flightdeck, "parley-link.json"), JSON.stringify({ version: 1, updatedAt: new Date().toISOString(), links: [] }));
+  process.env.PI_PARLEY_FLIGHTDECK_HOME = flightdeck;
+  const here = createExtensionHarness("writer", { sessionId: "writer-session" });
+  const there = createExtensionHarness("reviewer", { sessionId: "reviewer-session" });
+  const call = (harness: typeof here, agentDir: string, params: Record<string, unknown>) => withAgentDir(agentDir, () =>
+    harness.tools.find((tool) => tool.name === "parley")!.execute("link-call", params, new AbortController().signal, undefined, harness.ctx));
+  const brokers: ChildProcess[] = [];
+  try {
+    brokers.push(await startBroker(laptopAgent), await startBroker(boxAgent));
+    for (const [harness, agentDir] of [[here, laptopAgent], [there, boxAgent]] as const) {
+      await withAgentDir(agentDir, async () => { extension(harness.pi as never); await harness.emitLifecycle("session_start"); });
+      await call(harness, agentDir, { action: "list" });
+    }
+    const added = text(await call(here, laptopAgent, { action: "link", host: "box" }));
+    assert.match(added, /FlightDeck links this computer/, added);
+    await new Promise((r) => setTimeout(r, 2_000));
+    assert.doesNotMatch(text(await call(here, laptopAgent, { action: "list" })), /box:/, "no second owner for FlightDeck's pairs");
+  } finally {
+    delete process.env.PI_PARLEY_FLIGHTDECK_HOME;
+    for (const harness of [here, there]) await harness.emitLifecycle("session_shutdown").catch(() => {});
+    await stopBrokers(brokers);
+    await cleanup();
+  }
+});
