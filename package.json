@@ -4,7 +4,7 @@
     "type": "git",
     "url": "git+https://github.com/Scott-Meyer/pi-parley.git"
   },
-  "version": "1.6.0",
+  "version": "1.7.0",
   "description": "Conversations between Pi coding-agent sessions: named peers, asks and replies, honest delivery receipts, and sessions on your other computers over SSH.",
   "author": "Scott Meyer (https://github.com/Scott-Meyer)",
   "contributors": [
