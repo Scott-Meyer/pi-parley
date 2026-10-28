@@ -4,7 +4,7 @@
 // server learns the thread id from the first hook. Newer Codex can queue a
 // message into an existing thread from outside (`codex queue`), which starts a
 // turn when it's idle; without it, messages wait for the next turn boundary.
-import { execFile } from "node:child_process";
+import { execFile, execFileSync } from "node:child_process";
 import { promisify } from "node:util";
 import type { Host } from "./serve.ts";
 
@@ -16,7 +16,7 @@ export function codexHost(env: NodeJS.ProcessEnv = process.env, version = "0"): 
   return {
     id: "codex",
     version,
-    initialSessionId: () => env.CODEX_THREAD_ID?.trim() || env.CODEX_SESSION_ID?.trim() || undefined,
+    initialSessionId: () => env.CODEX_THREAD_ID?.trim() || env.CODEX_SESSION_ID?.trim() || resumedThread(),
     cwd: () => process.cwd(),
     async wake(text, { sessionId }) {
       canQueue ??= run(codex, ["queue", "--help"], { timeout: 10_000 }).then(() => true, () => false);
@@ -32,4 +32,15 @@ export function codexHost(env: NodeJS.ProcessEnv = process.env, version = "0"): 
       ? { decision: "block", reason: text }
       : { hookSpecificOutput: { hookEventName: event, additionalContext: text } },
   };
+}
+
+/** `codex resume <id>` continues a thread: the same Parley session as before.
+ * A new session's thread isn't known until its first hook. */
+function resumedThread(): string | undefined {
+  try {
+    const args = execFileSync("ps", ["-o", "args=", "-p", String(process.ppid)], { encoding: "utf8", timeout: 2_000 });
+    return /\bresume\s+([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\b/.exec(args)?.[1];
+  } catch {
+    return undefined;
+  }
 }
