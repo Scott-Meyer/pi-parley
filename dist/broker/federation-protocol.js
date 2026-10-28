@@ -153,14 +153,18 @@ export function isBrokerStartPeerRequest(value) {
     return isSuppliedPeerRequest(value, "broker_start_peer");
 }
 export function isBrokerListScopesRequest(value) {
-    if (!isRecord(value) || !hasOnlyKeys(value, ["type", "requestId"], ["stateId"]))
+    if (!isRecord(value) || !hasOnlyKeys(value, ["type", "requestId"], ["stateId", "include"]))
         return false;
     return value.type === "broker_list_scopes"
         && isFederationCorrelationId(value.requestId)
-        && (value.stateId === undefined || isFederationCorrelationId(value.stateId));
+        && (value.stateId === undefined || isFederationCorrelationId(value.stateId))
+        && (value.include === undefined || (Array.isArray(value.include) && value.include.length <= 4 && value.include.every((item) => item === "mergedScopes")));
 }
 export function isBrokerListScopesResult(value) {
-    if (!isRecord(value) || !hasOnlyKeys(value, ["type", "requestId", "ok"], ["localOrigin", "scopes", "code", "error"]))
+    if (!isRecord(value) || !hasOnlyKeys(value, ["type", "requestId", "ok"], ["localOrigin", "scopes", "code", "error", "mergedScopes"]))
+        return false;
+    if (value.mergedScopes !== undefined && (!Array.isArray(value.mergedScopes) || value.mergedScopes.length > 64
+        || !value.mergedScopes.every((scope) => typeof scope === "string" && scope.length > 0 && scope.length <= 256 && !/[\p{Cc}\p{Cf}]/u.test(scope))))
         return false;
     if (value.type !== "broker_list_scopes_result"
         || !isFederationCorrelationId(value.requestId))

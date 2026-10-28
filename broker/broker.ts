@@ -841,6 +841,7 @@ class ParleyBroker {
             ok: true,
             localOrigin: this.getCanonicalFederationOrigin(),
             scopes: this.summarizeScopes(),
+            ...(msg.include?.includes("mergedScopes") ? { mergedScopes: [...MERGED_SCOPES].sort() } : {}),
           };
         } catch (error) {
           result = {
@@ -1013,7 +1014,7 @@ class ParleyBroker {
       ownership: "local" as const,
       exportEligible: !session.info.isSubagent,
       conversationCapable: this.supportsRemoteConversations(session),
-      localScopeId: session.namedScopeId ?? null,
+      localScopeId: session.scopeId ?? null,
       info: session.info,
     }));
   }
@@ -1082,7 +1083,7 @@ class ParleyBroker {
   }
 
   private conversationEndpoints(link: FederationPeerLink, local: ConnectedSession, imported: ImportedFederatedSession): { local: ConversationEndpoint; remote: ConversationEndpoint } | undefined {
-    const tuple = this.federationRoster.findExportedTuple(link.linkId, local.namedScopeId ?? null, local.info.id);
+    const tuple = this.federationRoster.findExportedTuple(link.linkId, imported.info.federation.remoteScopeAlias, local.info.id);
     if (!tuple || !this.supportsRemoteConversations(local) || !local.info.endpointEpoch || !imported.info.endpointEpoch) return;
     return {
       local: { originId: link.localOrigin.id, originEpoch: this.federationOriginEpoch,
@@ -1350,7 +1351,7 @@ class ParleyBroker {
     }
     // The sender must be exported on that link; restricted subagents and other
     // hidden sessions are not visible to remote peers.
-    const senderTuple = this.federationRoster.findExportedTuple(link.linkId, fromSession.namedScopeId ?? null, fromSession.info.id);
+    const senderTuple = this.federationRoster.findExportedTuple(link.linkId, imported.info.federation.remoteScopeAlias, fromSession.info.id);
     if (!senderTuple) {
       reject("This session is not visible to remote peers", "E_SEND_UNAUTHORIZED");
       return;

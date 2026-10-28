@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { bundledBuild } from "./bundle.ts";
 
 export interface BrokerBuildIdentity {
   /** Package version captured from this installation at broker startup. */
@@ -20,6 +21,8 @@ export interface BrokerBuildIdentity {
 export function getBrokerBuildIdentity(
   extensionDir: string = join(dirname(fileURLToPath(import.meta.url)), ".."),
 ): BrokerBuildIdentity {
+  // The self-contained build carries the identity of the sources it was built from.
+  if (bundledBuild) return bundledBuild;
   const packageRaw = readFileSync(join(extensionDir, "package.json"));
   const manifest: unknown = JSON.parse(packageRaw.toString("utf8"));
   if (!manifest || typeof manifest !== "object" || Array.isArray(manifest)) {

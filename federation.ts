@@ -51,6 +51,11 @@ export interface BrokerInspection {
   /** Inspection-time snapshot. It may change immediately and is not durable
    * scope authorization. */
   readonly scopes: readonly Readonly<BrokerInspectionScope>[];
+  /** Scopes this broker merges into its ordinary roster (sessions naming them
+   * are listed with everyone), or undefined for a broker from before merging,
+   * which keeps every scope separate. Counts in `scopes` are by the scope each
+   * session named. */
+  readonly mergedScopes?: readonly string[];
 }
 
 /** Opaque inspected broker handle retained for naming compatibility. */
@@ -350,16 +355,24 @@ function guardAcquiredStream(stream: Duplex, onFailure: () => void): GuardedStre
   return guarded;
 }
 
+class IncludeUnsupportedError extends Error {
+  constructor() {
+    super("Broker predates the requested inspection facts");
+  }
+}
+
 async function requestBrokerSnapshot(
   stream: Duplex,
   stateId: string | undefined,
   signal: AbortSignal,
+  include: boolean,
 ): Promise<Extract<BrokerListScopesResult, { ok: true }>> {
   const requestId = randomUUID();
   const request = {
     type: "broker_list_scopes",
     requestId,
     ...(stateId !== undefined ? { stateId } : {}),
+    ...(include ? { include: ["mergedScopes"] } : {}),
   };
 
   return await new Promise((resolveSnapshot, rejectSnapshot) => {
@@ -398,6 +411,13 @@ async function requestBrokerSnapshot(
       resolveSnapshot(response);
     };
     const reader = createMessageReader((value) => {
+      if (include && !response && isBrokerListScopesResult(value) && value.requestId === requestId && !value.ok && value.code === "E_INVALID_REQUEST") {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        rejectSnapshot(new IncludeUnsupportedError());
+        return;
+      }
       if (response || !isBrokerListScopesResult(value) || value.requestId !== requestId || !value.ok) {
         fail();
         return;
@@ -452,8 +472,10 @@ async function inspectCandidate(
   openLocal: BrokerHostAccess["openLocal"],
   endpoint: PrivateEndpoint,
   signal: AbortSignal,
+  include = true,
 ): Promise<Extract<BrokerListScopesResult, { ok: true }>> {
   let stream: Duplex | undefined;
+  let retryWithout = false;
   const guardError = () => undefined;
   try {
     try {
@@ -465,16 +487,21 @@ async function inspectCandidate(
     // can be removed in a write callback before Node emits its deferred error.
     stream.on("error", guardError);
     try {
-      return await requestBrokerSnapshot(stream, endpoint.stateId, signal);
+      return await requestBrokerSnapshot(stream, endpoint.stateId, signal, include);
     } catch (error) {
+      if (error instanceof IncludeUnsupportedError) { retryWithout = true; throw error; }
       throw new CandidateInspectionError(error instanceof SilentBrokerStreamError ? "unavailable" : "protocol");
     }
+  } catch (error) {
+    if (!retryWithout) throw error;
   } finally {
     if (stream) {
       await destroyOwnedStream(stream);
       stream.off("error", guardError);
     }
   }
+  // A broker from before inspection facts: ask the plain question on a new stream.
+  return inspectCandidate(openLocal, endpoint, signal, false);
 }
 
 /** Inspect one live Parley broker without exposing its endpoint credential or
@@ -517,6 +544,7 @@ export async function inspectBroker(
         const handle: BrokerHandle = Object.freeze({
           origin: Object.freeze({ ...snapshot.localOrigin }),
           scopes: Object.freeze(snapshot.scopes.map((scope) => Object.freeze({ ...scope }))),
+          ...(snapshot.mergedScopes ? { mergedScopes: Object.freeze([...snapshot.mergedScopes]) } : {}),
         });
         brokerHandles.set(handle, { openLocal, endpoint });
         return handle;

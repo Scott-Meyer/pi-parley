@@ -179,12 +179,18 @@ function guardAcquiredStream(stream, onFailure) {
         fail();
     return guarded;
 }
-async function requestBrokerSnapshot(stream, stateId, signal) {
+class IncludeUnsupportedError extends Error {
+    constructor() {
+        super("Broker predates the requested inspection facts");
+    }
+}
+async function requestBrokerSnapshot(stream, stateId, signal, include) {
     const requestId = randomUUID();
     const request = {
         type: "broker_list_scopes",
         requestId,
         ...(stateId !== undefined ? { stateId } : {}),
+        ...(include ? { include: ["mergedScopes"] } : {}),
     };
     return await new Promise((resolveSnapshot, rejectSnapshot) => {
         let settled = false;
@@ -227,6 +233,14 @@ async function requestBrokerSnapshot(stream, stateId, signal) {
             resolveSnapshot(response);
         };
         const reader = createMessageReader((value) => {
+            if (include && !response && isBrokerListScopesResult(value) && value.requestId === requestId && !value.ok && value.code === "E_INVALID_REQUEST") {
+                if (settled)
+                    return;
+                settled = true;
+                cleanup();
+                rejectSnapshot(new IncludeUnsupportedError());
+                return;
+            }
             if (response || !isBrokerListScopesResult(value) || value.requestId !== requestId || !value.ok) {
                 fail();
                 return;
@@ -287,8 +301,9 @@ class CandidateInspectionError extends Error {
         this.kind = kind;
     }
 }
-async function inspectCandidate(openLocal, endpoint, signal) {
+async function inspectCandidate(openLocal, endpoint, signal, include = true) {
     let stream;
+    let retryWithout = false;
     const guardError = () => undefined;
     try {
         try {
@@ -301,11 +316,19 @@ async function inspectCandidate(openLocal, endpoint, signal) {
         // can be removed in a write callback before Node emits its deferred error.
         stream.on("error", guardError);
         try {
-            return await requestBrokerSnapshot(stream, endpoint.stateId, signal);
+            return await requestBrokerSnapshot(stream, endpoint.stateId, signal, include);
         }
         catch (error) {
+            if (error instanceof IncludeUnsupportedError) {
+                retryWithout = true;
+                throw error;
+            }
             throw new CandidateInspectionError(error instanceof SilentBrokerStreamError ? "unavailable" : "protocol");
         }
+    }
+    catch (error) {
+        if (!retryWithout)
+            throw error;
     }
     finally {
         if (stream) {
@@ -313,6 +336,8 @@ async function inspectCandidate(openLocal, endpoint, signal) {
             stream.off("error", guardError);
         }
     }
+    // A broker from before inspection facts: ask the plain question on a new stream.
+    return inspectCandidate(openLocal, endpoint, signal, false);
 }
 /** Inspect one live Parley broker without exposing its endpoint credential or
  * control protocol. The first successful inspection may mint and persist the
@@ -353,6 +378,7 @@ export async function inspectBroker(host, options = {}) {
                 const handle = Object.freeze({
                     origin: Object.freeze({ ...snapshot.localOrigin }),
                     scopes: Object.freeze(snapshot.scopes.map((scope) => Object.freeze({ ...scope }))),
+                    ...(snapshot.mergedScopes ? { mergedScopes: Object.freeze([...snapshot.mergedScopes]) } : {}),
                 });
                 brokerHandles.set(handle, { openLocal, endpoint });
                 return handle;

@@ -474,15 +474,16 @@ export class FederationRosterState {
     return undefined;
   }
 
-  /** Origin-side sender identity: the tuple a locally owned session is exported under. */
+  /** Origin-side sender identity toward one remote session: the tuple a locally
+   * owned session is exported under on the binding that session arrived on. */
   findExportedTuple(
     linkId: string,
-    localScopeId: string | null,
+    targetRemoteScopeAlias: string,
     stableSessionId: string,
   ): { scopeAlias: string; stableSessionId: string } | undefined {
     const state = this.links.get(linkId);
     if (!state) return undefined;
-    const binding = state.link.scopeBindings.find((candidate) => candidate.localScopeId === localScopeId);
+    const binding = this.bindingForRemoteAlias(state.link.scopeBindings, targetRemoteScopeAlias);
     if (!binding) return undefined;
     const entry = state.exported.get(rosterKey(binding.localScopeAlias, stableSessionId));
     return entry ? { scopeAlias: entry.scopeAlias, stableSessionId: entry.stableSessionId } : undefined;
@@ -587,7 +588,8 @@ export class FederationRosterState {
     for (const local of this.options.listLocalSessions()) {
       if (local.ownership !== "local" || local.exportEligible !== true) continue;
       for (const binding of link.scopeBindings) {
-        if (binding.localScopeId !== local.localScopeId) continue;
+        // A binding for a merged scope carries the roster it joined.
+        if (this.rosterScopeOf(binding.localScopeId) !== local.localScopeId) continue;
         if (!isStableSessionId(local.info.id)) {
           throw new FederationRosterError("Local stable session identity cannot be represented safely in federation");
         }
@@ -727,9 +729,29 @@ export class FederationRosterState {
           remoteStableSessionId: entry.stableSessionId,
         },
       };
-      result.set(qualifiedId, { linkId: link.linkId, originEpoch, localScopeId: this.options.rosterScope ? this.options.rosterScope(binding.localScopeId) : binding.localScopeId, info });
+      result.set(qualifiedId, { linkId: link.linkId, originEpoch, localScopeId: this.rosterScopeOf(binding.localScopeId), info });
+    }
+    // A merged peer exports its roster under each binding that joined it, so the
+    // same remote session can arrive under two aliases into one roster here:
+    // show it once, preferring the alias of a binding that wasn't merged.
+    const merged = (alias: string) => {
+      const binding = this.bindingForRemoteAlias(link.scopeBindings, alias);
+      return binding ? this.rosterScopeOf(binding.localScopeId) !== binding.localScopeId : false;
+    };
+    const kept = new Map<string, string>();
+    for (const [qualifiedId, imported] of result) {
+      const key = `${JSON.stringify(imported.localScopeId)}|${imported.info.federation.remoteStableSessionId}`;
+      const other = kept.get(key);
+      if (!other) { kept.set(key, qualifiedId); continue; }
+      const keepNew = merged(result.get(other)!.info.federation.remoteScopeAlias) && !merged(imported.info.federation.remoteScopeAlias);
+      result.delete(keepNew ? other : qualifiedId);
+      if (keepNew) kept.set(key, qualifiedId);
     }
     return result;
+  }
+
+  private rosterScopeOf(localScopeId: string | null): string | null {
+    return this.options.rosterScope ? this.options.rosterScope(localScopeId) : localScopeId;
   }
 
   private bindingForRemoteAlias(bindings: readonly FederationScopeBinding[], alias: string): FederationScopeBinding | undefined {

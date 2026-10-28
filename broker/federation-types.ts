@@ -218,6 +218,8 @@ export interface BrokerListScopesRequest {
   type: "broker_list_scopes";
   requestId: string;
   stateId?: string;
+  /** Extra facts to report. Older brokers reject the field; ask again without it. */
+  include?: "mergedScopes"[];
 }
 
 export interface BrokerScopeSummary {
@@ -233,6 +235,8 @@ export type BrokerListScopesResult =
       ok: true;
       localOrigin: { id: string };
       scopes: BrokerScopeSummary[];
+      /** Scopes this broker merges into the ordinary roster, when asked for. */
+      mergedScopes?: string[];
     }
   | {
       type: "broker_list_scopes_result";

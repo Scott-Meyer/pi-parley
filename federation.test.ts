@@ -368,3 +368,41 @@ test("a failed acquisition aborts its sibling and joins a late returned stream b
   assert.equal(destructionFinished, true);
   assert.equal(lateStream.closed, true);
 });
+
+test("inspection says which scopes a broker merges, and a broker from before merging is still inspected", async () => {
+  // A current broker answers the extra question.
+  const asked: unknown[] = [];
+  const current = await inspectBroker(access({
+    async open() {
+      return new Duplex({
+        read() {},
+        write(bytes, _encoding, callback) {
+          const request = JSON.parse(Buffer.from(bytes).subarray(4).toString("utf8"));
+          asked.push(request);
+          callback();
+          this.push(encode({ type: "broker_list_scopes_result", requestId: request.requestId, ok: true, localOrigin: { id: "install:550e8400-e29b-41d4-a716-446655440010" }, scopes: [{ scopeId: "flightdeck", liveSessions: 2 }], mergedScopes: ["flightdeck"] }));
+        },
+      });
+    },
+  }));
+  assert.deepEqual(current.mergedScopes, ["flightdeck"]);
+  assert.deepEqual((asked[0] as { include?: string[] }).include, ["mergedScopes"]);
+
+  // An older broker refuses the question it doesn't know; inspection asks plainly and reports nothing merged.
+  const older = await inspectBroker(access({
+    async open() {
+      return new Duplex({
+        read() {},
+        write(bytes, _encoding, callback) {
+          const request = JSON.parse(Buffer.from(bytes).subarray(4).toString("utf8"));
+          callback();
+          this.push(encode(request.include
+            ? { type: "broker_list_scopes_result", requestId: request.requestId, ok: false, code: "E_INVALID_REQUEST", error: "Invalid broker list scopes request" }
+            : { type: "broker_list_scopes_result", requestId: request.requestId, ok: true, localOrigin: { id: "install:550e8400-e29b-41d4-a716-446655440011" }, scopes: [] }));
+        },
+      });
+    },
+  }));
+  assert.equal(older.mergedScopes, undefined);
+  assert.equal(older.origin.id, "install:550e8400-e29b-41d4-a716-446655440011");
+});

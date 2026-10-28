@@ -56,6 +56,8 @@ function computers() {
   // Anything that resolves an agent directory outside withAgentDir lands here,
   // never in the real ~/.pi/agent of whoever runs the tests.
   process.env.PI_CODING_AGENT_DIR = path.join(root, "elsewhere", ".pi", "agent");
+  // Not the FlightDeck that may be linking the machine running the tests.
+  process.env.PI_PARLEY_FLIGHTDECK_HOME = path.join(root, "no-flightdeck");
   process.env.PI_PARLEY_TEST_SSH_HOMES = JSON.stringify({ box: boxHome });
   process.env.PI_PARLEY_LINK_LABEL = "laptop";
   process.env.PI_PARLEY_LINK_IDLE_MS = "500";
@@ -65,6 +67,7 @@ function computers() {
       await eventually(() => keeperGone(laptopAgent), "the keeper stops once no session is connected", 10_000).catch(() => {});
       process.env.PATH = savedPath;
       delete process.env.PI_CODING_AGENT_DIR;
+      delete process.env.PI_PARLEY_FLIGHTDECK_HOME;
       for (const key of ["PI_PARLEY_TEST_SSH_HOMES", "PI_PARLEY_LINK_LABEL", "PI_PARLEY_LINK_IDLE_MS"]) delete process.env[key];
       if (process.env.PI_PARLEY_TEST_KEEP) console.log(`kept ${root}`); else rmSync(root, { recursive: true, force: true });
     },
@@ -248,23 +251,31 @@ test("with nothing set up, a session links the computer this one already has an 
   }
 });
 
-test("during the switch away from an app scope, a merged computer shows everyone once, and a not-yet-merged one keeps what it had", { timeout: 90_000, skip: process.platform === "win32" }, async () => {
+async function switchScenario(boxMerges: boolean, check: (helpers: {
+  listed: (name: string) => Promise<string>;
+  call: (name: string, params: Record<string, unknown>) => Promise<CapturedToolResult>;
+  inbox: (name: string) => string;
+}) => Promise<void>) {
   const { default: extension } = await import("./index.ts");
   const { laptopAgent, boxAgent, cleanup } = computers();
-  // The box's broker is still on the old rules: its "flightdeck" scope stays separate.
-  mkdirSync(path.join(boxAgent, "parley"), { recursive: true });
-  writeFileSync(path.join(boxAgent, "parley", "config.json"), JSON.stringify({ mergedScopes: [] }));
+  if (!boxMerges) {
+    // The box's broker is still on the old rules: its "flightdeck" scope stays separate.
+    mkdirSync(path.join(boxAgent, "parley"), { recursive: true });
+    writeFileSync(path.join(boxAgent, "parley", "config.json"), JSON.stringify({ mergedScopes: [] }));
+  }
   const sessions = [
     { name: "old-tab", agentDir: laptopAgent, scope: "flightdeck" },
     { name: "new-tab", agentDir: laptopAgent },
     { name: "box-old-tab", agentDir: boxAgent, scope: "flightdeck" },
     { name: "box-new-tab", agentDir: boxAgent },
   ].map((spec) => ({ ...spec, harness: createExtensionHarness(spec.name, { sessionId: `${spec.name}-session` }) }));
-  const listed = async (name: string) => {
+  const call = async (name: string, params: Record<string, unknown>) => {
     const session = sessions.find((candidate) => candidate.name === name)!;
-    return text(await withAgentDir(session.agentDir, () => session.harness.tools.find((tool) => tool.name === "parley")!
-      .execute("merge-call", { action: "list" }, new AbortController().signal, undefined, session.harness.ctx), session.scope));
+    return withAgentDir(session.agentDir, () => session.harness.tools.find((tool) => tool.name === "parley")!
+      .execute("merge-call", params, new AbortController().signal, undefined, session.harness.ctx), session.scope);
   };
+  const listed = async (name: string) => text(await call(name, { action: "list" }));
+  const inbox = (name: string) => sessions.find((candidate) => candidate.name === name)!.harness.sentMessages.map((sent) => String(sent.message.content ?? "")).join("\n");
   const brokers: ChildProcess[] = [];
   let link: Awaited<ReturnType<typeof attachBrokers>> | undefined;
   try {
@@ -281,25 +292,69 @@ test("during the switch away from an app scope, a merged computer shows everyone
       { localScopeId: null, localScopeAlias: "default", remoteScopeAlias: "default" },
     ];
     const [laptop, box] = await Promise.all([laptopAgent, boxAgent].map((agentDir) => inspectBroker(createLocalBrokerAccess({ agentDir }))));
+    // Controllers can tell which brokers merge, and who still names the old scope.
+    assert.deepEqual(laptop!.mergedScopes, ["flightdeck"]);
+    assert.deepEqual(box!.mergedScopes, boxMerges ? ["flightdeck"] : []);
+    assert.equal(laptop!.scopes.find((scope) => scope.scopeId === "flightdeck")?.liveSessions, 1);
     link = await attachBrokers({ initiator: { broker: laptop!, originLabel: "laptop", scopeBindings: both }, acceptor: { broker: box!, originLabel: "box", scopeBindings: both } });
-
     if (process.env.PI_PARLEY_TEST_DEBUG) { await new Promise((r) => setTimeout(r, 3000)); for (const s2 of sessions) console.log(`--- ${s2.name}\n${await listed(s2.name)}`); }
-    // On the merged laptop, old and new tabs are one roster, and each box session appears once.
-    for (const name of ["old-tab", "new-tab"]) {
-      await eventually(async () => /box:box-old-tab/.test(await listed(name)) && /box:box-new-tab/.test(await listed(name)), `${name} sees both box sessions`);
-      const rows = await listed(name);
-      assert.match(rows, new RegExp(`• ${name === "old-tab" ? "new-tab" : "old-tab"} `), `${name} sees the other laptop tab`);
-      assert.equal(rows.match(/box:box-old-tab/g)?.length, 1, "once, not once per binding");
-    }
-    // The box hasn't merged yet: its old tab still sees the laptop's old tab, as before.
-    await eventually(async () => /laptop:old-tab/.test(await listed("box-old-tab")), "the box's old tab keeps its old peers");
-    assert.match(await listed("box-new-tab"), /laptop:new-tab/);
+    await check({ listed, call, inbox });
   } finally {
     await link?.close();
     for (const { harness } of sessions) await harness.emitLifecycle("session_shutdown").catch(() => {});
     await stopBrokers(brokers);
     await cleanup();
   }
+}
+
+const rowsFor = (rows: string, pattern: RegExp) => rows.split("\n").filter((row) => pattern.test(row)).length;
+
+test("during the switch away from an app scope, old and new tabs on a merged and a not-yet-merged computer list, ask and answer each other", { timeout: 120_000, skip: process.platform === "win32" }, async () => {
+  await switchScenario(false, async ({ listed, call, inbox }) => {
+    // On the merged laptop, old and new tabs are one roster, and each box session appears once.
+    for (const name of ["old-tab", "new-tab"]) {
+      await eventually(async () => /box:box-old-tab/.test(await listed(name)) && /box:box-new-tab/.test(await listed(name)), `${name} sees both box sessions`);
+      const rows = await listed(name);
+      assert.match(rows, new RegExp(`• ${name === "old-tab" ? "new-tab" : "old-tab"} `), `${name} sees the other laptop tab`);
+      assert.equal(rowsFor(rows, /box:box-old-tab/), 1, "once, not once per binding");
+    }
+    // The box hasn't merged: each of its tabs still sees its own scope there, and every laptop tab.
+    await eventually(async () => /laptop:old-tab/.test(await listed("box-old-tab")) && /laptop:new-tab/.test(await listed("box-old-tab")), "the box's old tab sees both laptop tabs");
+    assert.doesNotMatch(await listed("box-old-tab"), /• box-new-tab /, "the unmerged box itself is still split until its broker restarts");
+
+    // A new tab on the merged laptop asks an old tab on the unmerged box, which answers.
+    const ask = await call("new-tab", { action: "ask", to: "box:box-old-tab", message: "new to old: build green?", blocking: false });
+    assert.notEqual(ask.details?.error, true, text(ask));
+    await eventually(() => /new to old: build green\?/.test(inbox("box-old-tab")), "the old tab gets the new tab's ask");
+    const answer = await call("box-old-tab", { action: "reply", message: "old to new: green" });
+    assert.notEqual(answer.details?.error, true, text(answer));
+    await eventually(() => /old to new: green/.test(inbox("new-tab")), "the answer comes back");
+
+    // And the other way: the old box tab asks the new laptop tab.
+    const back = await call("box-old-tab", { action: "ask", to: "laptop:new-tab", message: "old to new: deploy?", blocking: false });
+    assert.notEqual(back.details?.error, true, text(back));
+    await eventually(() => /old to new: deploy\?/.test(inbox("new-tab")), "the new tab gets the old tab's ask");
+    const reply = await call("new-tab", { action: "reply", message: "new to old: deployed" });
+    assert.notEqual(reply.details?.error, true, text(reply));
+    await eventually(() => /new to old: deployed/.test(inbox("box-old-tab")), "and its answer comes back");
+  });
+});
+
+test("once both computers have merged, every tab sees every other once and they talk across", { timeout: 120_000, skip: process.platform === "win32" }, async () => {
+  await switchScenario(true, async ({ listed, call, inbox }) => {
+    for (const name of ["old-tab", "new-tab", "box-old-tab", "box-new-tab"]) {
+      const remote = name.startsWith("box") ? "laptop:" : "box:";
+      await eventually(async () => rowsFor(await listed(name), new RegExp(`• ${remote}`)) === 2, `${name} sees the other computer's two tabs`);
+      const rows = await listed(name);
+      assert.equal(rowsFor(rows, /^• .*(old-tab|new-tab)/), 4, `${name}: four tabs, each once:\n${rows}`);
+    }
+    const ask = await call("box-new-tab", { action: "ask", to: "laptop:old-tab", message: "box new to laptop old", blocking: false });
+    assert.notEqual(ask.details?.error, true, text(ask));
+    await eventually(() => /box new to laptop old/.test(inbox("old-tab")), "the ask arrives");
+    const reply = await call("old-tab", { action: "reply", message: "laptop old answers" });
+    assert.notEqual(reply.details?.error, true, text(reply));
+    await eventually(() => /laptop old answers/.test(inbox("box-new-tab")), "the answer arrives");
+  });
 });
 
 test("on a computer where FlightDeck links its sessions, Parley's own link keeper stands aside", { timeout: 60_000, skip: process.platform === "win32" }, async () => {
@@ -325,7 +380,6 @@ test("on a computer where FlightDeck links its sessions, Parley's own link keepe
     await new Promise((r) => setTimeout(r, 2_000));
     assert.doesNotMatch(text(await call(here, laptopAgent, { action: "list" })), /box:/, "no second owner for FlightDeck's pairs");
   } finally {
-    delete process.env.PI_PARLEY_FLIGHTDECK_HOME;
     for (const harness of [here, there]) await harness.emitLifecycle("session_shutdown").catch(() => {});
     await stopBrokers(brokers);
     await cleanup();

@@ -19,6 +19,7 @@ import {
 import { tryAcquireProcessLock } from "./process-lock.ts";
 import { isBrokerHealthOkMessage } from "./protocol.ts";
 import { BROKER_RUNTIME_OCCUPIED_EXIT_CODE } from "./runtime-claim.ts";
+import { bundledScript, nodeCommand } from "./bundle.ts";
 
 const PARLEY_DIR = getParleyDirPath();
 const EXTENSION_DIR = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -207,8 +208,14 @@ export async function spawnBrokerIfNeeded(brokerCommand: string, brokerArgs: str
     // Another client may have completed startup before we acquired the lock.
     if (await isBrokerRunning()) return;
 
-    const brokerPath = join(dirname(fileURLToPath(import.meta.url)), "broker.ts");
-    const launch = getBrokerLaunchSpec(brokerPath, brokerCommand, brokerArgs);
+    const bundledBroker = bundledScript("broker");
+    const brokerPath = bundledBroker ?? join(dirname(fileURLToPath(import.meta.url)), "broker.ts");
+    const launch: BrokerLaunchSpec = bundledBroker
+      ? (process.platform === "win32"
+        ? { kind: "windows-launcher", command: "wscript.exe", args: ["//E:VBScript", getWindowsHiddenLauncherPath(PARLEY_DIR)],
+          launcherPath: getWindowsHiddenLauncherPath(PARLEY_DIR), launcherCommandLine: [nodeCommand(), bundledBroker].map(quoteWindowsArg).join(" "), captureStartupStderr: false }
+        : { kind: "direct", command: nodeCommand(), args: [bundledBroker], captureStartupStderr: true })
+      : getBrokerLaunchSpec(brokerPath, brokerCommand, brokerArgs);
     if (launch.kind === "windows-launcher") {
       writeWindowsHiddenLauncher(launch.launcherCommandLine, launch.launcherPath);
     }

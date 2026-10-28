@@ -180,6 +180,8 @@ export interface BrokerListScopesRequest {
     type: "broker_list_scopes";
     requestId: string;
     stateId?: string;
+    /** Extra facts to report. Older brokers reject the field; ask again without it. */
+    include?: "mergedScopes"[];
 }
 export interface BrokerScopeSummary {
     /** Exact local PI_PARLEY_SCOPE_ID, or null for the unscoped namespace. */
@@ -194,6 +196,8 @@ export type BrokerListScopesResult = {
         id: string;
     };
     scopes: BrokerScopeSummary[];
+    /** Scopes this broker merges into the ordinary roster, when asked for. */
+    mergedScopes?: string[];
 } | {
     type: "broker_list_scopes_result";
     requestId: string;

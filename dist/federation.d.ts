@@ -24,6 +24,11 @@ export interface BrokerInspection {
     /** Inspection-time snapshot. It may change immediately and is not durable
      * scope authorization. */
     readonly scopes: readonly Readonly<BrokerInspectionScope>[];
+    /** Scopes this broker merges into its ordinary roster (sessions naming them
+     * are listed with everyone), or undefined for a broker from before merging,
+     * which keeps every scope separate. Counts in `scopes` are by the scope each
+     * session named. */
+    readonly mergedScopes?: readonly string[];
 }
 /** Opaque inspected broker handle retained for naming compatibility. */
 export type BrokerHandle = BrokerInspection;
