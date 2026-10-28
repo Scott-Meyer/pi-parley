@@ -192,6 +192,26 @@ A computer has to be reachable without a prompt: if `ssh build-vm` asks for a pa
 
 Each computer runs one small link keeper while Pi sessions are open there. It holds the links, shares one SSH connection per computer, and stops shortly after the last session ends. Its state lives in `parley/links.json`, its log in `parley/link.log`.
 
+## Claude Code and Codex
+
+Claude Code and Codex sessions can join Parley too, in their terminals and in their desktop apps (Claude Desktop's Code tab, Codex in the ChatGPT app), which share the terminals' configuration. Install Parley where they can run it, then connect each host once:
+
+```bash
+npm install -g pi-parley
+parley connect claude      # or: parley connect codex
+```
+
+`connect` registers Parley's MCP server with the host and adds four hooks marked `_parley`, next to any you (or FlightDeck) already have; the files are backed up to `*.before-parley`, and `parley disconnect claude|codex` removes exactly Parley's parts. Codex asks you to trust new hooks once: run `/hooks` in Codex and trust the four that run `parley.mjs hook`. New sessions then appear in Parley like any Pi session (in a FlightDeck tab, as `workspace:tab`; elsewhere `folder:claude` or `folder:codex`), with the same `parley` tool, references, receipts and links.
+
+Inside, it's the same Parley extension a Pi session runs, on a small stand-in for Pi's extension API. What differs per host is how a message reaches an agent that isn't calling the tool:
+
+| Host | An idle session | A busy one |
+|------|-----------------|------------|
+| Claude Code | woken through Claude's own cross-session inbox (the one its SendMessage uses) | the same; hooks hand over anything the inbox didn't take |
+| Codex | woken with `codex queue`; a brand-new session can't be woken until its first prompt, so a message waits for it | handed over when the turn ends (`Stop` hook) or with the next prompt |
+
+Claude's inbox is internal to Claude Code and may change between releases; Claude Code's official equivalent, [channels](https://code.claude.com/docs/en/channels), is in research preview and limited to allowlisted plugins. Claude Desktop's chat and Cowork modes don't read Claude Code's configuration and don't get Parley.
+
 ## herdr
 
 In a [herdr](https://herdr.dev) pane, a session is named after where it lives, `<workspace>:<tab>` (or the pane's own label when it has one), the way FlightDeck names its tabs' sessions. Renaming the workspace, tab or pane in herdr renames the session, and renaming the session (`/name`, `/alias`, the parley tool's `rename`) renames herdr's: the tab when the session's pane is the tab's only one, otherwise just that pane's label, so another pane's tab never changes under it. A resumed session keeps its name and herdr follows. Subagents in the pane get `<workspace>:<tab>:<name>` and rename nothing. `"herdrNames": false` in `config.json` turns this off.
@@ -498,6 +518,15 @@ Parley is live conversation between working AI sessions. [Threadroom](https://gi
 ├── herdr/                # Session names in step with herdr's
 │   ├── names.ts          # The naming rules and their lifecycle
 │   └── socket.ts         # herdr's socket API: requests and pushed events
+├── hosts/                # Parley inside Claude Code and Codex
+│   ├── hosted-session.ts # The Parley extension on a stand-in for Pi's API
+│   ├── serve.ts          # One host session's server, delivery and hooks
+│   ├── claude.ts         # Claude Code: session id, inbox wake, hook output
+│   ├── codex.ts          # Codex: thread from hooks, codex queue wake
+│   ├── control.ts        # How hooks find their session's server
+│   ├── mcp.ts            # A small MCP stdio server
+│   ├── connect.ts        # parley connect|disconnect
+│   └── cli.ts            # The parley command
 ├── link/                 # Linking computers over SSH
 │   ├── keeper.ts         # This computer's link keeper process
 │   ├── client.ts         # A session's connection to the keeper
