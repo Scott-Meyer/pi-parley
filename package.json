@@ -15,6 +15,9 @@
   "bugs": {
     "url": "https://github.com/Scott-Meyer/pi-parley/issues"
   },
+  "bin": {
+    "parley": "bin/parley.mjs"
+  },
   "type": "module",
   "main": "index.ts",
   "exports": {
@@ -68,6 +71,15 @@
     "broker/spawn.ts",
     "herdr/names.ts",
     "herdr/socket.ts",
+    "bin/parley.mjs",
+    "hosts/claude.ts",
+    "hosts/cli.ts",
+    "hosts/codex.ts",
+    "hosts/connect.ts",
+    "hosts/control.ts",
+    "hosts/hosted-session.ts",
+    "hosts/mcp.ts",
+    "hosts/serve.ts",
     "link/client.ts",
     "link/completions.ts",
     "link/discover.ts",
@@ -80,12 +92,12 @@
     "skills/**/*"
   ],
   "scripts": {
-    "test": "node scripts/run-tests.mjs broker/federation-protocol.test.ts broker/federation-roster.test.ts broker/federation-send.test.ts broker/federation-origin.test.ts broker/peer-link.test.ts broker/federation.integration.test.ts broker/federation-conversation.test.ts broker/federation-conversation.integration.test.ts broker/attachment.test.ts broker/attachment-roster-lifecycle.test.ts federation.test.ts extension-entry.test.ts broker/client.test.ts broker/client-liveness.test.ts broker/collaboration-state.test.ts broker/extension.test.ts broker/framing.test.ts broker/paths.test.ts broker/build.test.ts broker/process-lock.test.ts broker/runtime-claim.test.ts broker/runtime-lifecycle.test.ts broker/spawn.test.ts broker/subagent-acl.test.ts broker/delivery-feedback.test.ts config.test.ts conversation-history.test.ts cwd.test.ts pi-compat.test.ts session-profile.test.ts project-agent.test.ts reply-tracker.test.ts parley.integration.test.ts test/inline-message.test.ts test/overlay-width.test.ts test/session-id-prefixes.test.ts recipient-context.integration.test.ts federation-extension.integration.test.ts references.test.ts references.integration.test.ts link.integration.test.ts link/discover.test.ts link/completions.test.ts herdr/names.test.ts",
+    "test": "node scripts/run-tests.mjs broker/federation-protocol.test.ts broker/federation-roster.test.ts broker/federation-send.test.ts broker/federation-origin.test.ts broker/peer-link.test.ts broker/federation.integration.test.ts broker/federation-conversation.test.ts broker/federation-conversation.integration.test.ts broker/attachment.test.ts broker/attachment-roster-lifecycle.test.ts federation.test.ts extension-entry.test.ts broker/client.test.ts broker/client-liveness.test.ts broker/collaboration-state.test.ts broker/extension.test.ts broker/framing.test.ts broker/paths.test.ts broker/build.test.ts broker/process-lock.test.ts broker/runtime-claim.test.ts broker/runtime-lifecycle.test.ts broker/spawn.test.ts broker/subagent-acl.test.ts broker/delivery-feedback.test.ts config.test.ts conversation-history.test.ts cwd.test.ts pi-compat.test.ts session-profile.test.ts project-agent.test.ts reply-tracker.test.ts parley.integration.test.ts test/inline-message.test.ts test/overlay-width.test.ts test/session-id-prefixes.test.ts recipient-context.integration.test.ts federation-extension.integration.test.ts references.test.ts references.integration.test.ts link.integration.test.ts link/discover.test.ts link/completions.test.ts herdr/names.test.ts hosts/hosts.integration.test.ts",
     "build:federation": "node scripts/build-federation.mjs",
     "prepack": "npm run build:federation",
     "test:host-compat": "node scripts/smoke-host-compat.mjs",
     "test:package:federation": "node scripts/smoke-federation-package.mjs",
-    "typecheck": "tsc --noEmit --module nodenext --moduleResolution nodenext --target es2022 --strict --skipLibCheck --allowImportingTsExtensions --types node federation.ts extension.ts index.ts pi-compat.ts compaction-awareness.ts session-profile.ts broker/federation-types.ts broker/federation-protocol.ts broker/federation-roster.ts broker/federation-send.ts broker/federation-conversation.ts broker/attachment.ts broker/federation-origin.ts broker/peer-link.ts broker/broker.ts broker/collaboration-state.ts link/client.ts link/completions.ts link/discover.ts link/keeper.ts link/paths.ts link/protocol.ts link/session.ts link/ssh.ts herdr/names.ts herdr/socket.ts ui/*.ts"
+    "typecheck": "tsc --noEmit --module nodenext --moduleResolution nodenext --target es2022 --strict --skipLibCheck --allowImportingTsExtensions --types node federation.ts extension.ts index.ts pi-compat.ts compaction-awareness.ts session-profile.ts broker/federation-types.ts broker/federation-protocol.ts broker/federation-roster.ts broker/federation-send.ts broker/federation-conversation.ts broker/attachment.ts broker/federation-origin.ts broker/peer-link.ts broker/broker.ts broker/collaboration-state.ts link/client.ts link/completions.ts link/discover.ts link/keeper.ts link/paths.ts link/protocol.ts link/session.ts link/ssh.ts herdr/names.ts herdr/socket.ts hosts/claude.ts hosts/cli.ts hosts/codex.ts hosts/connect.ts hosts/control.ts hosts/hosted-session.ts hosts/mcp.ts hosts/serve.ts ui/*.ts"
   },
   "keywords": [
     "pi-package",
