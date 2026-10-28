@@ -22,20 +22,21 @@ export interface Delivery {
 }
 
 export interface HostedSessionOptions {
-  /** The host's own session identity (Claude's session id, Codex's thread id). */
-  readonly sessionId: string;
   readonly cwd: string;
   readonly model?: string;
   /** Used when the session has no name yet. */
   readonly defaultName: string;
-  /** Where this session's history lives (JSON lines). */
-  readonly stateFile: string;
+  /** Where a session's history lives (JSON lines), by its host session id. */
+  readonly stateFile: (sessionId: string) => string;
   readonly deliver: (delivery: Delivery) => void;
 }
 
 export interface ToolOutcome { readonly text: string; readonly isError: boolean }
 
 export interface HostedSession {
+  /** Join Parley as the host session with this id (Claude's session id, Codex's thread id). Once. */
+  begin(sessionId: string): Promise<void>;
+  readonly started: () => boolean;
   readonly tool: { readonly name: string; readonly description: string; readonly inputSchema: Record<string, unknown> };
   /** How the tool is meant to be used, for hosts that take server instructions. */
   readonly instructions: string;
@@ -60,17 +61,18 @@ interface ToolDefinition {
   execute(id: string, params: unknown, signal: AbortSignal | undefined, onUpdate: undefined, ctx: unknown): Promise<{ content: { type: string; text?: string }[]; details?: unknown; isError?: boolean }>;
 }
 
-export async function startHostedSession(options: HostedSessionOptions): Promise<HostedSession> {
-  mkdirSync(dirname(options.stateFile), { recursive: true, mode: 0o700 });
-  const history: Entry[] = existsSync(options.stateFile)
-    ? readFileSync(options.stateFile, "utf8").split("\n").filter(Boolean).flatMap((line) => { try { return [JSON.parse(line) as Entry]; } catch { return []; } })
-    : [];
+/** Sets up Parley for a host session without joining yet: the tool is known
+ * at once, and `begin` joins once the host says which session this is. */
+export async function createHostedSession(options: HostedSessionOptions): Promise<HostedSession> {
+  let sessionId: string | undefined;
+  let stateFile: string | undefined;
+  let history: Entry[] = [];
   const record = (entry: Entry) => {
     history.push(entry);
-    appendFileSync(options.stateFile, `${JSON.stringify(entry)}\n`, { mode: 0o600 });
+    if (stateFile) appendFileSync(stateFile, `${JSON.stringify(entry)}\n`, { mode: 0o600 });
   };
 
-  let sessionName = [...history].reverse().find((entry): entry is Extract<Entry, { kind: "name" }> => entry.kind === "name")?.name ?? options.defaultName;
+  let sessionName = options.defaultName;
   let busy = false;
   const bus = new EventEmitter();
   const handlers = new Map<string, ((event: unknown, ctx: unknown) => unknown)[]>();
@@ -121,7 +123,7 @@ export async function startHostedSession(options: HostedSessionOptions): Promise
     abort: () => undefined,
     ui: undefined,
     sessionManager: {
-      getSessionId: () => options.sessionId,
+      getSessionId: () => sessionId ?? "",
       getEntries: () => history.flatMap((entry, index): Record<string, unknown>[] => {
         if (entry.kind === "entry") return [{ type: "custom", customType: entry.type, data: entry.data, id: `entry-${index}`, parentId: index > 0 ? `entry-${index - 1}` : null, timestamp: entry.at }];
         if (entry.kind === "message") return [{ type: "custom_message", ...entry.message, id: `message-${index}`, parentId: null, timestamp: entry.at }];
@@ -140,10 +142,21 @@ export async function startHostedSession(options: HostedSessionOptions): Promise
   registerParleyExtension(pi as never);
   const tool = tools.find((candidate) => candidate.name === "parley");
   if (!tool) throw new Error("Parley registered no parley tool");
-  await emit("session_start", { type: "session_start", reason: history.length > 0 ? "resume" : "startup" });
 
   const instructions = [tool.promptSnippet, ...(tool.promptGuidelines ?? [])].filter(Boolean).join("\n");
   return {
+    async begin(id) {
+      if (sessionId) return;
+      sessionId = id;
+      stateFile = options.stateFile(id);
+      mkdirSync(dirname(stateFile), { recursive: true, mode: 0o700 });
+      history = existsSync(stateFile)
+        ? readFileSync(stateFile, "utf8").split("\n").filter(Boolean).flatMap((line) => { try { return [JSON.parse(line) as Entry]; } catch { return []; } })
+        : [];
+      sessionName = [...history].reverse().find((entry): entry is Extract<Entry, { kind: "name" }> => entry.kind === "name")?.name ?? sessionName;
+      await emit("session_start", { type: "session_start", reason: history.length > 0 ? "resume" : "startup" });
+    },
+    started: () => sessionId !== undefined,
     tool: {
       name: tool.name,
       description: tool.description,
@@ -152,6 +165,7 @@ export async function startHostedSession(options: HostedSessionOptions): Promise
     },
     instructions,
     async call(args, signal) {
+      if (!sessionId) return { text: "Parley is still starting in this session; try again in a moment.", isError: true };
       const toolCallId = `host-${randomUUID()}`;
       await emit("tool_execution_start", { toolCallId, toolName: tool.name, args });
       let result: Awaited<ReturnType<ToolDefinition["execute"]>>;
@@ -177,4 +191,11 @@ export async function startHostedSession(options: HostedSessionOptions): Promise
       await emit("session_shutdown", { type: "session_shutdown" });
     },
   };
+}
+
+/** Set up and join at once, for hosts that know their session from the start. */
+export async function startHostedSession(options: HostedSessionOptions & { sessionId: string }): Promise<HostedSession> {
+  const session = await createHostedSession(options);
+  await session.begin(options.sessionId);
+  return session;
 }

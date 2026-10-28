@@ -64,7 +64,7 @@ async function colleague(agentDir: string, root: string) {
   const received: string[] = [];
   const session = await startHostedSession({
     sessionId: "colleague-session", cwd: root, defaultName: "colleague",
-    stateFile: path.join(root, "colleague.jsonl"), deliver: (delivery) => received.push(delivery.text),
+    stateFile: () => path.join(root, "colleague.jsonl"), deliver: (delivery) => received.push(delivery.text),
   });
   return { session, received };
 }
@@ -204,6 +204,31 @@ test("two Codex sessions under one shared app server each get their own hooks an
     await other.session.call({ action: "send", to: "beta:codex", message: "for beta" });
     await eventually(() => { try { const text = readFileSync(queued, "utf8"); return /^thread-alpha .*for alpha/m.test(text) && /^thread-beta .*for beta/m.test(text) && !/^thread-alpha .*for beta/m.test(text); } catch { return false; } },
       "each message is queued into its own session's thread");
+  } finally {
+    await other?.session.stop();
+    delete process.env.PI_CODING_AGENT_DIR;
+    for (const server of servers) server.kill("SIGTERM");
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a server no host session claims (a health check, an app server's spare) lists its tool but never appears as a session", { timeout: 60_000, skip: process.platform === "win32" }, async () => {
+  const root = mkdtempSync("/tmp/pl-hosts-");
+  const agentDir = path.join(root, "agent");
+  mkdirSync(agentDir, { recursive: true });
+  const env = cleanEnv({ PI_CODING_AGENT_DIR: agentDir });
+  const servers = ["claude", "codex"].map((host) => spawn(process.execPath, [bin, "mcp", host], { cwd: root, stdio: ["pipe", "pipe", "pipe"], env }));
+  let other: Awaited<ReturnType<typeof colleague>> | undefined;
+  try {
+    for (const client of servers.map(mcpClient)) {
+      await client.start();
+      const listed = await client.request("tools/list");
+      assert.equal(listed.result.tools[0]?.name, "parley", "the host still sees the tool at once");
+    }
+    other = await colleague(agentDir, root);
+    await new Promise((r) => setTimeout(r, 6_000));
+    const roster = (await other.session.call({ action: "list" })).text;
+    assert.doesNotMatch(roster, /:claude|:codex/, roster);
   } finally {
     await other?.session.stop();
     delete process.env.PI_CODING_AGENT_DIR;
