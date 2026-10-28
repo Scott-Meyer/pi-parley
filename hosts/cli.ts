@@ -2,20 +2,25 @@
 //
 //   parley connect claude|codex      set up Parley in Claude Code or Codex
 //   parley disconnect claude|codex   remove it again
-//   parley mcp claude|codex          the MCP server those hosts start
+//   parley mcp claude|codex|auto     the MCP server those hosts start
 //   parley hook <event>              what their hooks run (reads the hook's JSON on stdin)
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { bundledBuild } from "../broker/bundle.ts";
+
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
-const version = (JSON.parse(readFileSync(join(root, "package.json"), "utf8")) as { version: string }).version;
-const [command, target, ...rest] = process.argv.slice(2);
+const version = bundledBuild?.packageVersion ?? (JSON.parse(readFileSync(join(root, "package.json"), "utf8")) as { version: string }).version;
+const [command, initialTarget, ...rest] = process.argv.slice(2);
+let target = initialTarget;
 
 async function main() {
   switch (command) {
     case "mcp": {
       const { serveHost } = await import("./serve.ts");
+      // One plugin serves both hosts: Claude Code marks its MCP servers' environment.
+      if (target === "auto") target = process.env.CLAUDECODE === "1" || process.env.CLAUDE_CODE_SESSION_ID ? "claude" : "codex";
       if (target === "claude") { const { claudeHost } = await import("./claude.ts"); return serveHost(claudeHost(process.env, version)); }
       if (target === "codex") { const { codexHost } = await import("./codex.ts"); return serveHost(codexHost(process.env, version)); }
       break;
@@ -26,7 +31,11 @@ async function main() {
       let payload: Record<string, unknown> = {};
       try { payload = JSON.parse(input || "{}"); } catch { /* not ours to judge */ }
       const event = target ?? String(payload.hook_event_name ?? "");
-      const response = await sendHook({ event, payload });
+      // Hosts that start MCP servers with a bare environment (Codex) still run hooks with the
+      // session's: pass along what names and scopes it.
+      const { PASS_THROUGH_ENV } = await import("./connect.ts");
+      const hostEnv = Object.fromEntries(PASS_THROUGH_ENV.flatMap((key) => process.env[key] ? [[key, process.env[key]!]] : []));
+      const response = await sendHook({ event, payload, hostEnv });
       if (response?.output) process.stdout.write(`${JSON.stringify(response.output)}\n`);
       return;
     }

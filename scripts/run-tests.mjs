@@ -9,7 +9,7 @@ import { dirname, join } from "node:path";
 
 const env = { ...process.env };
 for (const key of Object.keys(env)) {
-  if ((key.startsWith("PI_PARLEY_") && !key.startsWith("PI_PARLEY_TEST_")) || key.startsWith("PI_SUBAGENT_")
+  if ((key.startsWith("PI_PARLEY_") && !key.startsWith("PI_PARLEY_TEST_") && key !== "PARLEY_TEST_HOST_BIN") || key.startsWith("PI_SUBAGENT_")
     || key.startsWith("FLIGHTDECK_") || key === "PI_CODING_AGENT_DIR" || key === "PI_CLIENT_SESSION_ID") delete env[key];
 }
 // Sessions in tests must never go looking for this machine's real ssh connections.

@@ -12,7 +12,8 @@ import { createInterface } from "node:readline";
 import { startHostedSession } from "./hosted-session.ts";
 
 const repo = path.resolve(path.dirname(new URL(import.meta.url).pathname), "..");
-const bin = path.join(repo, "bin", "parley.mjs");
+// The source by default; PARLEY_TEST_HOST_BIN=plugins/parley/parley.mjs checks the built plugin.
+const bin = process.env.PARLEY_TEST_HOST_BIN ? path.resolve(repo, process.env.PARLEY_TEST_HOST_BIN) : path.join(repo, "bin", "parley.mjs");
 
 function cleanEnv(extra: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = {};
@@ -63,7 +64,7 @@ async function colleague(agentDir: string, root: string) {
   process.env.PI_PARLEY_LINK_BY_DEFAULT = "0";
   const received: string[] = [];
   const session = await startHostedSession({
-    sessionId: "colleague-session", cwd: root, defaultName: "colleague",
+    sessionId: "colleague-session", cwd: root, defaultName: () => "colleague",
     stateFile: () => path.join(root, "colleague.jsonl"), deliver: (delivery) => received.push(delivery.text),
   });
   return { session, received };
@@ -234,6 +235,81 @@ test("a server no host session claims (a health check, an app server's spare) li
     await other?.session.stop();
     delete process.env.PI_CODING_AGENT_DIR;
     for (const server of servers) server.kill("SIGTERM");
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a Codex session whose server started with a bare environment takes its names and scope from its first hook", { timeout: 60_000, skip: process.platform === "win32" }, async () => {
+  const root = mkdtempSync("/tmp/pl-hosts-");
+  const agentDir = path.join(root, "agent");
+  mkdirSync(agentDir, { recursive: true });
+  // The server gets nothing (as Codex's plugin servers do); the hook carries the tab's environment.
+  const serverEnv = cleanEnv({ PI_CODING_AGENT_DIR: agentDir });
+  const tabEnv = { ...serverEnv, FLIGHTDECK_WORKSPACE_NAME: "mistfall", FLIGHTDECK_TAB_NAME: "builder", FLIGHTDECK_TAB_ID: "t9" };
+  const server = spawn(process.execPath, [bin, "mcp", "codex"], { cwd: root, stdio: ["pipe", "pipe", "pipe"], env: serverEnv });
+  const client = mcpClient(server);
+  let other: Awaited<ReturnType<typeof colleague>> | undefined;
+  try {
+    await client.start();
+    await client.request("tools/list");
+    await new Promise<void>((resolve) => {
+      const child = spawn(process.execPath, [bin, "hook", "SessionStart"], { cwd: root, stdio: ["pipe", "ignore", "inherit"], env: tabEnv });
+      child.on("close", () => resolve());
+      child.stdin!.end(JSON.stringify({ hook_event_name: "SessionStart", session_id: "thread-7", cwd: root }));
+    });
+    other = await colleague(agentDir, root);
+    await eventually(async () => /• mistfall:builder .*Codex in FlightDeck/.test((await other!.session.call({ action: "list" })).text),
+      "named after its FlightDeck tab, and shown as Codex in FlightDeck");
+  } finally {
+    await other?.session.stop();
+    delete process.env.PI_CODING_AGENT_DIR;
+    server.kill("SIGTERM");
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("when a guess gave a Codex session to a spare server, the server its tool calls come through takes it over", { timeout: 60_000, skip: process.platform === "win32" }, async () => {
+  const root = mkdtempSync("/tmp/pl-hosts-");
+  const agentDir = path.join(root, "agent");
+  mkdirSync(agentDir, { recursive: true });
+  const env = cleanEnv({ PI_CODING_AGENT_DIR: agentDir, PI_PARLEY_CODEX_BIN: "/nonexistent/codex" });
+  // Like Codex's app server: a pre-started spare, then the session's real server, same folder.
+  const spare = spawn(process.execPath, [bin, "mcp", "codex"], { cwd: root, stdio: ["pipe", "pipe", "pipe"], env });
+  await new Promise((r) => setTimeout(r, 300));
+  const real = spawn(process.execPath, [bin, "mcp", "codex"], { cwd: root, stdio: ["pipe", "pipe", "pipe"], env });
+  const [spareClient, realClient] = [spare, real].map(mcpClient);
+  const hook = (event: string) => new Promise<string>((resolve) => {
+    const child = spawn(process.execPath, [bin, "hook", event], { cwd: root, stdio: ["pipe", "pipe", "inherit"], env });
+    let out = ""; child.stdout!.on("data", (d) => { out += d; });
+    child.on("close", () => resolve(out.trim()));
+    child.stdin!.end(JSON.stringify({ hook_event_name: event, session_id: "thread-9", cwd: root }));
+  });
+  let other: Awaited<ReturnType<typeof colleague>> | undefined;
+  try {
+    await Promise.all([spareClient.start(), realClient.start()]);
+    await Promise.all([spareClient.request("tools/list"), realClient.request("tools/list")]);
+    await hook("SessionStart"); // the guess: oldest unclaimed in the folder, the spare
+    other = await colleague(agentDir, root);
+    const name = `${path.basename(root)}:codex`;
+    await eventually(async () => new RegExp(`• ${name} `).test((await other!.session.call({ action: "list" })).text), "the session appears");
+    // A message waits (no codex to wake it) in whichever server holds the session.
+    await other.session.call({ action: "send", to: name, message: "waiting for you" });
+    await new Promise((r) => setTimeout(r, 500));
+
+    // The model's first tool call comes through the real server, naming its thread.
+    const status = await realClient.request("tools/call", { name: "parley", arguments: { action: "status" }, _meta: { threadId: "thread-9" } });
+    assert.equal(status.result.isError, false, JSON.stringify(status.result));
+    assert.match(status.result.content[0].text, new RegExp(`Session: ${name}`));
+    // One session, not two; and what the spare held is handed over at the next boundary.
+    const roster = (await other.session.call({ action: "list" })).text;
+    assert.equal(roster.split("\n").filter((row) => row.startsWith(`• ${name} `)).length, 1, roster);
+    let stop = "";
+    await eventually(async () => (stop = await hook("Stop")) !== "", "the real server hands the waiting message over");
+    assert.match(JSON.parse(stop).reason, /waiting for you/);
+  } finally {
+    await other?.session.stop();
+    delete process.env.PI_CODING_AGENT_DIR;
+    for (const server of [spare, real]) server.kill("SIGTERM");
     rmSync(root, { recursive: true, force: true });
   }
 });

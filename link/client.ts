@@ -14,6 +14,7 @@ import { createMessageReader, writeMessage } from "../broker/framing.ts";
 import { ensureParleyRuntimeDir, getAgentDirPath } from "../broker/paths.ts";
 import { getTsxCliPath, getWindowsBrokerCommandLine, writeWindowsHiddenLauncher } from "../broker/spawn.ts";
 import { getLinkPaths } from "./paths.ts";
+import { bundledScript, nodeCommand } from "../broker/bundle.ts";
 import type { LinkEvent, LinkRequest, LinkResponse, LinkStatus } from "./protocol.ts";
 
 export type { LinkEvent, LinkHostStatus, LinkStatus } from "./protocol.ts";
@@ -49,17 +50,17 @@ function startKeeper(env: NodeJS.ProcessEnv, discoverByDefault: boolean) {
     ...env, PI_CODING_AGENT_DIR: getAgentDirPath(env), NODE_NO_WARNINGS: "1",
     PI_PARLEY_LINK_DISCOVER_DEFAULT: discoverByDefault ? "1" : "0",
   };
+  const bundledKeeper = bundledScript("keeper");
   if (process.platform === "win32") {
     const launcher = writeWindowsHiddenLauncher(
-      getWindowsBrokerCommandLine(KEEPER_PATH, EXTENSION_DIR),
+      bundledKeeper ? `"${nodeCommand()}" "${bundledKeeper}"` : getWindowsBrokerCommandLine(KEEPER_PATH, EXTENSION_DIR),
       join(paths.parleyDir, "link-launch.vbs"),
     );
     spawn("wscript.exe", ["//E:VBScript", launcher], { detached: true, stdio: "ignore", windowsHide: true, env: childEnv }).unref();
     return;
   }
   // Bun hosts (OMP) run the keeper under Node, like the broker.
-  const node = /^node(js)?$/i.test(process.execPath.split("/").pop() ?? "") ? process.execPath : "node";
-  spawn(node, [getTsxCliPath(EXTENSION_DIR), KEEPER_PATH], {
+  spawn(nodeCommand(), bundledKeeper ? [bundledKeeper] : [getTsxCliPath(EXTENSION_DIR), KEEPER_PATH], {
     detached: true, stdio: "ignore", cwd: EXTENSION_DIR, env: childEnv,
   }).unref();
 }

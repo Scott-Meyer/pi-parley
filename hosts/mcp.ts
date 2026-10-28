@@ -8,7 +8,8 @@ export interface McpTool {
   readonly name: string;
   readonly description: string;
   readonly inputSchema: Record<string, unknown>;
-  call(args: Record<string, unknown>, signal: AbortSignal): Promise<{ text: string; isError: boolean }>;
+  /** meta: the request's _meta, where hosts put context (Codex: threadId). */
+  call(args: Record<string, unknown>, signal: AbortSignal, meta?: Record<string, unknown>): Promise<{ text: string; isError: boolean }>;
 }
 
 export interface McpServerOptions {
@@ -58,7 +59,8 @@ export function serveMcp(tools: () => readonly McpTool[] | Promise<readonly McpT
         const controller = new AbortController();
         if (id !== undefined) running.set(id, controller);
         try {
-          const outcome = await tool.call((params.arguments ?? {}) as Record<string, unknown>, controller.signal);
+          const meta = params._meta && typeof params._meta === "object" ? params._meta as Record<string, unknown> : undefined;
+          const outcome = await tool.call((params.arguments ?? {}) as Record<string, unknown>, controller.signal, meta);
           reply({ content: [{ type: "text", text: outcome.text }], isError: outcome.isError });
         } catch (error) {
           reply({ content: [{ type: "text", text: error instanceof Error ? error.message : String(error) }], isError: true });

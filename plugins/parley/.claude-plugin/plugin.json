@@ -1,0 +1,12 @@
+{
+  "name": "parley",
+  "version": "1.6.0",
+  "description": "Conversations between agent sessions (Pi, Oh My Pi, Claude Code, Codex) on your computers: named peers, asks and replies, delivery receipts.",
+  "author": {
+    "name": "Scott Meyer",
+    "url": "https://github.com/Scott-Meyer"
+  },
+  "homepage": "https://github.com/Scott-Meyer/pi-parley",
+  "repository": "https://github.com/Scott-Meyer/pi-parley",
+  "license": "MIT"
+}

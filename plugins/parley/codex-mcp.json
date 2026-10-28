@@ -1,0 +1,14 @@
+{
+  "mcpServers": {
+    "parley": {
+      "command": "node",
+      "args": [
+        "-e",
+        "const fs=require(\"fs\"),path=require(\"path\"),os=require(\"os\"),url=require(\"url\");const base=path.join(process.env.CODEX_HOME||path.join(os.homedir(),\".codex\"),\"plugins\",\"cache\");let best;for(const market of fs.readdirSync(base)){const dir=path.join(base,market,\"parley\");if(!fs.existsSync(dir))continue;for(const version of fs.readdirSync(dir)){const file=path.join(dir,version,\"parley.mjs\");try{if(JSON.parse(fs.readFileSync(path.join(dir,version,\"package.json\"),\"utf8\")).name!==\"parley-plugin\")continue;const at=fs.statSync(file).mtimeMs;if(!best||at>best.at)best={file,at};}catch{}}}if(!best){console.error(\"Parley: no installed parley plugin under \"+base);process.exit(1);}process.argv=[process.argv[0],best.file,...process.argv.slice(1)];import(url.pathToFileURL(best.file).href);",
+        "mcp",
+        "codex"
+      ],
+      "default_tools_approval_mode": "approve"
+    }
+  }
+}

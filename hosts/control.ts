@@ -14,11 +14,16 @@ import { join } from "node:path";
 import { getParleyDirPath } from "../broker/paths.ts";
 import { createMessageReader, writeMessage } from "../broker/framing.ts";
 
-export interface HookRequest { readonly event: string; readonly payload: Record<string, unknown> }
+export interface HookRequest {
+  readonly event: string;
+  readonly payload: Record<string, unknown>;
+  /** The session's names and scope, from the hook's environment. */
+  readonly hostEnv?: Readonly<Record<string, string>>;
+}
 /** What the hook prints for its host, if anything. */
 export interface HookResponse { readonly output?: Record<string, unknown> }
 
-interface ServerNote { readonly pid: number; readonly cwd: string; readonly startedAt: number; sessionId?: string }
+interface ServerNote { readonly pid: number; readonly cwd: string; readonly startedAt: number; sessionId?: string; released?: boolean }
 
 function hostsDir(env: NodeJS.ProcessEnv = process.env): string {
   return join(getParleyDirPath(env.PI_CODING_AGENT_DIR?.trim() || undefined), "hosts");
@@ -31,6 +36,8 @@ function parentDir(hostPid: number, env?: NodeJS.ProcessEnv): string {
 export interface ControlEndpoint {
   /** Record the host session this server serves, so hooks for it come here. */
   claim(sessionId: string): void;
+  /** Stop serving hooks for a session this server gave up. */
+  unclaim(): void;
   close(): void;
 }
 
@@ -57,9 +64,38 @@ export function serveControl(hostPid: number, cwd: string, handle: (request: Hoo
   server.unref();
   return {
     claim(sessionId) { if (note.sessionId !== sessionId) { note.sessionId = sessionId; writeNote(); } },
+    unclaim() { if (note.sessionId !== undefined) { delete note.sessionId; note.released = true; writeNote(); } },
     close() { server.close(); rmSync(socketPath, { force: true }); rmSync(notePath, { force: true }); },
   };
 }
+
+/** Ask the sibling server (same parent) that has claimed a session to give it up. */
+export async function askSiblingToRelease(hostPid: number, sessionId: string, timeoutMs = 5_000): Promise<HookResponse | undefined> {
+  const dir = parentDir(hostPid);
+  let sibling: ServerNote | undefined;
+  try {
+    for (const name of readdirSync(dir)) {
+      if (!name.endsWith(".json")) continue;
+      try {
+        const note = JSON.parse(readFileSync(join(dir, name), "utf8")) as ServerNote;
+        if (note.pid !== process.pid && note.sessionId === sessionId && alive(note.pid)) sibling = note;
+      } catch { /* being written */ }
+    }
+  } catch { return undefined; }
+  if (!sibling) return undefined;
+  return new Promise((resolve) => {
+    const socket = net.connect(join(dir, `${sibling!.pid}.sock`));
+    const done = (value?: HookResponse) => { clearTimeout(timer); socket.destroy(); resolve(value); };
+    const timer = setTimeout(() => done(), timeoutMs);
+    socket.on("connect", () => writeMessage(socket, { event: RELEASE_EVENT, payload: { session_id: sessionId } } satisfies HookRequest));
+    socket.on("data", createMessageReader((value) => done(value as HookResponse), () => done()));
+    socket.on("error", () => done());
+    socket.on("close", () => done());
+  });
+}
+
+/** Sent between sibling servers: "the host shows this session is mine; let it go." */
+export const RELEASE_EVENT = "parley:release";
 
 /** This process's ancestors, nearest first. */
 function ancestors(): number[] {
@@ -94,7 +130,8 @@ function chooseServer(dir: string, sessionId: string | undefined, cwd: string | 
     const claimed = notes.find((note) => note.sessionId === sessionId);
     if (claimed) return claimed;
   }
-  const unclaimed = notes.filter((note) => !note.sessionId).sort((a, b) => a.startedAt - b.startedAt);
+  // A server that gave its session up can't serve another.
+  const unclaimed = notes.filter((note) => !note.sessionId && !note.released).sort((a, b) => a.startedAt - b.startedAt);
   return unclaimed.find((note) => cwd && samePath(note.cwd, cwd)) ?? (notes.length === 1 ? notes[0] : unclaimed.length === 1 ? unclaimed[0] : undefined);
 }
 

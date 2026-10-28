@@ -6,8 +6,9 @@
 // idle agent; everything else is shared.
 import { basename, join } from "node:path";
 import { getAgentDirPath, getParleyDirPath } from "../broker/paths.ts";
-import { serveControl, takeEarlySessionId, type HookRequest, type HookResponse } from "./control.ts";
+import { askSiblingToRelease, RELEASE_EVENT, serveControl, takeEarlySessionId, type HookRequest, type HookResponse } from "./control.ts";
 import { createHostedSession, type Delivery } from "./hosted-session.ts";
+import { PASS_THROUGH_ENV } from "./connect.ts";
 import { serveMcp } from "./mcp.ts";
 
 export interface Host {
@@ -27,6 +28,11 @@ export interface Host {
   readonly capabilities?: Record<string, unknown>;
   /** Where the session lives, as a person would say it. */
   app(env: NodeJS.ProcessEnv): string;
+  /** Whether this server's parent serves many sessions (an app server). Its hooks then
+   * run with that server's environment, not the session's, so it names nothing. */
+  sharedParent?(): boolean;
+  /** The host session a tool call comes from, when the host says (Codex: _meta.threadId). */
+  sessionOfCall?(meta: Record<string, unknown> | undefined): string | undefined;
 }
 
 /** A Pi session that started this host passes its own Parley identity down;
@@ -73,8 +79,8 @@ export async function serveHost(host: Host): Promise<void> {
   const agentDir = getAgentDirPath(process.env);
   const session = await createHostedSession({
     cwd,
-    defaultName: defaultName(host, cwd, process.env),
-    app: host.app(process.env),
+    defaultName: () => defaultName(host, cwd, process.env),
+    app: () => host.app(process.env),
     stateFile: (id) => join(getParleyDirPath(agentDir), "hosts", host.id, `${id.replace(/[^A-Za-z0-9_.-]/g, "_")}.jsonl`),
     deliver,
   });
@@ -84,8 +90,24 @@ export async function serveHost(host: Host): Promise<void> {
     void session.begin(sessionId);
   };
 
-  const onHook = async ({ event, payload }: HookRequest): Promise<HookResponse> => {
+  let released = false;
+  const onHook = async ({ event, payload, hostEnv }: HookRequest): Promise<HookResponse> => {
     const hookSession = typeof payload.session_id === "string" && payload.session_id ? payload.session_id : undefined;
+    // A sibling server is the session's real one (the host's tool calls say so): step back,
+    // handing over what we were holding for it.
+    if (event === RELEASE_EVENT) {
+      if (!hookSession || hookSession !== sessionId || released) return {};
+      released = true;
+      control.unclaim();
+      const handed = pending.splice(0).map((delivery) => delivery.text);
+      if (session.started()) await session.stop().catch(() => {});
+      return { output: { released: true, pending: handed } };
+    }
+    if (released) return {};
+    // Before joining, take the session's names and scope from its hook, where ours came bare.
+    if (!session.started() && hostEnv && !sharedParent) {
+      for (const [key, value] of Object.entries(hostEnv)) if (PASS_THROUGH_ENV.includes(key as never) && !process.env[key]) process.env[key] = value;
+    }
     if (hookSession) {
       wakeTarget = hookSession;
       if (!session.started()) join_(hookSession);
@@ -97,10 +119,25 @@ export async function serveHost(host: Host): Promise<void> {
     if (output && event === "Stop") session.setBusy(true);
     return output ? { output } : {};
   };
+  const sharedParent = host.sharedParent?.() ?? false;
   const control = serveControl(hostPid, cwd, onHook);
   if (sessionId) join_(sessionId);
 
-  serveMcp(() => [{ ...session.tool, call: (args, signal) => session.call(args, signal) }], {
+  // The host's tool calls name their session exactly (Codex); a guess from an earlier hook may
+  // have given it to a sibling server, which then hands it over.
+  const callSession = async (meta: Record<string, unknown> | undefined) => {
+    const exact = host.sessionOfCall?.(meta);
+    if (!exact || released) return;
+    wakeTarget = exact;
+    if (session.started() && sessionId === exact) return;
+    if (session.started()) return; // serving another session already: leave it
+    const handed = await askSiblingToRelease(hostPid, exact);
+    for (const text of (handed?.output?.pending as string[] | undefined) ?? []) pending.push({ text, wake: false });
+    sessionId = exact;
+    control.claim(exact);
+    await session.begin(exact);
+  };
+  serveMcp(() => [{ ...session.tool, call: async (args, signal, meta) => { await callSession(meta); return session.call(args, signal); } }], {
     name: "parley",
     version: host.version,
     instructions: "Parley: conversations with other agent sessions (Pi, Oh My Pi, Claude Code, Codex), on this computer and linked ones. Use the parley tool to list, send, ask and reply.",

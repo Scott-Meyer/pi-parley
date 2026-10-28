@@ -24,10 +24,10 @@ export interface Delivery {
 export interface HostedSessionOptions {
   readonly cwd: string;
   readonly model?: string;
-  /** Used when the session has no name yet. */
-  readonly defaultName: string;
-  /** Where the session lives, for list rows ("Claude Desktop"). */
-  readonly app?: string;
+  /** Used when the session has no name yet; worked out when it joins. */
+  readonly defaultName: () => string;
+  /** Where the session lives, for list rows ("Claude Desktop"); worked out when it joins. */
+  readonly app?: () => string;
   /** Where a session's history lives (JSON lines), by its host session id. */
   readonly stateFile: (sessionId: string) => string;
   readonly deliver: (delivery: Delivery) => void;
@@ -74,7 +74,8 @@ export async function createHostedSession(options: HostedSessionOptions): Promis
     if (stateFile) appendFileSync(stateFile, `${JSON.stringify(entry)}\n`, { mode: 0o600 });
   };
 
-  let sessionName = options.defaultName;
+  let sessionName: string | undefined;
+  let app: string | undefined;
   let busy = false;
   const bus = new EventEmitter();
   const handlers = new Map<string, ((event: unknown, ctx: unknown) => unknown)[]>();
@@ -141,7 +142,7 @@ export async function createHostedSession(options: HostedSessionOptions): Promis
   }
 
   const { registerParleyExtension } = await import("../index.ts");
-  registerParleyExtension(pi as never, options.app ? { app: options.app } : {});
+  registerParleyExtension(pi as never, { resolveApp: () => app });
   const tool = tools.find((candidate) => candidate.name === "parley");
   if (!tool) throw new Error("Parley registered no parley tool");
 
@@ -155,7 +156,8 @@ export async function createHostedSession(options: HostedSessionOptions): Promis
       history = existsSync(stateFile)
         ? readFileSync(stateFile, "utf8").split("\n").filter(Boolean).flatMap((line) => { try { return [JSON.parse(line) as Entry]; } catch { return []; } })
         : [];
-      sessionName = [...history].reverse().find((entry): entry is Extract<Entry, { kind: "name" }> => entry.kind === "name")?.name ?? sessionName;
+      sessionName = [...history].reverse().find((entry): entry is Extract<Entry, { kind: "name" }> => entry.kind === "name")?.name ?? options.defaultName();
+      app = options.app?.();
       await emit("session_start", { type: "session_start", reason: history.length > 0 ? "resume" : "startup" });
     },
     started: () => sessionId !== undefined,

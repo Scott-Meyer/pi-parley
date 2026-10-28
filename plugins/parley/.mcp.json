@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "parley": {
+      "command": "node",
+      "args": [
+        "${CLAUDE_PLUGIN_ROOT}/parley.mjs",
+        "mcp",
+        "auto"
+      ]
+    }
+  }
+}

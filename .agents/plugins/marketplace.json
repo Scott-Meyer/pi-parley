@@ -1,0 +1,17 @@
+{
+  "name": "pi-parley",
+  "plugins": [
+    {
+      "name": "parley",
+      "source": {
+        "source": "local",
+        "path": "./plugins/parley"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    }
+  ]
+}

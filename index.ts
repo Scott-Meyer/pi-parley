@@ -68,12 +68,15 @@ export interface ParleyExtensionOptions {
    * "Codex in the ChatGPT app"). Shown on list rows; worked out from the
    * environment when not given ("Pi in FlightDeck", "Oh My Pi in herdr"). */
   readonly app?: string;
+  /** Like `app`, asked each time the session registers; undefined falls back to `app`. */
+  readonly resolveApp?: () => string | undefined;
 }
 
 interface ParleyExtensionConfiguration {
   resolvePresenceName?: ParleyExtensionOptions["resolvePresenceName"];
   presenceNameResolutionStarted: boolean;
   app?: string;
+  resolveApp?: () => string | undefined;
 }
 
 /** Where a session runs: the terminal-like place it lives in, if any. */
@@ -82,6 +85,11 @@ export function sessionPlace(env: NodeJS.ProcessEnv = process.env): string | und
   if (env.HERDR_ENV === "1") return "herdr";
   if (env.TMUX_PANE?.trim()) return "tmux";
   return undefined;
+}
+
+function appLabel(value: string | undefined): string | undefined {
+  const label = value?.trim();
+  return label && label.length <= 64 ? label : undefined;
 }
 
 function detectApp(env: NodeJS.ProcessEnv = process.env): string {
@@ -811,9 +819,13 @@ function normalizeParleyExtensionOptions(options: ParleyExtensionOptions | undef
   if (options.app !== undefined && (typeof options.app !== "string" || !options.app.trim() || options.app.length > 64)) {
     throw new TypeError("app must be a short label (1-64 characters)");
   }
+  if (options.resolveApp !== undefined && typeof options.resolveApp !== "function") {
+    throw new TypeError("resolveApp must be a function");
+  }
   return Object.freeze({
     ...(options.resolvePresenceName ? { resolvePresenceName: options.resolvePresenceName } : {}),
     ...(options.app ? { app: options.app.trim() } : {}),
+    ...(options.resolveApp ? { resolveApp: options.resolveApp } : {}),
   });
 }
 
@@ -822,6 +834,7 @@ function configureParleyExtension(
   options: ParleyExtensionOptions,
 ): void {
   if (options.app) configuration.app = options.app;
+  if (options.resolveApp) configuration.resolveApp = options.resolveApp;
   const resolver = options.resolvePresenceName;
   if (!resolver || resolver === configuration.resolvePresenceName) return;
   if (configuration.resolvePresenceName) {
@@ -1622,7 +1635,7 @@ function installParleyExtension(
       lastActivity: Date.now(),
       status: currentStatus(),
       ...(tmuxPane ? { tmuxPane } : {}),
-      app: configuration.app ?? detectApp(),
+      app: appLabel(configuration.resolveApp?.()) ?? configuration.app ?? detectApp(),
       ...(localExtensions.size > 0
         ? {
             extensions: currentExtensionCapabilities(),

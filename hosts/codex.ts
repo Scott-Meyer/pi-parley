@@ -29,6 +29,9 @@ export function codexHost(env: NodeJS.ProcessEnv = process.env, version = "0"): 
         return false;
       }
     },
+    sharedParent: () => /\bapp-server\b/.test(parentCommand()),
+    // Codex puts the thread in every tool call's _meta.
+    sessionOfCall: (meta) => typeof meta?.threadId === "string" && meta.threadId ? meta.threadId : undefined,
     app: (current) => startedByChatGptApp() ? "Codex in the ChatGPT app"
       : sessionPlace(current) ? `Codex in ${sessionPlace(current)}` : "Codex",
     hookOutput: (event, text) => event === "Stop"
@@ -48,11 +51,15 @@ function resumedThread(): string | undefined {
   }
 }
 
+function parentCommand(): string {
+  try {
+    return execFileSync("ps", ["-o", "command=", "-p", String(process.ppid)], { encoding: "utf8", timeout: 2_000 });
+  } catch {
+    return "";
+  }
+}
+
 /** The ChatGPT app runs Codex sessions through its own bundled app server. */
 function startedByChatGptApp(): boolean {
-  try {
-    return /ChatGPT\.app\//.test(execFileSync("ps", ["-o", "command=", "-p", String(process.ppid)], { encoding: "utf8", timeout: 2_000 }));
-  } catch {
-    return false;
-  }
+  return /ChatGPT\.app\//.test(parentCommand());
 }
