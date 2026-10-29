@@ -32,6 +32,9 @@ export interface Delivery {
    * federation) and `message.id`, `message.replyTo`, `message.expectsReply`. The rest is
    * informational and may change. */
   readonly details?: unknown;
+  /** For a person: the colleague's words without the model's metadata, and a preview of
+   * the message they answer. Messages and withdrawals have it; other notices don't. */
+  readonly display?: { readonly text: string; readonly inReplyTo?: string };
 }
 
 /** Whether the host put a delivery in front of its agent. Until it does, Parley treats the
@@ -121,6 +124,12 @@ function deliveryKey(message: SentMessage): string | undefined {
   return undefined;
 }
 
+function displayOf(details: unknown): { text: string; inReplyTo?: string } | undefined {
+  const display = (details as { display?: { text?: unknown; inReplyTo?: unknown } } | undefined)?.display;
+  if (!display || typeof display.text !== "string") return undefined;
+  return { text: display.text, ...(typeof display.inReplyTo === "string" ? { inReplyTo: display.inReplyTo } : {}) };
+}
+
 const RETRY_FIRST_MS = 1_000;
 const RETRY_MAX_MS = 30_000;
 
@@ -176,6 +185,7 @@ export async function createHostedSession(options: HostedSessionOptions): Promis
       ...(delivery?.deliverAs === "steer" || delivery?.deliverAs === "followUp" ? { during: delivery.deliverAs } : {}),
       customType: message.customType ?? "parley",
       ...(message.details !== undefined ? { details: message.details } : {}),
+      ...(displayOf(message.details) ? { display: displayOf(message.details)! } : {}),
     });
     if (outcome && typeof (outcome as Promise<DeliveryOutcome>).then === "function") {
       // Parley confirms it on its next check once accepted, and tries again after a refusal.
@@ -247,6 +257,8 @@ export async function createHostedSession(options: HostedSessionOptions): Promis
   registerParleyExtension(pi as never, {
     resolveApp: () => app,
     identity: "session",
+    // Hosts take deliveries straight into the conversation; context(), if called, adds nothing.
+    answerOnDelivery: true,
     ...(options.env ? { env: options.env } : {}),
     ...(options.publishSessionEnv === false ? { publishSessionEnv: false } : {}),
   });

@@ -30,7 +30,7 @@ function nodeCommand(execPath = process.execPath) {
 var bundledBuild;
 var init_bundle = __esm({
   "broker/bundle.ts"() {
-    bundledBuild = true ? JSON.parse('{"packageVersion":"1.7.1","sourceId":"b30cfa0c353152475ac292f4650165624cc16e8b04bd2cbd18bf1606bc0192fc"}') : void 0;
+    bundledBuild = true ? JSON.parse('{"packageVersion":"1.7.1","sourceId":"8579f4af8967022cca09dbb129a576c540db27228395123af35974bf2254c3d0"}') : void 0;
   }
 });
 
@@ -16069,7 +16069,8 @@ function normalizeParleyExtensionOptions(options2) {
     ...options2.resolveApp ? { resolveApp: options2.resolveApp } : {},
     ...options2.env ? { env: Object.freeze({ ...options2.env }) } : {},
     ...options2.publishSessionEnv === false ? { publishSessionEnv: false } : {},
-    ...options2.identity ? { identity: options2.identity } : {}
+    ...options2.identity ? { identity: options2.identity } : {},
+    ...options2.answerOnDelivery ? { answerOnDelivery: true } : {}
   });
 }
 function configureParleyExtension(configuration, options2) {
@@ -16078,6 +16079,7 @@ function configureParleyExtension(configuration, options2) {
   if (options2.env) configuration.env = options2.env;
   if (options2.publishSessionEnv === false) configuration.publishSessionEnv = false;
   if (options2.identity) configuration.identity = options2.identity;
+  if (options2.answerOnDelivery) configuration.answerOnDelivery = true;
   const resolver = options2.resolvePresenceName;
   if (!resolver || resolver === configuration.resolvePresenceName) return;
   if (configuration.resolvePresenceName) {
@@ -16403,7 +16405,12 @@ The earlier message is no longer the current request; prior work is not undone.`
     const entry = deferredInboundControls.get(key);
     const ctx = getLiveContext();
     if (!entry || !ctx) return;
-    const envelope = { customType: "parley_message_control", content: entry.content, display: true, details: { from: entry.from, control: entry.control, receivedAt: entry.receivedAt, [PRESENTED_MARK]: true }, timestamp: entry.receivedAt };
+    const original = replyTracker.getMessage(entry.control.messageId);
+    const display = {
+      text: entry.control.action === "cancel" ? "Withdrew an earlier message; it no longer asks for this work." : "Replaced an earlier message with a newer one.",
+      ...original ? { inReplyTo: previewText(original.message.content.text, 240) } : {}
+    };
+    const envelope = { customType: "parley_message_control", content: entry.content, display: true, details: { from: entry.from, control: entry.control, receivedAt: entry.receivedAt, display, [PRESENTED_MARK]: true }, timestamp: entry.receivedAt };
     pendingHostEnvelopes.set(`control:${key}`, envelope);
     try {
       pi.sendMessage(envelope, ctx.isIdle() ? { triggerTurn: true } : { deliverAs: "steer" });
@@ -16456,6 +16463,10 @@ The earlier message is no longer the current request; prior work is not undone.`
         contextFallbackEnvelopes.delete(key);
         confirmInboundEnvelope(key);
       }
+    }
+    if (configuration.answerOnDelivery && freshModelContexts.size > 0) {
+      replyTracker.activateContexts([...freshModelContexts.values()]);
+      freshModelContexts.clear();
     }
   }
   function inboundEnvelopeKey(value) {
@@ -17301,8 +17312,9 @@ Remote origin: ${references.current.originRef(entry.from.federation)}; scope ${e
     const requestedAsk = injectedMessage.replyTo ? outstandingAsks.get(injectedMessage.replyTo) : void 0;
     const isRequestedAnswer = requestedAsk !== void 0 && matchesAskCounterpart(requestedAsk, entry.from) && injectedMessage.completesAsk !== false && !injectedMessage.expectsReply;
     const outgoing = requestedAsk ?? (injectedMessage.replyTo ? findOutgoingTopic(injectedMessage.replyTo) : void 0);
-    const topic = outgoing && outgoing.to === entry.from.id ? `
-Reply to your message: ${JSON.stringify(previewText(outgoing.message?.text ?? outgoing.preview, 240))}` : "";
+    const quoted = outgoing && outgoing.to === entry.from.id ? previewText(outgoing.message?.text ?? outgoing.preview, 240) : void 0;
+    const topic = quoted !== void 0 ? `
+Reply to your message: ${JSON.stringify(quoted)}` : "";
     const elapsed = injectedMessage.replyDeadline !== void 0 && injectedMessage.replyDeadline < Date.now();
     const waiting = injectedMessage.senderWaitMode === "blocking" ? " \xB7 blocking ask" : injectedMessage.senderWaitMode === "nonblocking" ? " \xB7 async ask" : "";
     const request = injectedMessage.expectsReply ? `
@@ -17312,6 +17324,7 @@ Reply requested${waiting}.${elapsed ? " The original wait window has elapsed." :
 ${describeCompaction(senderDisplay, injectedMessage.peerCompaction, entry.from.id)}` : "";
     const body = entry.bodyText ?? injectedMessage.content.text + (injectedMessage.content.attachments?.length ? formatAttachments(injectedMessage.content.attachments) : "");
     return {
+      display: { text: body, ...quoted !== void 0 ? { inReplyTo: quoted } : {} },
       content: presentForModel(`**From ${senderDisplay}**${focus}${request}${verbatim(topic)}
 
 ${verbatim(body)}
@@ -17325,12 +17338,12 @@ Session: ${entry.from.cwd}${origin}${compactionNotice}`),
   function sendIncomingMessage(entry, delivery, generation = runtimeGeneration, forceTrigger = false) {
     if (runtimeStarted && !getLiveContext(runtimeContext, generation)) return;
     const injectedMessage = { ...entry.message, injectedAt: Date.now() };
-    const { content, topic, isRequestedAnswer } = formatInboundEnvelope(entry, injectedMessage);
+    const { content, topic, isRequestedAnswer, display } = formatInboundEnvelope(entry, injectedMessage);
     const envelope = {
       customType: "parley_message",
       content,
       display: true,
-      details: { ...entry, message: injectedMessage, replyTopic: topic, [PRESENTED_MARK]: true },
+      details: { ...entry, message: injectedMessage, replyTopic: topic, display, [PRESENTED_MARK]: true },
       timestamp: entry.message.receiverReceivedAt ?? entry.message.timestamp
     };
     deferredInboundMessages.set(entry.message.id, entry);
@@ -20370,6 +20383,11 @@ function deliveryKey(message) {
   if (message.customType === "parley_message_control" && details?.control?.messageId) return `control:${details.control.messageId}:${details.control.action ?? ""}`;
   return void 0;
 }
+function displayOf(details) {
+  const display = details?.display;
+  if (!display || typeof display.text !== "string") return void 0;
+  return { text: display.text, ...typeof display.inReplyTo === "string" ? { inReplyTo: display.inReplyTo } : {} };
+}
 async function createHostedSession(options2) {
   let sessionId;
   let stateFile;
@@ -20418,7 +20436,8 @@ async function createHostedSession(options2) {
       wake: delivery?.triggerTurn === true,
       ...delivery?.deliverAs === "steer" || delivery?.deliverAs === "followUp" ? { during: delivery.deliverAs } : {},
       customType: message.customType ?? "parley",
-      ...message.details !== void 0 ? { details: message.details } : {}
+      ...message.details !== void 0 ? { details: message.details } : {},
+      ...displayOf(message.details) ? { display: displayOf(message.details) } : {}
     });
     if (outcome && typeof outcome.then === "function") {
       if (key) deciding.add(key);
@@ -20503,6 +20522,8 @@ async function createHostedSession(options2) {
   registerParleyExtension(pi, {
     resolveApp: () => app,
     identity: "session",
+    // Hosts take deliveries straight into the conversation; context(), if called, adds nothing.
+    answerOnDelivery: true,
     ...options2.env ? { env: options2.env } : {},
     ...options2.publishSessionEnv === false ? { publishSessionEnv: false } : {}
   });

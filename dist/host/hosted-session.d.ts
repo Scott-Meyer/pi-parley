@@ -12,6 +12,12 @@ export interface Delivery {
      * federation) and `message.id`, `message.replyTo`, `message.expectsReply`. The rest is
      * informational and may change. */
     readonly details?: unknown;
+    /** For a person: the colleague's words without the model's metadata, and a preview of
+     * the message they answer. Messages and withdrawals have it; other notices don't. */
+    readonly display?: {
+        readonly text: string;
+        readonly inReplyTo?: string;
+    };
 }
 /** Whether the host put a delivery in front of its agent. Until it does, Parley treats the
  * message as not yet shown: the sender hears it's queued, and Parley tries again. */

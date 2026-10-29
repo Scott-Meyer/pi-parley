@@ -79,6 +79,15 @@ export interface ParleyExtensionOptions {
   /** "session": the session's own id is its Parley identity, never PI_PARLEY_STABLE_ID or a
    * configured stableId, which would give every session in the process one identity. */
   readonly identity?: "configured" | "session";
+  /** true: a delivery the host has taken is what the model is answering, for hosts that put
+   * deliveries straight into the conversation rather than through Pi's context event. */
+  readonly answerOnDelivery?: boolean;
+}
+
+/** What an incoming delivery says, for a person: the colleague's words, and the message they answer. */
+export interface InboundDisplay {
+  readonly text: string;
+  readonly inReplyTo?: string;
 }
 
 interface ParleyExtensionConfiguration {
@@ -89,6 +98,7 @@ interface ParleyExtensionConfiguration {
   env?: Readonly<Record<string, string | undefined>>;
   publishSessionEnv?: boolean;
   identity?: "configured" | "session";
+  answerOnDelivery?: boolean;
 }
 
 /** Where a session runs: the terminal-like place it lives in, if any. */
@@ -848,6 +858,7 @@ function normalizeParleyExtensionOptions(options: ParleyExtensionOptions | undef
     ...(options.env ? { env: Object.freeze({ ...options.env }) } : {}),
     ...(options.publishSessionEnv === false ? { publishSessionEnv: false } : {}),
     ...(options.identity ? { identity: options.identity } : {}),
+    ...(options.answerOnDelivery ? { answerOnDelivery: true } : {}),
   });
 }
 
@@ -860,6 +871,7 @@ function configureParleyExtension(
   if (options.env) configuration.env = options.env;
   if (options.publishSessionEnv === false) configuration.publishSessionEnv = false;
   if (options.identity) configuration.identity = options.identity;
+  if (options.answerOnDelivery) configuration.answerOnDelivery = true;
   const resolver = options.resolvePresenceName;
   if (!resolver || resolver === configuration.resolvePresenceName) return;
   if (configuration.resolvePresenceName) {
@@ -1254,7 +1266,12 @@ function installParleyExtension(
     const entry = deferredInboundControls.get(key);
     const ctx = getLiveContext();
     if (!entry || !ctx) return;
-    const envelope = { customType: "parley_message_control", content: entry.content, display: true, details: { from: entry.from, control: entry.control, receivedAt: entry.receivedAt, [PRESENTED_MARK]: true }, timestamp: entry.receivedAt };
+    const original = replyTracker.getMessage(entry.control.messageId);
+    const display: InboundDisplay = {
+      text: entry.control.action === "cancel" ? "Withdrew an earlier message; it no longer asks for this work." : "Replaced an earlier message with a newer one.",
+      ...(original ? { inReplyTo: previewText(original.message.content.text, 240) } : {}),
+    };
+    const envelope = { customType: "parley_message_control", content: entry.content, display: true, details: { from: entry.from, control: entry.control, receivedAt: entry.receivedAt, display, [PRESENTED_MARK]: true }, timestamp: entry.receivedAt };
     pendingHostEnvelopes.set(`control:${key}`, envelope);
     try {
       pi.sendMessage(envelope, ctx.isIdle() ? { triggerTurn: true } : { deliverAs: "steer" });
@@ -1322,6 +1339,12 @@ function installParleyExtension(
         contextFallbackEnvelopes.delete(key);
         confirmInboundEnvelope(key);
       }
+    }
+    // A host without a model-boundary hook: what it has taken is in front of its model now,
+    // so a bare reply answers it. A context hook, if the host has one too, finds nothing left.
+    if (configuration.answerOnDelivery && freshModelContexts.size > 0) {
+      replyTracker.activateContexts([...freshModelContexts.values()]);
+      freshModelContexts.clear();
     }
   }
 
@@ -2268,7 +2291,7 @@ function installParleyExtension(
    * The model-facing text of an incoming message, built from its typed record: readable metadata
    * around the colleague's words, which stay verbatim. Live delivery and legacy replay share it.
    */
-  function formatInboundEnvelope(entry: InboundMessageEntry, injectedMessage: Message): { content: string; topic: string; isRequestedAnswer: boolean } {
+  function formatInboundEnvelope(entry: InboundMessageEntry, injectedMessage: Message): { content: string; topic: string; isRequestedAnswer: boolean; display: InboundDisplay } {
     references.current.learnFrom({ from: entry.from, message: injectedMessage });
     const senderDisplay = references.current.sessionRef(entry.from);
     const focus = entry.from.description ? ` — ${entry.from.description}` : "";
@@ -2279,9 +2302,8 @@ function installParleyExtension(
     const isRequestedAnswer = requestedAsk !== undefined && matchesAskCounterpart(requestedAsk, entry.from)
       && injectedMessage.completesAsk !== false && !injectedMessage.expectsReply;
     const outgoing = requestedAsk ?? (injectedMessage.replyTo ? findOutgoingTopic(injectedMessage.replyTo) : undefined);
-    const topic = outgoing && outgoing.to === entry.from.id
-      ? `\nReply to your message: ${JSON.stringify(previewText(outgoing.message?.text ?? outgoing.preview, 240))}`
-      : "";
+    const quoted = outgoing && outgoing.to === entry.from.id ? previewText(outgoing.message?.text ?? outgoing.preview, 240) : undefined;
+    const topic = quoted !== undefined ? `\nReply to your message: ${JSON.stringify(quoted)}` : "";
     const elapsed = injectedMessage.replyDeadline !== undefined && injectedMessage.replyDeadline < Date.now();
     const waiting = injectedMessage.senderWaitMode === "blocking" ? " · blocking ask"
       : injectedMessage.senderWaitMode === "nonblocking" ? " · async ask" : "";
@@ -2293,6 +2315,7 @@ function installParleyExtension(
       : "";
     const body = entry.bodyText ?? injectedMessage.content.text + (injectedMessage.content.attachments?.length ? formatAttachments(injectedMessage.content.attachments) : "");
     return {
+      display: { text: body, ...(quoted !== undefined ? { inReplyTo: quoted } : {}) },
       content: presentForModel(`**From ${senderDisplay}**${focus}${request}${verbatim(topic)}\n\n${verbatim(body)}\n\n${formatInboundDeliveryMetadata(injectedMessage, messageRef)}\nSession: ${entry.from.cwd}${origin}${compactionNotice}`),
       topic,
       isRequestedAnswer,
@@ -2301,12 +2324,12 @@ function installParleyExtension(
   function sendIncomingMessage(entry: InboundMessageEntry, delivery: "trigger" | "steer", generation = runtimeGeneration, forceTrigger = false): void {
     if (runtimeStarted && !getLiveContext(runtimeContext, generation)) return;
     const injectedMessage = { ...entry.message, injectedAt: Date.now() };
-    const { content, topic, isRequestedAnswer } = formatInboundEnvelope(entry, injectedMessage);
+    const { content, topic, isRequestedAnswer, display } = formatInboundEnvelope(entry, injectedMessage);
     const envelope = {
       customType: "parley_message",
       content,
       display: true,
-      details: { ...entry, message: injectedMessage, replyTopic: topic, [PRESENTED_MARK]: true },
+      details: { ...entry, message: injectedMessage, replyTopic: topic, display, [PRESENTED_MARK]: true },
       timestamp: entry.message.receiverReceivedAt ?? entry.message.timestamp,
     };
     deferredInboundMessages.set(entry.message.id, entry);

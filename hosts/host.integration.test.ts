@@ -230,3 +230,51 @@ if (process.argv.includes("--parley-broker")) {
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+test("with several asks open, a bare reply answers the one the host most recently took, without context()", { timeout: 60_000, skip: process.platform === "win32" }, async () => {
+  const { host, listed, inbox, cleanup } = app();
+  try {
+    const alpha = await host("alpha", { env: {} });
+    const gamma = await host("gamma", { env: {} });
+    const beta = await host("beta", { env: {} });
+    for (const [session, id] of [[alpha, "alpha-session"], [gamma, "gamma-session"], [beta, "beta-session"]] as const) await session.begin(id);
+    await eventually(async () => rows(await listed(beta), "alpha") === 1 && rows(await listed(beta), "gamma") === 1, "beta sees both");
+
+    // Beta takes alpha's question in one turn...
+    await alpha.call({ action: "ask", to: "beta", message: "alpha's question", blocking: false });
+    await eventually(() => inbox("beta").some((delivery) => /alpha's question/.test(delivery.text)), "beta takes alpha's question");
+    beta.setBusy(true); beta.setBusy(false);
+    // ...and gamma's in the next, and answers without saying which.
+    await gamma.call({ action: "ask", to: "beta", message: "gamma's question", blocking: false });
+    await eventually(() => inbox("beta").some((delivery) => /gamma's question/.test(delivery.text)), "beta takes gamma's question");
+    beta.setBusy(true);
+    const reply = await beta.call({ action: "reply", message: "answering the latest" });
+    assert.equal(reply.isError, false, reply.text);
+    await eventually(() => inbox("gamma").some((delivery) => /answering the latest/.test(delivery.text)), "gamma gets the answer");
+    assert.equal(inbox("alpha").some((delivery) => /answering the latest/.test(delivery.text)), false, "not alpha");
+  } finally {
+    await cleanup();
+  }
+});
+
+test("a delivery carries what to show a person: the colleague's words, and the message they answer", { timeout: 60_000, skip: process.platform === "win32" }, async () => {
+  const { host, listed, inbox, cleanup } = app();
+  try {
+    const alpha = await host("alpha", { env: {} });
+    const beta = await host("beta", { env: {} });
+    await alpha.begin("alpha-session");
+    await beta.begin("beta-session");
+    await eventually(async () => rows(await listed(alpha), "beta") === 1, "alpha sees beta");
+    await alpha.call({ action: "ask", to: "beta", message: "Which port does the dev server use?", blocking: false });
+    await eventually(() => inbox("beta").length > 0, "beta gets the ask");
+    const asked = inbox("beta")[0]!;
+    assert.equal(asked.display?.text, "Which port does the dev server use?");
+    assert.match(asked.text, /\*\*From alpha\*\*/, "the model still gets the full envelope");
+    await beta.call({ action: "reply", message: "8043" });
+    await eventually(() => inbox("alpha").some((delivery) => delivery.display?.text === "8043"), "alpha gets the answer");
+    const answer = inbox("alpha").find((delivery) => delivery.display?.text === "8043")!;
+    assert.equal(answer.display?.inReplyTo, "Which port does the dev server use?");
+  } finally {
+    await cleanup();
+  }
+});
