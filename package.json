@@ -28,8 +28,14 @@
       "import": "./dist/federation.js",
       "default": "./dist/federation.js"
     },
-    "./host": "./hosts/host.ts",
-    "./host/bundle-define": "./hosts/bundle-define.mjs",
+    "./host": {
+      "types": "./dist/host/host.d.ts",
+      "default": "./hosts/host.ts"
+    },
+    "./host/bundle-define": {
+      "types": "./hosts/bundle-define.d.mts",
+      "default": "./hosts/bundle-define.mjs"
+    },
     "./package.json": "./package.json",
     "./*": "./*"
   },
@@ -88,6 +94,7 @@
     "hosts/serve.ts",
     "hosts/host.ts",
     "hosts/bundle-define.mjs",
+    "hosts/bundle-define.d.mts",
     "link/client.ts",
     "link/completions.ts",
     "link/discover.ts",

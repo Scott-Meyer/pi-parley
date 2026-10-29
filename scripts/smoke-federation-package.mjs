@@ -83,6 +83,27 @@ try {
     "--typeRoots", join(repo, "node_modules", "@types"), "consumer.ts",
   ], { cwd: consumer });
 
+  // pi-parley/host is bundled from source, but an application's type checking stops at its
+  // declarations, whatever stricter options the application uses.
+  writeFileSync(join(consumer, "host-consumer.ts"), `
+    import { configureParleyHost, createHostedSession, runBroker, type Delivery, type DeliveryOutcome, type HostedSession } from "pi-parley/host";
+    import { parleyBundleDefine } from "pi-parley/host/bundle-define";
+    configureParleyHost({ brokerLauncher: { command: process.execPath, args: ["app.mjs", "--parley-broker"] }, startupLock: false });
+    const deliver = (delivery: Delivery): DeliveryOutcome => delivery.wake ? { accepted: true } : { accepted: false, reason: "paused" };
+    const start = async (): Promise<HostedSession> => createHostedSession({ cwd: "/", defaultName: () => "app", stateFile: (id) => id, deliver, env: {}, publishSessionEnv: false });
+    const define: { readonly PARLEY_BUNDLE: string } = parleyBundleDefine();
+    void start; void runBroker; void define;
+  `);
+  const hostTypes = run(process.execPath, [
+    join(repo, "node_modules", "typescript", "bin", "tsc"),
+    "--noEmit", "--module", "NodeNext", "--moduleResolution", "NodeNext",
+    "--target", "ES2022", "--strict", "--noUncheckedIndexedAccess", "--types", "node",
+    "--typeRoots", join(repo, "node_modules", "@types"), "--listFiles", "host-consumer.ts",
+  ], { cwd: consumer });
+  const parleySources = hostTypes.stdout.split("\n").filter((file) => file.includes("node_modules/pi-parley/") && /\.ts$/.test(file) && !/\.d\.m?ts$/.test(file));
+  assert.deepEqual(parleySources, [], "type checking pi-parley/host reads only its declarations");
+  console.log("✓ packed pi-parley/host type-checks from its declarations under stricter options");
+
   const runtimeCheck = `
     import assert from "node:assert/strict";
     import { Duplex } from "node:stream";

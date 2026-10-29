@@ -1,4 +1,4 @@
-import { existsSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { dirname, extname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
@@ -46,4 +46,28 @@ for (const file of emittedFiles.filter((path) => path.endsWith(".js") || path.en
       throw new Error(`${file} references missing compiled module ${specifier}`);
     }
   }
+}
+
+// pi-parley/host ships as TypeScript source, which applications bundle; its types are
+// declared here too, so an application's own type checking stops at Parley's boundary.
+// The public types live in four files that import only each other.
+{
+  const tmp = join(dist, ".host-types");
+  const emitted = spawnSync(process.execPath, [tsc, "--declaration", "--emitDeclarationOnly", "--outDir", tmp,
+    "--module", "nodenext", "--moduleResolution", "nodenext", "--target", "es2022", "--strict", "--skipLibCheck",
+    "--allowImportingTsExtensions", "--types", "node", join(repo, "hosts", "host.ts")], { cwd: repo, stdio: "inherit" });
+  if (emitted.status !== 0) process.exit(emitted.status ?? 1);
+  const surface = { "hosts/host": "host", "hosts/hosted-session": "hosted-session", "broker/host-process": "host-process", "broker/runtime": "runtime" };
+  const out = join(dist, "host");
+  mkdirSync(out, { recursive: true });
+  for (const [source, name] of Object.entries(surface)) {
+    let text = readFileSync(join(tmp, `${source}.d.ts`), "utf8");
+    text = text.replace(/(\bfrom\s*["'])([^"']+)(["'])/g, (whole, open, specifier, close) => {
+      const target = Object.entries(surface).find(([path]) => resolve(repo, dirname(source), specifier).replace(/\.ts$/, "") === join(repo, path));
+      if (!target) throw new Error(`pi-parley/host's declarations reach outside their surface: ${source} imports ${specifier}`);
+      return `${open}./${target[1]}.js${close}`;
+    });
+    writeFileSync(join(out, `${name}.d.ts`), text);
+  }
+  rmSync(tmp, { recursive: true, force: true });
 }
