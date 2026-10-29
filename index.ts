@@ -109,6 +109,11 @@ export function sessionPlace(env: NodeJS.ProcessEnv = process.env): string | und
   return undefined;
 }
 
+/** A broadcast group: a pattern over references or app labels where * matches anything, case aside. */
+function referencePattern(pattern: string): RegExp {
+  const parts = pattern.trim().split("*").map((part) => part.replace(/[.+?^${}()|[\]\\]/g, "\\$&"));
+  return new RegExp(`^${parts.join(".*")}$`, "i");
+}
 function appLabel(value: string | undefined): string | undefined {
   const label = value?.trim();
   return label && label.length <= 64 ? label : undefined;
@@ -4146,7 +4151,7 @@ function installParleyExtension(
 • pending / read: Unanswered questions, or a retained message's full content.
 • status: Connection state and outstanding questions.
 • cancel: Removes offline mail or communicates withdrawal; work already done is unchanged.
-• broadcast: Independent messages to visible local peers, not remote peers.
+• broadcast: Independent messages to a group: every visible session on this computer, or the sessions 'to' (a reference pattern), cwd or app pick out, on any computer.
 • rename: Changes this session's name.
 • label: Gives a message a local name, like review or notes, usable wherever a message reference is.
 • link: Links this computer with others over SSH, so their sessions appear here. host adds one, as you'd give it to ssh, and links it now; recheck checks again (host, or everything); discover: true links computers this one has ssh connections to automatically. With none of these, shows the links.
@@ -4176,7 +4181,7 @@ Sessions and messages are named the way people would name them: a session by its
         description: "Optional self-profile update.",
       })),
       to: Type.Optional(Type.String({
-        description: "One session, by the reference shown in list, receipts, or messages. For send/ask with cwd, omit to target the sole live session in that cwd or the newly opened project-pane session. For 'reply', narrows which sender you are answering.",
+        description: "One session, by the reference shown in list, receipts, or messages. For send/ask with cwd, omit to target the sole live session in that cwd or the newly opened project-pane session. For 'reply', narrows which sender you are answering. For 'broadcast', a pattern over references, where * matches anything: flightdeck:* (that workspace here), build-vm:* (everyone on that computer), * (everyone visible, every computer).",
       })),
       targets: Type.Optional(Type.Array(Type.String(), {
         maxItems: MAX_EXPLICIT_SEND_TARGETS,
@@ -4207,7 +4212,10 @@ Sessions and messages are named the way people would name them: a session by its
         description: "Reference of an earlier send/ask this is a user-authored retry of. A retry is always a new message with its own reference.",
       })),
       cwd: Type.Optional(Type.String({
-        description: "Working directory filter for 'list-cwd'. For send/ask, scopes target lookup to that directory; omit 'to' to target the sole live peer there. Absolute, or relative to the current session's cwd; '.' means the current cwd.",
+        description: "Working directory filter for 'list-cwd'. For send/ask, scopes target lookup to that directory; omit 'to' to target the sole live peer there. For 'broadcast', only sessions in that directory. Absolute, or relative to the current session's cwd; '.' means the current cwd.",
+      })),
+      app: Type.Optional(Type.String({
+        description: "For 'broadcast', only sessions living in matching apps, a pattern over the app shown in list where * matches anything: Pi*, Claude*, Codex*.",
       })),
       blocking: Type.Optional(Type.Boolean({
         description: "For 'ask', true waits for the answer in this tool call (default); false returns immediately and delivers the answer as an incoming message.",
@@ -4378,6 +4386,7 @@ Sessions and messages are named the way people would name them: a session by its
         focus,
         blocking,
         name,
+        app,
       } = params;
       // Some tool-schema adapters materialize optional arrays as [""]. Treat
       // an all-blank placeholder as omitted while preserving errors for mixed
@@ -4568,9 +4577,9 @@ Sessions and messages are named the way people would name them: a session by its
               details: { error: true },
             };
           }
-          if (to || targets || cwd || openProjectPaneIfMissing) {
+          if (targets || openProjectPaneIfMissing) {
             return {
-              content: [{ type: "text", text: "broadcast does not accept 'to', 'targets', 'cwd', or openProjectPaneIfMissing; it uses the current visible live-session roster." }],
+              content: [{ type: "text", text: "broadcast picks its recipients from the live roster with 'to' (a reference pattern), 'cwd' and 'app'; it doesn't take 'targets' or openProjectPaneIfMissing. Use send with targets for a list of chosen sessions." }],
               details: { error: true },
             };
           }
@@ -4584,8 +4593,21 @@ Sessions and messages are named the way people would name them: a session by its
             const sessions = await connectedClient.listSessions();
             const currentSessionId = connectedClient.sessionId;
             const refs = rosterReferences(sessions);
-            const recipients: BatchDeliveryTarget[] = sessions
-              .filter((session) => session.id !== currentSessionId && !session.federation)
+            // Without a group, everyone visible here; a group names its own reach, other computers included.
+            const grouped = Boolean(to?.trim() || cwd?.trim() || app?.trim());
+            const inCwd = cwd?.trim() ? (cwd.trim() === "." ? ctx.cwd : resolvePath(ctx.cwd, cwd.trim())) : undefined;
+            const picked = sessions.filter((session) => session.id !== currentSessionId
+              && (grouped || !session.federation)
+              && (!to?.trim() || referencePattern(to).test(refs.get(session.id) ?? ""))
+              && (!inCwd || sameCwd(session.cwd, inCwd))
+              && (!app?.trim() || referencePattern(app).test(session.app ?? "")));
+            if (grouped && picked.length === 0) {
+              return {
+                content: [{ type: "text", text: `No other live session matches ${[to?.trim() && `to ${JSON.stringify(to.trim())}`, inCwd && `cwd ${inCwd}`, app?.trim() && `app ${JSON.stringify(app.trim())}`].filter(Boolean).join(", ")}; nothing was broadcast. parley list shows the references and apps to match.` }],
+                details: { error: true, broadcast: true, recipientCount: 0 },
+              };
+            }
+            const recipients: BatchDeliveryTarget[] = picked
               .sort((left, right) => left.id.localeCompare(right.id))
               .map((session) => ({
                 requested: session.id,
@@ -4616,7 +4638,11 @@ Sessions and messages are named the way people would name them: a session by its
               message,
               attachments,
               batchId,
-              broadcast: true,
+              // Federation carries independent direct messages only; a group reaching other
+              // computers is sent as one to each, which is what a broadcast is anyway.
+              broadcast: !recipients.some((recipient) => recipient.session?.federation),
+              // Still live-only: a broadcast never becomes mail for someone who left.
+              allowRosterMailboxFallback: false,
               signal: _signal,
               record: recordActionEntry,
             });
@@ -4629,7 +4655,7 @@ Sessions and messages are named the way people would name them: a session by its
               duplicateCount: 0,
               broadcast: true,
               sender: sendIdentity!,
-              excludedRemoteCount: sessions.filter((session) => Boolean(session.federation)).length,
+              excludedRemoteCount: grouped ? 0 : sessions.filter((session) => Boolean(session.federation)).length,
             });
           } catch (error) {
             return {

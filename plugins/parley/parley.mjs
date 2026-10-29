@@ -30,7 +30,7 @@ function nodeCommand(execPath = process.execPath) {
 var bundledBuild;
 var init_bundle = __esm({
   "broker/bundle.ts"() {
-    bundledBuild = true ? JSON.parse('{"packageVersion":"1.8.0","sourceId":"d782acea79e19e023cbfe601b7e4f64c409b3555e5bca54eba0a2ce46dc0c788"}') : void 0;
+    bundledBuild = true ? JSON.parse('{"packageVersion":"1.8.0","sourceId":"4d68681fce24da344eb65f90604f8419f5b9d73b090a7c35ba41e9e75df6596a"}') : void 0;
   }
 });
 
@@ -15561,6 +15561,10 @@ function sessionPlace(env = process.env) {
   if (env.TMUX_PANE?.trim()) return "tmux";
   return void 0;
 }
+function referencePattern(pattern) {
+  const parts = pattern.trim().split("*").map((part) => part.replace(/[.+?^${}()|[\]\\]/g, "\\$&"));
+  return new RegExp(`^${parts.join(".*")}$`, "i");
+}
 function appLabel(value) {
   const label = value?.trim();
   return label && label.length <= 64 ? label : void 0;
@@ -18935,7 +18939,7 @@ ${lines.join("\n")}`;
 \u2022 pending / read: Unanswered questions, or a retained message's full content.
 \u2022 status: Connection state and outstanding questions.
 \u2022 cancel: Removes offline mail or communicates withdrawal; work already done is unchanged.
-\u2022 broadcast: Independent messages to visible local peers, not remote peers.
+\u2022 broadcast: Independent messages to a group: every visible session on this computer, or the sessions 'to' (a reference pattern), cwd or app pick out, on any computer.
 \u2022 rename: Changes this session's name.
 \u2022 label: Gives a message a local name, like review or notes, usable wherever a message reference is.
 \u2022 link: Links this computer with others over SSH, so their sessions appear here. host adds one, as you'd give it to ssh, and links it now; recheck checks again (host, or everything); discover: true links computers this one has ssh connections to automatically. With none of these, shows the links.
@@ -18964,7 +18968,7 @@ Sessions and messages are named the way people would name them: a session by its
         description: "Optional self-profile update."
       })),
       to: typebox_exports.Optional(typebox_exports.String({
-        description: "One session, by the reference shown in list, receipts, or messages. For send/ask with cwd, omit to target the sole live session in that cwd or the newly opened project-pane session. For 'reply', narrows which sender you are answering."
+        description: "One session, by the reference shown in list, receipts, or messages. For send/ask with cwd, omit to target the sole live session in that cwd or the newly opened project-pane session. For 'reply', narrows which sender you are answering. For 'broadcast', a pattern over references, where * matches anything: flightdeck:* (that workspace here), build-vm:* (everyone on that computer), * (everyone visible, every computer)."
       })),
       targets: typebox_exports.Optional(typebox_exports.Array(typebox_exports.String(), {
         maxItems: MAX_EXPLICIT_SEND_TARGETS,
@@ -18995,7 +18999,10 @@ Sessions and messages are named the way people would name them: a session by its
         description: "Reference of an earlier send/ask this is a user-authored retry of. A retry is always a new message with its own reference."
       })),
       cwd: typebox_exports.Optional(typebox_exports.String({
-        description: "Working directory filter for 'list-cwd'. For send/ask, scopes target lookup to that directory; omit 'to' to target the sole live peer there. Absolute, or relative to the current session's cwd; '.' means the current cwd."
+        description: "Working directory filter for 'list-cwd'. For send/ask, scopes target lookup to that directory; omit 'to' to target the sole live peer there. For 'broadcast', only sessions in that directory. Absolute, or relative to the current session's cwd; '.' means the current cwd."
+      })),
+      app: typebox_exports.Optional(typebox_exports.String({
+        description: "For 'broadcast', only sessions living in matching apps, a pattern over the app shown in list where * matches anything: Pi*, Claude*, Codex*."
       })),
       blocking: typebox_exports.Optional(typebox_exports.Boolean({
         description: "For 'ask', true waits for the answer in this tool call (default); false returns immediately and delivers the answer as an incoming message."
@@ -19141,7 +19148,8 @@ Sessions and messages are named the way people would name them: a session by its
             openProjectPaneIfMissing,
             focus,
             blocking,
-            name
+            name,
+            app
           } = params;
           const allBlankTargets = params.targets?.every((target2) => !target2.trim()) ?? false;
           const duplicatedSingularTarget = params.targets !== void 0 && to !== void 0 && params.targets.length === 1 && params.targets[0]?.trim() === to.trim();
@@ -19299,9 +19307,9 @@ ${otherSection}` }],
                   details: { error: true }
                 };
               }
-              if (to || targets || cwd || openProjectPaneIfMissing) {
+              if (targets || openProjectPaneIfMissing) {
                 return {
-                  content: [{ type: "text", text: "broadcast does not accept 'to', 'targets', 'cwd', or openProjectPaneIfMissing; it uses the current visible live-session roster." }],
+                  content: [{ type: "text", text: "broadcast picks its recipients from the live roster with 'to' (a reference pattern), 'cwd' and 'app'; it doesn't take 'targets' or openProjectPaneIfMissing. Use send with targets for a list of chosen sessions." }],
                   details: { error: true }
                 };
               }
@@ -19315,7 +19323,16 @@ ${otherSection}` }],
                 const sessions = await connectedClient.listSessions();
                 const currentSessionId2 = connectedClient.sessionId;
                 const refs = rosterReferences(sessions);
-                const recipients = sessions.filter((session) => session.id !== currentSessionId2 && !session.federation).sort((left, right) => left.id.localeCompare(right.id)).map((session) => ({
+                const grouped = Boolean(to?.trim() || cwd?.trim() || app?.trim());
+                const inCwd = cwd?.trim() ? cwd.trim() === "." ? ctx.cwd : resolvePath(ctx.cwd, cwd.trim()) : void 0;
+                const picked = sessions.filter((session) => session.id !== currentSessionId2 && (grouped || !session.federation) && (!to?.trim() || referencePattern(to).test(refs.get(session.id) ?? "")) && (!inCwd || sameCwd(session.cwd, inCwd)) && (!app?.trim() || referencePattern(app).test(session.app ?? "")));
+                if (grouped && picked.length === 0) {
+                  return {
+                    content: [{ type: "text", text: `No other live session matches ${[to?.trim() && `to ${JSON.stringify(to.trim())}`, inCwd && `cwd ${inCwd}`, app?.trim() && `app ${JSON.stringify(app.trim())}`].filter(Boolean).join(", ")}; nothing was broadcast. parley list shows the references and apps to match.` }],
+                    details: { error: true, broadcast: true, recipientCount: 0 }
+                  };
+                }
+                const recipients = picked.sort((left, right) => left.id.localeCompare(right.id)).map((session) => ({
                   requested: session.id,
                   label: refs.get(session.id),
                   session
@@ -19346,7 +19363,11 @@ ${message}${attachmentText}`
                   message,
                   attachments,
                   batchId,
-                  broadcast: true,
+                  // Federation carries independent direct messages only; a group reaching other
+                  // computers is sent as one to each, which is what a broadcast is anyway.
+                  broadcast: !recipients.some((recipient) => recipient.session?.federation),
+                  // Still live-only: a broadcast never becomes mail for someone who left.
+                  allowRosterMailboxFallback: false,
                   signal: _signal,
                   record: recordActionEntry
                 });
@@ -19359,7 +19380,7 @@ ${message}${attachmentText}`
                   duplicateCount: 0,
                   broadcast: true,
                   sender: sendIdentity,
-                  excludedRemoteCount: sessions.filter((session) => Boolean(session.federation)).length
+                  excludedRemoteCount: grouped ? 0 : sessions.filter((session) => Boolean(session.federation)).length
                 });
               } catch (error) {
                 return {

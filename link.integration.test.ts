@@ -417,3 +417,30 @@ test("on a computer where FlightDeck links its sessions, Parley's own link keepe
     await cleanup();
   }
 });
+
+test("a broadcast reaches the group it names: this computer by default, or a computer or everyone by reference pattern", { timeout: 120_000, skip: process.platform === "win32" }, async () => {
+  await switchScenario(true, async ({ listed, call, inbox }) => {
+    await eventually(async () => rowsFor(await listed("new-tab"), /• box:/) === 2, "the laptop sees the box's tabs");
+    const got = (name: string, text: string) => inbox(name).includes(text);
+
+    // No group: everyone visible on this computer, as before.
+    assert.notEqual((await call("new-tab", { action: "broadcast", message: "local hello" })).details?.error, true);
+    await eventually(() => got("old-tab", "local hello"), "the other laptop tab gets it");
+    // A computer, by its reference prefix.
+    const boxOnly = await call("new-tab", { action: "broadcast", to: "box:*", message: "box hello" });
+    assert.notEqual(boxOnly.details?.error, true, text(boxOnly));
+    await eventually(() => got("box-old-tab", "box hello") && got("box-new-tab", "box hello"), "both box tabs get it");
+    // Everyone, every computer.
+    await call("new-tab", { action: "broadcast", to: "*", message: "everyone hello" });
+    await eventually(() => ["old-tab", "box-old-tab", "box-new-tab"].every((name) => got(name, "everyone hello")), "all three others get it");
+
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    assert.equal(got("box-old-tab", "local hello") || got("box-new-tab", "local hello"), false, "the default stays on this computer");
+    assert.equal(got("old-tab", "box hello"), false, "a computer's group is only that computer");
+    assert.equal(got("new-tab", "everyone hello"), false, "not the sender");
+
+    const none = await call("new-tab", { action: "broadcast", to: "nowhere:*", message: "lost" });
+    assert.equal(none.details?.error, true);
+    assert.match(text(none), /No other live session matches/);
+  });
+});

@@ -12,7 +12,7 @@ Sometimes you're running multiple pi sessions — one researching, one executing
 - **Agent collaboration** — An agent can reach out to another session when it needs help or wants to share results
 - **Session awareness** — See what other pi sessions are running, their concise current focus, and live status
 
-Unlike pi-messenger (a shared chat room for multi-agent swarms), parley is optimized for chosen recipients. Group sends have independent outcomes; host-local broadcast reaches every live peer visible to the caller.
+Unlike pi-messenger (a shared chat room for multi-agent swarms), parley is optimized for chosen recipients. Group sends have independent outcomes; a broadcast reaches every live peer visible on this computer, or the group it names.
 
 Parley also integrates with [pi-subagents](https://github.com/nicobailon/pi-subagents), providing scoped child visibility and a fallback supervisor channel when no native channel is available.
 
@@ -57,7 +57,7 @@ A session becomes parley-connected when all of these are true:
 - the session has started or reloaded after the extension was installed
 - the local broker is running or can be auto-started
 
-The session list shows connected sessions visible through the caller's routing scope and subagent permissions, not every open Pi process. Remote rows identify their origin and negotiated support: text conversations, text sends only, or discovery only. Remote attachments, mailboxes, and broadcast are not supported.
+The session list shows connected sessions visible through the caller's routing scope and subagent permissions, not every open Pi process. Remote rows identify their origin and negotiated support: text conversations, text sends only, or discovery only. Remote attachments and mailboxes are not supported; a broadcast reaches other computers only when it names a group.
 
 If a session is unnamed, pi-parley exposes a collision-resistant runtime-only fallback alias like `session-1a2b3c4d-5e6f-7a8b` so other connected sessions can target it. That alias is not persisted as the Pi session title or treated as a reconnect identity, so `pi --resume` can keep showing the transcript snippet without allowing a different unnamed process to inherit queued mail.
 
@@ -142,7 +142,7 @@ Registered only with the required pi-subagents child bridge metadata and no nati
 
 **`send`** — Sends to one `to` or independently to 1–32 explicit `targets`. Duplicate aliases for one live endpoint deliver once; partial failures do not roll back successes. Group sends reject `replyTo`, `supersedes`, and `retryOf`. A singular send can carry thread context, but never infers or completes an ask's answer. `confirmSend` can require one UI approval before ordinary delivery; group approval pins the resolved endpoints so an alias cannot silently rebind afterward.
 
-**`broadcast`** — Sends independent messages to the current snapshot of visible live **host-local** peers, excluding the sender. Scope and subagent permissions still apply. It neither includes remote rows nor queues disconnected sessions, and rejects targeting/thread fields.
+**`broadcast`** — Sends independent messages to the current snapshot of visible live peers, excluding the sender. By default that's every one on this computer. A group can name its reach instead, on any computer: `to` is a pattern over references where `*` matches anything (`flightdeck:*` for a workspace here, `build-vm:*` for everyone on that computer, `*` for everyone visible), `cwd` keeps sessions in one directory, and `app` is a pattern over where sessions live (`Pi*`, `Claude*`). They combine. Scope and subagent permissions still apply. It never queues for disconnected sessions, and rejects `targets` and thread fields. Recipients on other computers receive it as a direct message, which is what cross-computer links carry.
 
 **`ask`** — Sends a question to a connected local recipient or a negotiated remote conversation endpoint. It waits for the explicit answer by default, or returns the initial delivery outcome with `blocking: false`. Asynchronous answers enter the conversation later, including while a headless caller works. Offline asks fail rather than entering a mailbox. Timeout and cancellation are separate outcomes.
 

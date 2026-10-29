@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- `broadcast` can name its group: `to` is a pattern over references (`flightdeck:*`, `build-vm:*`, `*`), `cwd` a directory, `app` a pattern over where sessions live (`Pi*`). A group reaches the sessions it names on any computer; without one, a broadcast stays on this computer as before.
 - The README says what an application bundling `pi-parley/host` installs beside it: `typebox` and `@mariozechner/pi-tui`, which Pi supplies to its extensions. The packed-package check bundles it from a clean install with just those two.
 
 ## 1.8.0 - 2026-10-29
