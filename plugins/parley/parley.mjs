@@ -30,7 +30,7 @@ function nodeCommand(execPath = process.execPath) {
 var bundledBuild;
 var init_bundle = __esm({
   "broker/bundle.ts"() {
-    bundledBuild = true ? JSON.parse('{"packageVersion":"1.7.0","sourceId":"9222e85f1afd27e554b72b78cab0ed4f641a9e614c3699abb22d4be809552dae"}') : void 0;
+    bundledBuild = true ? JSON.parse('{"packageVersion":"1.7.1","sourceId":"136acae77f660be3d74cfc2ec0567b2bf13854319aa8abd17727ba0684146cb0"}') : void 0;
   }
 });
 

@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.7.1 - 2026-10-29
 
 - When a link between two merged computers gains a scope binding (FlightDeck adding the ordinary scope next to its own), sessions on the other computer keep their names and still answer to them. Before, every session there took a new identity: long-running sessions showed it as `name~2`, and the name they already knew reported the session as not connected. Merged brokers now agree on a link feature (`peer-roster-merged-v1`) and send each session once, under its own scope's binding. A name a session already knows follows the same remote session when a link carries it another way.
 - `attachBrokers()` reports the link features the two brokers agreed on (`attachment.features`), so a controller can see per pair whether `peer-roster-merged-v1` is in effect.
