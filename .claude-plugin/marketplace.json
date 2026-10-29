@@ -9,7 +9,7 @@
       "name": "parley",
       "source": "./plugins/parley",
       "description": "Conversations between agent sessions (Pi, Oh My Pi, Claude Code, Codex) on your computers: named peers, asks and replies, delivery receipts.",
-      "version": "1.7.1"
+      "version": "1.8.0"
     }
   ]
 }

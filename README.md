@@ -382,7 +382,7 @@ Install the bundled tarball as the wrapper's private ordinary dependency rather 
 
 ### Embedding Parley in another application
 
-`pi-parley/host` runs Parley sessions inside an application that isn't Pi. It's how the Claude Code and Codex support works, and an application can use it directly. Each of the application's agent sessions gets a hosted session: the same Parley a Pi session has (the `parley` tool, references, receipts, history, names, links), joined under the id the application gives it. Many can share one process.
+`pi-parley/host` runs Parley sessions inside an application that isn't Pi. It's new, and its shape may still change in a minor release while its first embedders settle it. It's how the Claude Code and Codex support works, and an application can use it directly. Each of the application's agent sessions gets a hosted session: the same Parley a Pi session has (the `parley` tool, references, receipts, history, names, links), joined under the id the application gives it. Many can share one process.
 
 ```typescript
 import { configureParleyHost, createHostedSession, runBroker } from "pi-parley/host";
