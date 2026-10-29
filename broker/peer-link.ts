@@ -83,6 +83,8 @@ export interface PeerLinkManagerOptions {
   onPeerMessage?: (link: FederationPeerLink, value: unknown) => void;
   /** Make the peer send something back, for links that predate peer_ping. */
   requestPeerResponse?: (link: FederationPeerLink) => void;
+  /** Optional features this broker offers beyond FEDERATION_SUPPORTED_FEATURES. */
+  extraFeatures?: readonly string[];
 }
 
 function isValidNegotiatedFeatures(negotiated: readonly string[], offered: readonly string[]): boolean {
@@ -120,7 +122,11 @@ export class PeerLinkManager {
   private readonly outboundFrameLimits = new Map<string, { tokens: number; lastRefillAt: number }>();
   private localOrigin: FederationOrigin | undefined;
 
-  constructor(private readonly options: PeerLinkManagerOptions = {}) {}
+  private readonly offeredFeatures: readonly string[];
+
+  constructor(private readonly options: PeerLinkManagerOptions = {}) {
+    this.offeredFeatures = [...FEDERATION_SUPPORTED_FEATURES, ...(options.extraFeatures ?? [])];
+  }
 
   get size(): number {
     return this.linksById.size;
@@ -168,7 +174,7 @@ export class PeerLinkManager {
     const refusal = this.admission("inbound", prepared, hello.features);
     if (refusal) return { ack: rejection(hello, "E_ALREADY_CONNECTED", refusal) };
 
-    const negotiatedFeatures = FEDERATION_SUPPORTED_FEATURES.filter((feature) => hello.features.includes(feature));
+    const negotiatedFeatures = this.offeredFeatures.filter((feature) => hello.features.includes(feature));
     const link: FederationPeerLink = {
       linkId: hello.linkId,
       direction: "inbound",
@@ -225,7 +231,7 @@ export class PeerLinkManager {
     return {
       type: "peer_hello", protocol: FEDERATION_PROTOCOL_NAME, version: FEDERATION_PROTOCOL_VERSION,
       linkId: prepared.linkId, origin: prepared.localOrigin, expectedPeerOrigin: prepared.remoteOrigin,
-      scopeMappings: scopeMappingsFromBindings(prepared.scopeBindings), features: [...FEDERATION_SUPPORTED_FEATURES],
+      scopeMappings: scopeMappingsFromBindings(prepared.scopeBindings), features: [...this.offeredFeatures],
     };
   }
 
@@ -245,7 +251,7 @@ export class PeerLinkManager {
     if (!sameMappings(value.scopeMappings, scopeMappingsFromBindings(prepared.scopeBindings))) {
       throw new FederationPeerError("E_SCOPE_MISMATCH", "Peer acknowledgement did not match the requested scopes");
     }
-    if (!isValidNegotiatedFeatures(value.features, FEDERATION_SUPPORTED_FEATURES)) {
+    if (!isValidNegotiatedFeatures(value.features, this.offeredFeatures)) {
       throw new FederationPeerError("E_FEATURE_UNSUPPORTED", "Peer acknowledged invalid or unoffered features");
     }
     const link: FederationPeerLink = {

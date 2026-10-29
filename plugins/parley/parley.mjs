@@ -30,7 +30,7 @@ function nodeCommand(execPath = process.execPath) {
 var bundledBuild;
 var init_bundle = __esm({
   "broker/bundle.ts"() {
-    bundledBuild = true ? JSON.parse('{"packageVersion":"1.7.0","sourceId":"f02cecd03a8ebfc4e75d397a703a489327120c0e084374b7c733acccacf1ac1c"}') : void 0;
+    bundledBuild = true ? JSON.parse('{"packageVersion":"1.7.0","sourceId":"5bbda27585e5245beaee067c906127898ba5fe8e1c2b615ede8ecca535edbfcf"}') : void 0;
   }
 });
 
@@ -14042,6 +14042,10 @@ var init_federation_conversation = __esm({
 
 // references.ts
 import { randomBytes } from "node:crypto";
+function continuityKey(id) {
+  const identity = id.startsWith("oqs1.") ? decodeOriginQualifiedSessionIdentity(id) : void 0;
+  return identity ? JSON.stringify([identity.originId, identity.remoteStableSessionId]) : void 0;
+}
 function referenceKey(value) {
   return value.trim().toLowerCase();
 }
@@ -14162,8 +14166,18 @@ var init_references = __esm({
       }
       /** Pinned references only; unpinned text is left to ordinary live name resolution. */
       resolveSession(text) {
-        const id = this.sessionOwners.get(referenceKey(text));
-        return id ? { id, ref: this.sessionPrimary.get(id)?.ref ?? text.trim() } : void 0;
+        const pinned = this.sessionOwners.get(referenceKey(text));
+        if (!pinned) return void 0;
+        const id = this.liveSessions && !this.liveSessions.has(pinned) ? this.liveContinuation(pinned) ?? pinned : pinned;
+        return { id, ref: this.sessionPrimary.get(pinned)?.ref ?? text.trim() };
+      }
+      /** A live identity for the same remote session as `id` (same computer, same session there),
+       * when a link now carries it under another scope alias. */
+      liveContinuation(id) {
+        const key = continuityKey(id);
+        if (!key || !this.liveSessions) return void 0;
+        for (const liveId of this.liveSessions) if (liveId !== id && continuityKey(liveId) === key) return liveId;
+        return void 0;
       }
       /**
        * When a pinned session is unreachable and a live session now uses its name,
@@ -14199,6 +14213,7 @@ var init_references = __esm({
       firstAvailableRef(base, id) {
         const owner = this.sessionOwners.get(referenceKey(base));
         if (owner === void 0 || owner === id) return base;
+        if (continuityKey(owner) !== void 0 && continuityKey(owner) === continuityKey(id)) return base;
         for (let suffix = 2; ; suffix++) {
           const candidate = `${base}~${suffix}`;
           const candidateOwner = this.sessionOwners.get(referenceKey(candidate));

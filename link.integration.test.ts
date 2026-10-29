@@ -252,11 +252,19 @@ test("with nothing set up, a session links the computer this one already has an 
   }
 });
 
+type ScopeBindings = { localScopeId: string | null; localScopeAlias: string; remoteScopeAlias: string }[];
+const BOTH_BINDINGS: ScopeBindings = [
+  { localScopeId: "flightdeck", localScopeAlias: "flightdeck", remoteScopeAlias: "flightdeck" },
+  { localScopeId: null, localScopeAlias: "default", remoteScopeAlias: "default" },
+];
+
 async function switchScenario(boxMerges: boolean, check: (helpers: {
   listed: (name: string) => Promise<string>;
   call: (name: string, params: Record<string, unknown>) => Promise<CapturedToolResult>;
   inbox: (name: string) => string;
-}) => Promise<void>) {
+  /** Link the two computers again, with these bindings. */
+  relink: (bindings: ScopeBindings) => Promise<void>;
+}) => Promise<void>, bindings: ScopeBindings = BOTH_BINDINGS) {
   const { default: extension } = await import("./index.ts");
   const { laptopAgent, boxAgent, cleanup } = computers();
   if (!boxMerges) {
@@ -288,18 +296,15 @@ async function switchScenario(boxMerges: boolean, check: (helpers: {
       }, session.scope);
       await listed(session.name); // connects now, in its own agent directory and scope
     }
-    const both = [
-      { localScopeId: "flightdeck", localScopeAlias: "flightdeck", remoteScopeAlias: "flightdeck" },
-      { localScopeId: null, localScopeAlias: "default", remoteScopeAlias: "default" },
-    ];
     const [laptop, box] = await Promise.all([laptopAgent, boxAgent].map((agentDir) => inspectBroker(createLocalBrokerAccess({ agentDir }))));
     // Controllers can tell which brokers merge, and who still names the old scope.
     assert.deepEqual(laptop!.mergedScopes, ["flightdeck"]);
     assert.deepEqual(box!.mergedScopes, boxMerges ? ["flightdeck"] : []);
     assert.equal(laptop!.scopes.find((scope) => scope.scopeId === "flightdeck")?.liveSessions, 1);
-    link = await attachBrokers({ initiator: { broker: laptop!, originLabel: "laptop", scopeBindings: both }, acceptor: { broker: box!, originLabel: "box", scopeBindings: both } });
-    if (process.env.PI_PARLEY_TEST_DEBUG) { await new Promise((r) => setTimeout(r, 3000)); for (const s2 of sessions) console.log(`--- ${s2.name}\n${await listed(s2.name)}`); }
-    await check({ listed, call, inbox });
+    const attach = (scopeBindings: ScopeBindings) => attachBrokers({ initiator: { broker: laptop!, originLabel: "laptop", scopeBindings }, acceptor: { broker: box!, originLabel: "box", scopeBindings } });
+    link = await attach(bindings);
+    const relink = async (next: ScopeBindings) => { await link?.close(); link = undefined; link = await attach(next); };
+    await check({ listed, call, inbox, relink });
   } finally {
     await link?.close();
     for (const { harness } of sessions) await harness.emitLifecycle("session_shutdown").catch(() => {});
@@ -356,6 +361,30 @@ test("once both computers have merged, every tab sees every other once and they 
     assert.notEqual(reply.details?.error, true, text(reply));
     await eventually(() => /laptop old answers/.test(inbox("box-new-tab")), "the answer arrives");
   });
+});
+
+test("when a link between merged computers gains a scope binding, sessions keep their names and answer to them", { timeout: 120_000, skip: process.platform === "win32" }, async () => {
+  // Like FlightDeck adding the ordinary scope to links that carried only its own.
+  await switchScenario(true, async ({ listed, call, inbox, relink }) => {
+    await eventually(async () => rowsFor(await listed("new-tab"), /• box:/) === 2, "both box tabs arrive over the one binding");
+    const before = await listed("new-tab");
+    await relink(BOTH_BINDINGS);
+    await eventually(async () => rowsFor(await listed("new-tab"), /• box:/) === 2 && !/• box:[^\n]*~2/.test(await listed("new-tab")),
+      "after the relink the box tabs are back, once each, under the same names");
+    const after = await listed("new-tab");
+    for (const name of ["box:box-old-tab", "box:box-new-tab"]) {
+      assert.match(before, new RegExp(`• ${name} `)); assert.match(after, new RegExp(`• ${name} `), after);
+    }
+    // Asked by the names it already knew, each answers.
+    for (const [to, them] of [["box:box-old-tab", "box-old-tab"], ["box:box-new-tab", "box-new-tab"]] as const) {
+      const ask = await call("new-tab", { action: "ask", to, message: `still there, ${them}?`, blocking: false });
+      assert.notEqual(ask.details?.error, true, text(ask));
+      await eventually(() => new RegExp(`still there, ${them}\\?`).test(inbox(them)), `${them} gets the ask`);
+      const reply = await call(them, { action: "reply", message: `${them} is here` });
+      assert.notEqual(reply.details?.error, true, text(reply));
+      await eventually(() => new RegExp(`${them} is here`).test(inbox("new-tab")), `${them}'s answer comes back`);
+    }
+  }, [BOTH_BINDINGS[0]!]);
 });
 
 test("on a computer where FlightDeck links its sessions, Parley's own link keeper stands aside", { timeout: 60_000, skip: process.platform === "win32" }, async () => {

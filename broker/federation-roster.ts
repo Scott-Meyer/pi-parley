@@ -5,6 +5,7 @@ import {
   FEDERATION_PROTOCOL_VERSION,
   FEDERATION_ROSTER_FEATURE,
   FEDERATION_APP_FEATURE,
+  FEDERATION_MERGED_ROSTER_FEATURE,
   FEDERATION_CONVERSATION_FEATURE,
   FEDERATION_SEND_FEATURE,
   FEDERATION_EXACT_SEND_FEATURE,
@@ -99,6 +100,8 @@ export interface LocallyOwnedFederationSession {
   exportEligible: boolean;
   conversationCapable?: boolean;
   localScopeId: string | null;
+  /** The scope the session itself named, before merging; null when unscoped. */
+  ownScopeId?: string | null;
   info: SessionInfo;
 }
 
@@ -485,7 +488,12 @@ export class FederationRosterState {
     if (!state) return undefined;
     const binding = this.bindingForRemoteAlias(state.link.scopeBindings, targetRemoteScopeAlias);
     if (!binding) return undefined;
-    const entry = state.exported.get(rosterKey(binding.localScopeAlias, stableSessionId));
+    let entry = state.exported.get(rosterKey(binding.localScopeAlias, stableSessionId));
+    // Between merging brokers a session is exported once, under its own binding,
+    // and the peer finds it under that one whichever binding the target came on.
+    if (!entry && state.link.features.includes(FEDERATION_MERGED_ROSTER_FEATURE)) {
+      entry = [...state.exported.values()].find((candidate) => candidate.stableSessionId === stableSessionId);
+    }
     return entry ? { scopeAlias: entry.scopeAlias, stableSessionId: entry.stableSessionId } : undefined;
   }
 
@@ -585,11 +593,17 @@ export class FederationRosterState {
 
   private buildExportedRoster(link: FederationPeerLink): Map<string, FederationRosterEntry> {
     const result = new Map<string, FederationRosterEntry>();
+    // Between two merging brokers each session goes once, under its own scope's
+    // binding when the link has one, so its identity there never depends on which
+    // other bindings exist. Otherwise every binding into its roster carries it, so
+    // a peer that keeps those scopes apart still reaches it.
+    const once = link.features.includes(FEDERATION_MERGED_ROSTER_FEATURE);
     for (const local of this.options.listLocalSessions()) {
       if (local.ownership !== "local" || local.exportEligible !== true) continue;
-      for (const binding of link.scopeBindings) {
-        // A binding for a merged scope carries the roster it joined.
-        if (this.rosterScopeOf(binding.localScopeId) !== local.localScopeId) continue;
+      // A binding for a merged scope carries the roster it joined.
+      const carriers = link.scopeBindings.filter((binding) => this.rosterScopeOf(binding.localScopeId) === local.localScopeId);
+      const own = carriers.find((binding) => binding.localScopeId === (local.ownScopeId ?? local.localScopeId));
+      for (const binding of once ? [own ?? carriers[0]].filter((b) => b !== undefined) : carriers) {
         if (!isStableSessionId(local.info.id)) {
           throw new FederationRosterError("Local stable session identity cannot be represented safely in federation");
         }

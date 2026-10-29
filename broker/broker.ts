@@ -74,6 +74,7 @@ import {
   type BrokerScopeSummary,
   type FederationFailureCode,
   type FederationOrigin,
+  FEDERATION_MERGED_ROSTER_FEATURE,
 } from "./federation-types.ts";
 
 const PARLEY_DIR = getParleyDirPath();
@@ -392,6 +393,7 @@ class ParleyBroker {
     this.extensionStateManager = new ExtensionStateManager(PARLEY_DIR);
     this.collaborationState = new CollaborationStateStore(PARLEY_DIR);
     this.peerLinks = new PeerLinkManager({
+      ...(MERGED_SCOPES.size > 0 ? { extraFeatures: [FEDERATION_MERGED_ROSTER_FEATURE] } : {}),
       onSocketOpened: (socket) => this.connections.add(socket),
       onSocketClosed: (socket) => this.connections.delete(socket),
       onLinkUp: (link) => {
@@ -1015,6 +1017,7 @@ class ParleyBroker {
       exportEligible: !session.info.isSubagent,
       conversationCapable: this.supportsRemoteConversations(session),
       localScopeId: session.scopeId ?? null,
+      ownScopeId: session.namedScopeId ?? null,
       info: session.info,
     }));
   }

@@ -132,6 +132,7 @@ var FEDERATION_CONVERSATION_FEATURE = "peer-conversation-text-v1";
 var FEDERATION_SCOPED_LINKS_FEATURE = "peer-links-by-scope-v1";
 var FEDERATION_PING_FEATURE = "peer-ping-v1";
 var FEDERATION_APP_FEATURE = "peer-roster-app-v1";
+var FEDERATION_MERGED_ROSTER_FEATURE = "peer-roster-merged-v1";
 var FEDERATION_CAPABILITY_MIN_LENGTH = 32;
 var FEDERATION_CAPABILITY_MAX_LENGTH = 128;
 var FEDERATION_CORRELATION_ID_MAX_LENGTH = 128;
@@ -992,7 +993,7 @@ import { dirname as dirname2, join as join5 } from "node:path";
 import { fileURLToPath } from "node:url";
 
 // broker/bundle.ts
-var bundledBuild = true ? JSON.parse('{"packageVersion":"1.7.0","sourceId":"f02cecd03a8ebfc4e75d397a703a489327120c0e084374b7c733acccacf1ac1c"}') : void 0;
+var bundledBuild = true ? JSON.parse('{"packageVersion":"1.7.0","sourceId":"5bbda27585e5245beaee067c906127898ba5fe8e1c2b615ede8ecca535edbfcf"}') : void 0;
 
 // broker/build.ts
 function getBrokerBuildIdentity(extensionDir = join5(dirname2(fileURLToPath(import.meta.url)), "..")) {
@@ -1692,6 +1693,7 @@ function rejection(hello, code, error) {
 var PeerLinkManager = class {
   constructor(options = {}) {
     this.options = options;
+    this.offeredFeatures = [...FEDERATION_SUPPORTED_FEATURES, ...options.extraFeatures ?? []];
   }
   options;
   linksById = /* @__PURE__ */ new Map();
@@ -1701,6 +1703,7 @@ var PeerLinkManager = class {
   activatedLinkIds = /* @__PURE__ */ new Set();
   outboundFrameLimits = /* @__PURE__ */ new Map();
   localOrigin;
+  offeredFeatures;
   get size() {
     return this.linksById.size;
   }
@@ -1739,7 +1742,7 @@ var PeerLinkManager = class {
     }
     const refusal = this.admission("inbound", prepared, hello.features);
     if (refusal) return { ack: rejection(hello, "E_ALREADY_CONNECTED", refusal) };
-    const negotiatedFeatures = FEDERATION_SUPPORTED_FEATURES.filter((feature) => hello.features.includes(feature));
+    const negotiatedFeatures = this.offeredFeatures.filter((feature) => hello.features.includes(feature));
     const link = {
       linkId: hello.linkId,
       direction: "inbound",
@@ -1799,7 +1802,7 @@ var PeerLinkManager = class {
       origin: prepared.localOrigin,
       expectedPeerOrigin: prepared.remoteOrigin,
       scopeMappings: scopeMappingsFromBindings(prepared.scopeBindings),
-      features: [...FEDERATION_SUPPORTED_FEATURES]
+      features: [...this.offeredFeatures]
     };
   }
   /** Validates the real peer ack and registers, but does not activate. The caller
@@ -1818,7 +1821,7 @@ var PeerLinkManager = class {
     if (!sameMappings(value.scopeMappings, scopeMappingsFromBindings(prepared.scopeBindings))) {
       throw new FederationPeerError("E_SCOPE_MISMATCH", "Peer acknowledgement did not match the requested scopes");
     }
-    if (!isValidNegotiatedFeatures(value.features, FEDERATION_SUPPORTED_FEATURES)) {
+    if (!isValidNegotiatedFeatures(value.features, this.offeredFeatures)) {
       throw new FederationPeerError("E_FEATURE_UNSUPPORTED", "Peer acknowledged invalid or unoffered features");
     }
     const link = {
@@ -2384,7 +2387,10 @@ var FederationRosterState = class {
     if (!state) return void 0;
     const binding = this.bindingForRemoteAlias(state.link.scopeBindings, targetRemoteScopeAlias);
     if (!binding) return void 0;
-    const entry = state.exported.get(rosterKey(binding.localScopeAlias, stableSessionId));
+    let entry = state.exported.get(rosterKey(binding.localScopeAlias, stableSessionId));
+    if (!entry && state.link.features.includes(FEDERATION_MERGED_ROSTER_FEATURE)) {
+      entry = [...state.exported.values()].find((candidate) => candidate.stableSessionId === stableSessionId);
+    }
     return entry ? { scopeAlias: entry.scopeAlias, stableSessionId: entry.stableSessionId } : void 0;
   }
   sendDeltaChunks(state, upserts, removals) {
@@ -2465,10 +2471,12 @@ var FederationRosterState = class {
   }
   buildExportedRoster(link) {
     const result = /* @__PURE__ */ new Map();
+    const once = link.features.includes(FEDERATION_MERGED_ROSTER_FEATURE);
     for (const local of this.options.listLocalSessions()) {
       if (local.ownership !== "local" || local.exportEligible !== true) continue;
-      for (const binding of link.scopeBindings) {
-        if (this.rosterScopeOf(binding.localScopeId) !== local.localScopeId) continue;
+      const carriers = link.scopeBindings.filter((binding) => this.rosterScopeOf(binding.localScopeId) === local.localScopeId);
+      const own = carriers.find((binding) => binding.localScopeId === (local.ownScopeId ?? local.localScopeId));
+      for (const binding of once ? [own ?? carriers[0]].filter((b) => b !== void 0) : carriers) {
         if (!isStableSessionId2(local.info.id)) {
           throw new FederationRosterError("Local stable session identity cannot be represented safely in federation");
         }
@@ -3336,6 +3344,7 @@ var ParleyBroker = class {
     this.extensionStateManager = new ExtensionStateManager(PARLEY_DIR);
     this.collaborationState = new CollaborationStateStore(PARLEY_DIR);
     this.peerLinks = new PeerLinkManager({
+      ...MERGED_SCOPES.size > 0 ? { extraFeatures: [FEDERATION_MERGED_ROSTER_FEATURE] } : {},
       onSocketOpened: (socket) => this.connections.add(socket),
       onSocketClosed: (socket) => this.connections.delete(socket),
       onLinkUp: (link) => {
@@ -3911,6 +3920,7 @@ var ParleyBroker = class {
       exportEligible: !session.info.isSubagent,
       conversationCapable: this.supportsRemoteConversations(session),
       localScopeId: session.scopeId ?? null,
+      ownScopeId: session.namedScopeId ?? null,
       info: session.info
     }));
   }

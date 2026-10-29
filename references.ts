@@ -1,5 +1,11 @@
 import { randomBytes } from "node:crypto";
 import { decodeOriginQualifiedSessionIdentity } from "./broker/federation-protocol.ts";
+
+/** Which remote session an imported identity is, whatever scope alias carried it. */
+function continuityKey(id: string): string | undefined {
+  const identity = id.startsWith("oqs1.") ? decodeOriginQualifiedSessionIdentity(id) : undefined;
+  return identity ? JSON.stringify([identity.originId, identity.remoteStableSessionId]) : undefined;
+}
 import { decodeConversationMessageId } from "./broker/federation-conversation.ts";
 
 /**
@@ -175,8 +181,20 @@ export class ReferenceBook {
 
   /** Pinned references only; unpinned text is left to ordinary live name resolution. */
   resolveSession(text: string): { id: string; ref: string } | undefined {
-    const id = this.sessionOwners.get(referenceKey(text));
-    return id ? { id, ref: this.sessionPrimary.get(id)?.ref ?? text.trim() } : undefined;
+    const pinned = this.sessionOwners.get(referenceKey(text));
+    if (!pinned) return undefined;
+    // The same remote session, now reached another way, answers to its name.
+    const id = this.liveSessions && !this.liveSessions.has(pinned) ? this.liveContinuation(pinned) ?? pinned : pinned;
+    return { id, ref: this.sessionPrimary.get(pinned)?.ref ?? text.trim() };
+  }
+
+  /** A live identity for the same remote session as `id` (same computer, same session there),
+   * when a link now carries it under another scope alias. */
+  private liveContinuation(id: string): string | undefined {
+    const key = continuityKey(id);
+    if (!key || !this.liveSessions) return undefined;
+    for (const liveId of this.liveSessions) if (liveId !== id && continuityKey(liveId) === key) return liveId;
+    return undefined;
   }
 
   /**
@@ -216,6 +234,8 @@ export class ReferenceBook {
   private firstAvailableRef(base: string, id: string): string {
     const owner = this.sessionOwners.get(referenceKey(base));
     if (owner === undefined || owner === id) return base;
+    // Not a different session: the same one, which a link now carries under another alias.
+    if (continuityKey(owner) !== undefined && continuityKey(owner) === continuityKey(id)) return base;
     for (let suffix = 2; ; suffix++) {
       const candidate = `${base}~${suffix}`;
       const candidateOwner = this.sessionOwners.get(referenceKey(candidate));
