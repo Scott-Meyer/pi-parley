@@ -258,6 +258,14 @@ var FAILURE_CODES = /* @__PURE__ */ new Set([
 function isFailureCode(value) {
   return typeof value === "string" && FAILURE_CODES.has(value);
 }
+function isPeerHelloAck(value) {
+  if (!isRecord(value) || value.type !== "peer_hello_ack" || value.protocol !== FEDERATION_PROTOCOL_NAME || value.version !== FEDERATION_PROTOCOL_VERSION || !isFederationCorrelationId(value.linkId) || typeof value.accepted !== "boolean")
+    return false;
+  if (value.accepted) {
+    return hasOnlyKeys(value, ["type", "protocol", "version", "linkId", "accepted", "origin", "acceptedPeerOriginId", "scopeMappings", "features"]) && isFederationOrigin(value.origin) && isCanonicalFederationOriginId(value.acceptedPeerOriginId) && value.origin.id !== value.acceptedPeerOriginId && isScopeMappings(value.scopeMappings) && isFeatures(value.features);
+  }
+  return hasOnlyKeys(value, ["type", "protocol", "version", "linkId", "accepted", "code", "error"]) && isFailureCode(value.code) && isSafeText(value.error, 256);
+}
 function isControlResult(value, type) {
   if (!isRecord(value) || value.type !== type || !isFederationCorrelationId(value.requestId) || typeof value.ok !== "boolean")
     return false;
@@ -657,10 +665,13 @@ async function attachPeerStreams(options) {
     owned.check();
     clearTimeout(timer);
     owned.startCopy(local2, remote);
+    const acked = ack.value;
+    const features = Object.freeze(isPeerHelloAck(acked) && acked.accepted ? [...acked.features] : []);
     return Object.freeze({
       linkId,
       localOrigin: Object.freeze(localOrigin2),
       remoteOrigin: Object.freeze(remoteOrigin),
+      features,
       completion: owned.completion,
       close: () => {
         owned.stop({ status: "closed", reason: "close" });
@@ -1205,6 +1216,7 @@ async function attachBrokers(options) {
     linkId: attached.linkId,
     initiatorOrigin: attached.localOrigin,
     acceptorOrigin: attached.remoteOrigin,
+    features: attached.features ?? Object.freeze([]),
     completion,
     close: () => {
       void attached.close();

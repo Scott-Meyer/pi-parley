@@ -64,6 +64,9 @@ export interface PeerStreamAttachment {
     readonly linkId: string;
     readonly localOrigin: Readonly<FederationOrigin>;
     readonly remoteOrigin: Readonly<FederationOrigin>;
+    /** The link features both brokers agreed on, when this attachment relayed the
+     * handshake (attachPeerStreams); a dialed stream's handshake is the brokers' own. */
+    readonly features?: readonly string[];
     /** Never rejects. Resolves after admitted write callbacks and owned cleanup join. */
     readonly completion: Promise<PeerStreamCompletion>;
     /** Stops admissions, destroys owned resources and joins completion. Idempotent. */

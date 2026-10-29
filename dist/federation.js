@@ -595,6 +595,7 @@ export async function attachBrokers(options) {
         linkId: attached.linkId,
         initiatorOrigin: attached.localOrigin,
         acceptorOrigin: attached.remoteOrigin,
+        features: attached.features ?? Object.freeze([]),
         completion,
         close: () => { void attached.close(); return completion; },
     });

@@ -23,6 +23,10 @@ export const FEDERATION_SCOPED_LINKS_FEATURE = "peer-links-by-scope-v1";
 export const FEDERATION_PING_FEATURE = "peer-ping-v1";
 /** Optional: roster entries may say where a session lives (SessionInfo.app). */
 export const FEDERATION_APP_FEATURE = "peer-roster-app-v1";
+/** Optional, offered only by a broker that merges scopes into its ordinary roster.
+ * Between two such brokers each session travels once, under its own scope's
+ * binding, so its identity doesn't depend on which bindings the link has. */
+export const FEDERATION_MERGED_ROSTER_FEATURE = "peer-roster-merged-v1";
 export const FEDERATION_CAPABILITY_MIN_LENGTH = 32;
 export const FEDERATION_CAPABILITY_MAX_LENGTH = 128;
 export const FEDERATION_CORRELATION_ID_MAX_LENGTH = 128;

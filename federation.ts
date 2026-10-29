@@ -94,6 +94,9 @@ export interface BrokerAttachment {
   readonly linkId: string;
   readonly initiatorOrigin: Readonly<BrokerOrigin>;
   readonly acceptorOrigin: Readonly<BrokerOrigin>;
+  /** The link features the two brokers agreed on. `peer-roster-merged-v1` means both
+   * merge scopes and each session keeps one identity across the link's bindings. */
+  readonly features: readonly string[];
   /** Never rejects. Resolves after admitted writes and owned cleanup join. */
   readonly completion: Promise<BrokerAttachmentCompletion>;
   /** Stops admissions and joins cleanup. Idempotent and returns completion. */
@@ -768,6 +771,7 @@ export async function attachBrokers(options: AttachBrokersOptions): Promise<Brok
     linkId: attached.linkId,
     initiatorOrigin: attached.localOrigin,
     acceptorOrigin: attached.remoteOrigin,
+    features: attached.features ?? Object.freeze([]),
     completion,
     close: () => { void attached.close(); return completion; },
   });

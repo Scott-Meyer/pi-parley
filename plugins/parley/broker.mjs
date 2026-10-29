@@ -993,7 +993,7 @@ import { dirname as dirname2, join as join5 } from "node:path";
 import { fileURLToPath } from "node:url";
 
 // broker/bundle.ts
-var bundledBuild = true ? JSON.parse('{"packageVersion":"1.7.0","sourceId":"5bbda27585e5245beaee067c906127898ba5fe8e1c2b615ede8ecca535edbfcf"}') : void 0;
+var bundledBuild = true ? JSON.parse('{"packageVersion":"1.7.0","sourceId":"9222e85f1afd27e554b72b78cab0ed4f641a9e614c3699abb22d4be809552dae"}') : void 0;
 
 // broker/build.ts
 function getBrokerBuildIdentity(extensionDir = join5(dirname2(fileURLToPath(import.meta.url)), "..")) {

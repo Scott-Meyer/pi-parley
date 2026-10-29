@@ -11,6 +11,7 @@ import {
   isBrokerStartPeerRequest,
   isBrokerStartPeerResult,
   isPeerHello,
+  isPeerHelloAck,
   isFederationBridgeAttach,
 } from "./federation-protocol.ts";
 import type {
@@ -90,6 +91,9 @@ export interface PeerStreamAttachment {
   readonly linkId: string;
   readonly localOrigin: Readonly<FederationOrigin>;
   readonly remoteOrigin: Readonly<FederationOrigin>;
+  /** The link features both brokers agreed on, when this attachment relayed the
+   * handshake (attachPeerStreams); a dialed stream's handshake is the brokers' own. */
+  readonly features?: readonly string[];
   /** Never rejects. Resolves after admitted write callbacks and owned cleanup join. */
   readonly completion: Promise<PeerStreamCompletion>;
   /** Stops admissions, destroys owned resources and joins completion. Idempotent. */
@@ -534,8 +538,11 @@ export async function attachPeerStreams(options: AttachPeerStreamsOptions): Prom
     owned.check();
     clearTimeout(timer);
     owned.startCopy(local, remote);
+    // Reported, not trusted: the local broker has validated this ack and accepted it.
+    const acked = ack.value;
+    const features = Object.freeze(isPeerHelloAck(acked) && acked.accepted ? [...acked.features] : []);
     return Object.freeze({
-      linkId, localOrigin: Object.freeze(localOrigin), remoteOrigin: Object.freeze(remoteOrigin),
+      linkId, localOrigin: Object.freeze(localOrigin), remoteOrigin: Object.freeze(remoteOrigin), features,
       completion: owned.completion,
       close: () => { owned.stop({ status: "closed", reason: "close" }); return owned.completion; },
     });

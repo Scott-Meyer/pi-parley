@@ -2,7 +2,7 @@ import net from "node:net";
 import { randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { Duplex } from "node:stream";
 import { MAX_FRAME_BYTES } from "./framing.js";
-import { isBrokerAcceptPeerRequest, isBrokerAcceptPeerResult, isBrokerDialPeerRequest, isBrokerDialPeerResult, isBrokerStartPeerRequest, isBrokerStartPeerResult, isPeerHello, isFederationBridgeAttach, } from "./federation-protocol.js";
+import { isBrokerAcceptPeerRequest, isBrokerAcceptPeerResult, isBrokerDialPeerRequest, isBrokerDialPeerResult, isBrokerStartPeerRequest, isBrokerStartPeerResult, isPeerHello, isPeerHelloAck, isFederationBridgeAttach, } from "./federation-protocol.js";
 /** Maximum copied bytes in each admitted opaque write; at most one per direction. */
 export const PEER_STREAM_COPY_BYTES = 64 * 1024;
 /** Diagnostics deliberately contain no capabilities, endpoint credentials or raw frames. */
@@ -487,8 +487,11 @@ export async function attachPeerStreams(options) {
         owned.check();
         clearTimeout(timer);
         owned.startCopy(local, remote);
+        // Reported, not trusted: the local broker has validated this ack and accepted it.
+        const acked = ack.value;
+        const features = Object.freeze(isPeerHelloAck(acked) && acked.accepted ? [...acked.features] : []);
         return Object.freeze({
-            linkId, localOrigin: Object.freeze(localOrigin), remoteOrigin: Object.freeze(remoteOrigin),
+            linkId, localOrigin: Object.freeze(localOrigin), remoteOrigin: Object.freeze(remoteOrigin), features,
             completion: owned.completion,
             close: () => { owned.stop({ status: "closed", reason: "close" }); return owned.completion; },
         });

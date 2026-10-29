@@ -303,6 +303,8 @@ async function switchScenario(boxMerges: boolean, check: (helpers: {
     assert.equal(laptop!.scopes.find((scope) => scope.scopeId === "flightdeck")?.liveSessions, 1);
     const attach = (scopeBindings: ScopeBindings) => attachBrokers({ initiator: { broker: laptop!, originLabel: "laptop", scopeBindings }, acceptor: { broker: box!, originLabel: "box", scopeBindings } });
     link = await attach(bindings);
+    // The controller can see whether the pair keeps one identity per session across bindings.
+    assert.equal(link.features.includes("peer-roster-merged-v1"), boxMerges, `negotiated: ${link.features.join(", ")}`);
     const relink = async (next: ScopeBindings) => { await link?.close(); link = undefined; link = await attach(next); };
     await check({ listed, call, inbox, relink });
   } finally {
