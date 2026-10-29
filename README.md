@@ -380,6 +380,31 @@ Call `registerParleyExtension()` once as the wrapper factory's final potentially
 
 Install the bundled tarball as the wrapper's private ordinary dependency rather than as another Pi package. The complete tarball and its production dependencies are required because the actor uses Parley's TypeScript extension, UI, client, broker, and spawn modules. Pi supplies the peer extension-runtime, TUI, and TypeBox modules. The application must set generic routing such as `PI_PARLEY_SCOPE_ID` before Pi loads extensions.
 
+### Embedding Parley in another application
+
+`pi-parley/host` runs Parley sessions inside an application that isn't Pi. It's how the Claude Code and Codex support works, and an application can use it directly. Each of the application's agent sessions gets a hosted session: the same Parley a Pi session has (the `parley` tool, references, receipts, history, names, links), joined under the id the application gives it. Many can share one process.
+
+```typescript
+import { configureParleyHost, createHostedSession, runBroker } from "pi-parley/host";
+
+const session = await createHostedSession({
+  cwd, defaultName: () => chat.title, app: () => "My App",
+  stateFile: (id) => join(dataDir, `${id}.jsonl`),
+  env: {}, publishSessionEnv: false,          // one of many sessions in this process
+  deliver: (delivery) => chat.post(delivery), // returns { accepted: true } or { accepted: false, reason }
+  nameChanged: (name) => chat.rename(name),
+});
+await session.begin(chat.id);
+```
+
+- **Tool:** `session.tool` is the `parley` tool's name, description and JSON Schema, and `session.call(args, signal)` runs it, returning `{ text, isError, details }`.
+- **Deliveries:** `deliver` gets each thing Parley would put in front of the model: `{ text, wake, during?, customType, details }`. `wake` asks for a turn to start; `during` says how to place it in a running turn. It counts as shown only when the application accepts it, synchronously or through a promise. Until then the sender hears it's queued, and Parley offers it again with backoff and adds it to the next model call.
+- **The model boundary:** `session.context(messages)` takes the messages about to go to the model, in Pi's shape, and returns the ones to send. It makes references readable, drops duplicate copies of a message, adds anything not yet accepted, and marks which messages are being answered. Keep accepted deliveries as custom messages (`customType`, `details`) to get all of it.
+- **Lifecycle:** `setBusy(busy)` at turn start and end, `setName` when the person renames the session, `setModel`, `compaction("start" | "end" | "failed")`, and `stop()`. One live hosted session per id: stop the old one before a replacement begins with the same id. The replacement keeps the session's identity, names and history from `stateFile`.
+- **Isolation:** a hosted session takes its identity only from `begin(id)`, never from `PI_PARLEY_STABLE_ID` or a configured `stableId`. With `env`, it reads its FlightDeck, herdr, scope and linking settings from that object instead of the process's. With `publishSessionEnv: false`, it never writes the process environment.
+- **The broker:** sessions use the computer's broker, the same one Pi, Claude Code and Codex sessions use, and start it if none is running. An application that can't run Parley's broker script tells the process how to start one, with `configureParleyHost({ brokerLauncher: { command, args, env? }, startupLock?: false, lockAddon? })`, and runs it from its own entry with `runBroker()`. `lockAddon` is the path to `fs-native-extensions`' native `.node` binary, for a bundle that ships it alone.
+- **Bundling:** a bundler can take `pi-parley/host` whole. `pi-parley/host/bundle-define` gives esbuild the `define` that stamps in the identity of the Parley sources being bundled: `define: parleyBundleDefine()`. Some bundled dependencies call `require()`, so an ESM bundle needs a `createRequire` banner.
+
 ### Broker federation facade
 
 Cross-computer transport is caller-loaded and opt-in. Parley does not discover hosts, approve topology, import a transport provider, or reconnect links. The compiled `pi-parley/federation` entrypoint works in plain Node ESM without a TypeScript loader and keeps broker paths, endpoint credentials, control frames, origins, and handshake machinery behind one public boundary.

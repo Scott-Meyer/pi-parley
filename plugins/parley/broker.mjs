@@ -1,6 +1,6 @@
 import { createRequire as __parleyCreateRequire } from "node:module"; const require = __parleyCreateRequire(import.meta.url);
 
-// broker/broker.ts
+// broker/runtime.ts
 import net3 from "net";
 import { chmodSync as chmodSync3, mkdirSync as mkdirSync6, readdirSync as readdirSync2, readFileSync as readFileSync8, writeFileSync as writeFileSync5, unlinkSync } from "fs";
 import { join as join9 } from "path";
@@ -736,8 +736,8 @@ var ExtensionStateManager = class {
   }
   commitState(namespace, expectedRevision, payload) {
     const payloadJson = serializePayload(payload);
-    const current = this.loadState(namespace);
-    const currentRevision = current?.revision ?? 0;
+    const current2 = this.loadState(namespace);
+    const currentRevision = current2?.revision ?? 0;
     if (payloadJson === null) {
       return {
         committed: false,
@@ -753,7 +753,7 @@ var ExtensionStateManager = class {
         committed: false,
         revision: currentRevision,
         reason: "Revision mismatch",
-        ...current ? { payload: current.payload } : {}
+        ...current2 ? { payload: current2.payload } : {}
       };
     }
     const envelope = {
@@ -821,10 +821,38 @@ import {
 } from "node:fs";
 import { createRequire } from "node:module";
 import path from "node:path";
+
+// broker/host-process.ts
+var current = {};
+function hostProcessOptions() {
+  return current;
+}
+
+// broker/process-lock.ts
 var loadedNativeLocks;
 function nativeLocks() {
-  loadedNativeLocks ??= createRequire(import.meta.url)("fs-native-extensions");
+  loadedNativeLocks ??= loadNativeLocks();
   return loadedNativeLocks;
+}
+function loadNativeLocks() {
+  const require2 = createRequire(import.meta.url);
+  const addon = hostProcessOptions().lockAddon;
+  if (!addon) return require2("fs-native-extensions");
+  const binding = require2(addon);
+  return {
+    tryLock(fd) {
+      try {
+        binding.tryLock(fd, 0, 0, true);
+        return true;
+      } catch (error) {
+        if (error.code === "EAGAIN") return false;
+        throw error;
+      }
+    },
+    unlock(fd) {
+      binding.unlock(fd, 0, 0);
+    }
+  };
 }
 function tryAcquireProcessLock(directory) {
   mkdirSync3(directory, { recursive: true, mode: 448 });
@@ -993,7 +1021,7 @@ import { dirname as dirname2, join as join5 } from "node:path";
 import { fileURLToPath } from "node:url";
 
 // broker/bundle.ts
-var bundledBuild = true ? JSON.parse('{"packageVersion":"1.7.1","sourceId":"136acae77f660be3d74cfc2ec0567b2bf13854319aa8abd17727ba0684146cb0"}') : void 0;
+var bundledBuild = true ? JSON.parse('{"packageVersion":"1.7.1","sourceId":"2df8532451c65fb0aaf7777bc9cf9c9b4142e60c157054a624f98a8755495e01"}') : void 0;
 
 // broker/build.ts
 function getBrokerBuildIdentity(extensionDir = join5(dirname2(fileURLToPath(import.meta.url)), "..")) {
@@ -1149,16 +1177,16 @@ var CollaborationStateStore = class {
     const scope = this.getScope(scopeId);
     const identityKey = this.identityKey(scopeId, sessionId);
     const eventHash = this.compactionEventHash(scopeId, sessionId, eventId);
-    const current = scope.state.identities.get(identityKey);
-    const recordedEvent = current?.recentEvents.find((event) => event.eventHash === eventHash);
+    const current2 = scope.state.identities.get(identityKey);
+    const recordedEvent = current2?.recentEvents.find((event) => event.eventHash === eventHash);
     if (recordedEvent) {
       return { generation: recordedEvent.generation, compactedAt: recordedEvent.compactedAt };
     }
-    const generation = (current?.generation ?? 0) + 1;
+    const generation = (current2?.generation ?? 0) + 1;
     if (!Number.isSafeInteger(generation)) throw new RangeError("Compaction generation exhausted");
     const candidate = cloneState(scope.state);
     const recentEvents = [
-      ...current?.recentEvents ?? [],
+      ...current2?.recentEvents ?? [],
       { eventHash, generation, compactedAt }
     ].slice(-MAX_RECENT_COMPACTION_EVENTS);
     candidate.identities.set(identityKey, {
@@ -3211,7 +3239,7 @@ var PendingPeerSendTracker = class {
   }
 };
 
-// broker/broker.ts
+// broker/runtime.ts
 var PARLEY_DIR = getParleyDirPath();
 var MERGED_SCOPES = loadMergedScopes(PARLEY_DIR);
 var LISTEN_TARGET = getBrokerListenTarget();
@@ -3219,7 +3247,7 @@ var PID_PATH = join9(PARLEY_DIR, "broker.pid");
 var PORT_PATH = getBrokerPortFilePath(PARLEY_DIR);
 var PENDING_ASKS_DIR = join9(PARLEY_DIR, "pending-asks");
 var BROKER_STATE_ID = randomUUID8();
-var BROKER_BUILD = getBrokerBuildIdentity();
+var brokerBuild;
 var BROKER_STARTED_AT = (/* @__PURE__ */ new Date()).toISOString();
 function replyTargetReason(routeKnown) {
   return routeKnown ? "Reply target does not match a previous message from this recipient" : `This broker has no thread for that message. It started at ${BROKER_STARTED_AT}, and threads don't survive a broker restart; send a new message instead of a reply`;
@@ -3336,8 +3364,8 @@ function ensurePendingAskRecordDir() {
   }
 }
 var ParleyBroker = class {
-  constructor(runtimeLease2) {
-    this.runtimeLease = runtimeLease2;
+  constructor(runtimeLease) {
+    this.runtimeLease = runtimeLease;
     this.federationOrigin = loadPersistedFederationOrigin(PARLEY_DIR);
     ensurePendingAskRecordDir();
     this.prunePendingAskRecords();
@@ -4420,7 +4448,7 @@ var ParleyBroker = class {
         broker: {
           pid: process.pid,
           instanceId: this.runtimeLease.owner.claimId,
-          ...BROKER_BUILD
+          ...brokerBuild
         }
       });
       return;
@@ -6143,19 +6171,25 @@ var ParleyBroker = class {
     });
   }
 };
-var runtimeLease;
-try {
-  runtimeLease = await claimBrokerRuntime(PARLEY_DIR, LISTEN_TARGET);
-} catch (error) {
-  if (error instanceof BrokerRuntimeOccupiedError) {
-    console.error(error.message);
-    process.exit(BROKER_RUNTIME_OCCUPIED_EXIT_CODE);
+async function runBroker() {
+  brokerBuild ??= getBrokerBuildIdentity();
+  let runtimeLease;
+  try {
+    runtimeLease = await claimBrokerRuntime(PARLEY_DIR, LISTEN_TARGET);
+  } catch (error) {
+    if (error instanceof BrokerRuntimeOccupiedError) {
+      console.error(error.message);
+      process.exit(BROKER_RUNTIME_OCCUPIED_EXIT_CODE);
+    }
+    throw error;
   }
-  throw error;
+  try {
+    new ParleyBroker(runtimeLease).start();
+  } catch (error) {
+    runtimeLease.release();
+    throw error;
+  }
 }
-try {
-  new ParleyBroker(runtimeLease).start();
-} catch (error) {
-  runtimeLease.release();
-  throw error;
-}
+
+// broker/broker.ts
+await runBroker();

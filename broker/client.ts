@@ -103,6 +103,11 @@ function connectToBrokerTarget(target: BrokerConnectTarget): net.Socket {
 }
 
 export class ParleyClient extends EventEmitter {
+  /** env: where this session's scope is read from; the process's unless given. */
+  constructor(private readonly options: { readonly env?: NodeJS.ProcessEnv } = {}) {
+    super();
+  }
+
   private socket: net.Socket | null = null;
   private _sessionId: string | null = null;
   private _selfSession: SessionInfo | null = null;
@@ -350,7 +355,7 @@ export class ParleyClient extends EventEmitter {
       this.once("_registered", onRegistered);
       
       try {
-        const scopeId = getParleyScopeId();
+        const scopeId = getParleyScopeId(this.options.env);
         writeMessage(socket, {
           type: "register",
           session,

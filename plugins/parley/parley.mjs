@@ -30,7 +30,7 @@ function nodeCommand(execPath = process.execPath) {
 var bundledBuild;
 var init_bundle = __esm({
   "broker/bundle.ts"() {
-    bundledBuild = true ? JSON.parse('{"packageVersion":"1.7.1","sourceId":"136acae77f660be3d74cfc2ec0567b2bf13854319aa8abd17727ba0684146cb0"}') : void 0;
+    bundledBuild = true ? JSON.parse('{"packageVersion":"1.7.1","sourceId":"2df8532451c65fb0aaf7777bc9cf9c9b4142e60c157054a624f98a8755495e01"}') : void 0;
   }
 });
 
@@ -1025,10 +1025,10 @@ var init_discard = __esm({
 });
 
 // node_modules/typebox/build/system/memory/update.mjs
-function Update(current, hidden, enumerable) {
+function Update(current2, hidden, enumerable) {
   Metrics.update += 1;
   const settings2 = settings_exports.Get();
-  const result = Clone(current);
+  const result = Clone(current2);
   for (const key of Object.keys(hidden)) {
     Object.defineProperty(result, key, {
       configurable: true,
@@ -3088,8 +3088,8 @@ function KeyOfMapping(input) {
   return input.length > 0;
 }
 function IndexArrayMapping(input) {
-  return input.reduce((result, current) => {
-    return guard_exports.IsEqual(current.length, 3) ? [...result, [current[1]]] : [...result, []];
+  return input.reduce((result, current2) => {
+    return guard_exports.IsEqual(current2.length, 3) ? [...result, [current2[1]]] : [...result, []];
   }, []);
 }
 function ExtendsMapping(input) {
@@ -5170,12 +5170,12 @@ function Expand(type) {
   const canonicalArgument = CanonicalArgument(type);
   return IsUnion(canonicalArgument) ? [...canonicalArgument.anyOf] : [canonicalArgument];
 }
-function Append(current, type) {
-  return current.reduce((result, left) => [...result, [...left, type]], []);
+function Append(current2, type) {
+  return current2.reduce((result, left) => [...result, [...left, type]], []);
 }
-function Cross(current, variants) {
+function Cross(current2, variants) {
   return variants.reduce((result, left) => {
-    return [...result, ...Append(current, left)];
+    return [...result, ...Append(current2, left)];
   }, []);
 }
 function Distribute2(zipped) {
@@ -8324,7 +8324,7 @@ function updateTrackerFromText(text, tracker) {
 }
 function splitIntoTokensWithAnsi(text) {
   const tokens = [];
-  let current = "";
+  let current2 = "";
   let pendingAnsi = "";
   let inWhitespace = false;
   let i = 0;
@@ -8337,23 +8337,23 @@ function splitIntoTokensWithAnsi(text) {
     }
     const char = text[i];
     const charIsSpace = char === " ";
-    if (charIsSpace !== inWhitespace && current) {
-      tokens.push(current);
-      current = "";
+    if (charIsSpace !== inWhitespace && current2) {
+      tokens.push(current2);
+      current2 = "";
     }
     if (pendingAnsi) {
-      current += pendingAnsi;
+      current2 += pendingAnsi;
       pendingAnsi = "";
     }
     inWhitespace = charIsSpace;
-    current += char;
+    current2 += char;
     i++;
   }
   if (pendingAnsi) {
-    current += pendingAnsi;
+    current2 += pendingAnsi;
   }
-  if (current) {
-    tokens.push(current);
+  if (current2) {
+    tokens.push(current2);
   }
   return tokens;
 }
@@ -11940,6 +11940,12 @@ var init_client = __esm({
       outcomeKnown;
     };
     ParleyClient = class extends EventEmitter {
+      /** env: where this session's scope is read from; the process's unless given. */
+      constructor(options2 = {}) {
+        super();
+        this.options = options2;
+      }
+      options;
       socket = null;
       _sessionId = null;
       _selfSession = null;
@@ -12153,7 +12159,7 @@ var init_client = __esm({
           socket.on("error", onSocketError);
           this.once("_registered", onRegistered);
           try {
-            const scopeId = getParleyScopeId();
+            const scopeId = getParleyScopeId(this.options.env);
             writeMessage(socket, {
               type: "register",
               session,
@@ -12970,6 +12976,17 @@ var init_client = __esm({
   }
 });
 
+// broker/host-process.ts
+function hostProcessOptions() {
+  return current;
+}
+var current;
+var init_host_process = __esm({
+  "broker/host-process.ts"() {
+    current = {};
+  }
+});
+
 // broker/process-lock.ts
 import { randomUUID as randomUUID2 } from "node:crypto";
 import {
@@ -12984,8 +13001,28 @@ import {
 import { createRequire as createRequire2 } from "node:module";
 import path from "node:path";
 function nativeLocks() {
-  loadedNativeLocks ??= createRequire2(import.meta.url)("fs-native-extensions");
+  loadedNativeLocks ??= loadNativeLocks();
   return loadedNativeLocks;
+}
+function loadNativeLocks() {
+  const require2 = createRequire2(import.meta.url);
+  const addon = hostProcessOptions().lockAddon;
+  if (!addon) return require2("fs-native-extensions");
+  const binding = require2(addon);
+  return {
+    tryLock(fd) {
+      try {
+        binding.tryLock(fd, 0, 0, true);
+        return true;
+      } catch (error) {
+        if (error.code === "EAGAIN") return false;
+        throw error;
+      }
+    },
+    unlock(fd) {
+      binding.unlock(fd, 0, 0);
+    }
+  };
 }
 function tryAcquireProcessLock(directory) {
   mkdirSync3(directory, { recursive: true, mode: 448 });
@@ -13049,6 +13086,7 @@ function readDiagnosticOwner(directory) {
 var loadedNativeLocks;
 var init_process_lock = __esm({
   "broker/process-lock.ts"() {
+    init_host_process();
   }
 });
 
@@ -13166,7 +13204,8 @@ function toError2(error) {
 async function spawnBrokerIfNeeded(brokerCommand, brokerArgs) {
   ensureParleyRuntimeDir(PARLEY_DIR);
   if (await isBrokerRunning()) return;
-  const startup = process.versions.bun ? { status: "acquired", lease: { release() {
+  const host = hostProcessOptions();
+  const startup = process.versions.bun || host.startupLock === false ? { status: "acquired", lease: { release() {
   } } } : tryAcquireProcessLock(BROKER_STARTUP_LOCK_DIR);
   if (startup.status === "occupied") {
     await waitForBroker();
@@ -13176,7 +13215,7 @@ async function spawnBrokerIfNeeded(brokerCommand, brokerArgs) {
     if (await isBrokerRunning()) return;
     const bundledBroker = bundledScript("broker");
     const brokerPath = bundledBroker ?? join5(dirname2(fileURLToPath2(import.meta.url)), "broker.ts");
-    const launch = bundledBroker ? process.platform === "win32" ? {
+    const launch = host.brokerLauncher ? { kind: "direct", command: host.brokerLauncher.command, args: [...host.brokerLauncher.args], captureStartupStderr: true } : bundledBroker ? process.platform === "win32" ? {
       kind: "windows-launcher",
       command: "wscript.exe",
       args: ["//E:VBScript", getWindowsHiddenLauncherPath(PARLEY_DIR)],
@@ -13187,7 +13226,11 @@ async function spawnBrokerIfNeeded(brokerCommand, brokerArgs) {
     if (launch.kind === "windows-launcher") {
       writeWindowsHiddenLauncher(launch.launcherCommandLine, launch.launcherPath);
     }
-    const child = spawn(launch.command, launch.args, getBrokerSpawnOptions(EXTENSION_DIR, process.env, launch.captureStartupStderr));
+    const child = spawn(launch.command, launch.args, getBrokerSpawnOptions(
+      EXTENSION_DIR,
+      host.brokerLauncher?.env ? { ...process.env, ...host.brokerLauncher.env } : process.env,
+      launch.captureStartupStderr
+    ));
     let brokerStderr = "";
     const rememberBrokerStderr = (chunk) => {
       brokerStderr = `${brokerStderr}${chunk.toString()}`.slice(-BROKER_STARTUP_STDERR_LIMIT);
@@ -13310,6 +13353,7 @@ var init_spawn = __esm({
     init_protocol();
     init_runtime_claim();
     init_bundle();
+    init_host_process();
     PARLEY_DIR = getParleyDirPath();
     EXTENSION_DIR = join5(dirname2(fileURLToPath2(import.meta.url)), "..");
     BROKER_STARTUP_LOCK_DIR = join5(PARLEY_DIR, "broker.startup");
@@ -14154,10 +14198,10 @@ var init_references = __esm({
       sessionRef(session) {
         const view = typeof session === "string" ? { id: session } : session;
         const live = this.liveViews.get(view.id);
-        const current = this.sessionPrimary.get(view.id);
-        if (!live && current) return current.ref;
+        const current2 = this.sessionPrimary.get(view.id);
+        if (!live && current2) return current2.ref;
         const base = this.qualifiedBase(live ?? view);
-        if (current && current.base === base) return current.ref;
+        if (current2 && current2.base === base) return current2.ref;
         const ref = this.firstAvailableRef(base, view.id);
         this.sessionOwners.set(referenceKey(ref), view.id);
         this.sessionPrimary.set(view.id, { ref, base });
@@ -15120,8 +15164,8 @@ function registerHerdrNames(pi, options2 = {}) {
     if (!workspace) return;
     let wanted = prefix();
     if (isChild) {
-      const current = cleanName(pi.getSessionName()?.trim() || "");
-      wanted = current.startsWith(`${prefix()}:`) ? current : `${prefix()}:${current || "agent"}`;
+      const current2 = cleanName(pi.getSessionName()?.trim() || "");
+      wanted = current2.startsWith(`${prefix()}:`) ? current2 : `${prefix()}:${current2 || "agent"}`;
     }
     lastApplied = wanted;
     if (pi.getSessionName() !== wanted) pi.setSessionName(wanted);
@@ -15194,8 +15238,8 @@ function registerHerdrNames(pi, options2 = {}) {
     later(() => void refresh(), PANE_LABEL_POLL_MS, true);
     if (options2.sessionRenamesArrive === false) {
       later(() => {
-        const current = pi.getSessionName();
-        if (current !== lastApplied) void renamedInPi(current);
+        const current2 = pi.getSessionName();
+        if (current2 !== lastApplied) void renamedInPi(current2);
       }, 1e3, true);
     }
   });
@@ -15500,13 +15544,6 @@ var init_project_agent = __esm({
 });
 
 // index.ts
-var index_exports = {};
-__export(index_exports, {
-  default: () => index_default,
-  registerParleyExtension: () => registerParleyExtension,
-  sessionIdPrefixes: () => sessionIdPrefixes,
-  sessionPlace: () => sessionPlace
-});
 import { randomUUID as randomUUID6 } from "crypto";
 import { resolve as resolvePath } from "node:path";
 import { AsyncLocalStorage } from "node:async_hooks";
@@ -15641,16 +15678,16 @@ ${att.content}`;
   }
   return text;
 }
-function readChildOrchestratorMetadata() {
-  const orchestratorTarget = process.env[SUBAGENT_ORCHESTRATOR_TARGET_ENV]?.trim();
-  const orchestratorSessionId = process.env[SUBAGENT_ORCHESTRATOR_SESSION_ID_ENV]?.trim() || process.env[PARLEY_SESSION_ID_ENV]?.trim();
-  const runId = process.env[SUBAGENT_RUN_ID_ENV]?.trim();
-  const agent = process.env[SUBAGENT_CHILD_AGENT_ENV]?.trim();
-  const index = process.env[SUBAGENT_CHILD_INDEX_ENV]?.trim();
+function readChildOrchestratorMetadata(env) {
+  const orchestratorTarget = env[SUBAGENT_ORCHESTRATOR_TARGET_ENV]?.trim();
+  const orchestratorSessionId = env[SUBAGENT_ORCHESTRATOR_SESSION_ID_ENV]?.trim() || env[PARLEY_SESSION_ID_ENV]?.trim();
+  const runId = env[SUBAGENT_RUN_ID_ENV]?.trim();
+  const agent = env[SUBAGENT_CHILD_AGENT_ENV]?.trim();
+  const index = env[SUBAGENT_CHILD_INDEX_ENV]?.trim();
   if (!orchestratorTarget || !runId || !agent || !index) {
     return null;
   }
-  const sessionName = process.env[SUBAGENT_PARLEY_SESSION_NAME_ENV]?.trim();
+  const sessionName = env[SUBAGENT_PARLEY_SESSION_NAME_ENV]?.trim();
   return {
     orchestratorTarget,
     ...orchestratorSessionId ? { orchestratorSessionId } : {},
@@ -15881,33 +15918,6 @@ function parseStructuredSupervisorReply(text, interview) {
     return { error: getErrorMessage(error) };
   }
 }
-function sessionIdPrefixes(sessions) {
-  const prefixes = /* @__PURE__ */ new Map();
-  for (const session of sessions) {
-    let longestSharedPrefix = 0;
-    for (const other2 of sessions) {
-      if (other2.id === session.id) {
-        continue;
-      }
-      let length2 = 0;
-      while (length2 < session.id.length && session.id[length2] === other2.id[length2]) {
-        length2 += 1;
-      }
-      longestSharedPrefix = Math.max(longestSharedPrefix, length2);
-    }
-    const minimumLength = Math.max(8, longestSharedPrefix + 1);
-    let groupBoundary = -1;
-    for (const separator of ["-", ":"]) {
-      const boundary = session.id.indexOf(separator, minimumLength);
-      if (boundary !== -1 && (groupBoundary === -1 || boundary < groupBoundary)) {
-        groupBoundary = boundary;
-      }
-    }
-    const length = groupBoundary === -1 ? session.id.length : groupBoundary;
-    prefixes.set(session.id, session.id.slice(0, length));
-  }
-  return prefixes;
-}
 function parseSubagentParleyPayload(payload) {
   if (typeof payload !== "object" || payload === null) {
     return null;
@@ -15984,11 +15994,12 @@ function buildPresenceIdentity(pi, sessionId, configuration) {
     runtimeFallbackAlias: resolvedName === void 0
   };
 }
-function resolveConfiguredParleySessionId(piSessionId, config) {
-  return process.env[STABLE_PARLEY_SESSION_ID_ENV]?.trim() || config.stableId || piSessionId;
+function resolveConfiguredParleySessionId(piSessionId, config, env, identity = "configured") {
+  if (identity === "session") return piSessionId;
+  return env[STABLE_PARLEY_SESSION_ID_ENV]?.trim() || config.stableId || piSessionId;
 }
-function currentTmuxPane() {
-  const pane = process.env.TMUX_PANE?.trim();
+function currentTmuxPane(env) {
+  const pane = env.TMUX_PANE?.trim();
   return pane ? pane : void 0;
 }
 function formatParleyContactSnippet(sessionId) {
@@ -16046,15 +16057,27 @@ function normalizeParleyExtensionOptions(options2) {
   if (options2.resolveApp !== void 0 && typeof options2.resolveApp !== "function") {
     throw new TypeError("resolveApp must be a function");
   }
+  if (options2.env !== void 0 && (!options2.env || typeof options2.env !== "object")) {
+    throw new TypeError("env must be an object of environment variables");
+  }
+  if (options2.identity !== void 0 && options2.identity !== "configured" && options2.identity !== "session") {
+    throw new TypeError('identity must be "configured" or "session"');
+  }
   return Object.freeze({
     ...options2.resolvePresenceName ? { resolvePresenceName: options2.resolvePresenceName } : {},
     ...options2.app ? { app: options2.app.trim() } : {},
-    ...options2.resolveApp ? { resolveApp: options2.resolveApp } : {}
+    ...options2.resolveApp ? { resolveApp: options2.resolveApp } : {},
+    ...options2.env ? { env: Object.freeze({ ...options2.env }) } : {},
+    ...options2.publishSessionEnv === false ? { publishSessionEnv: false } : {},
+    ...options2.identity ? { identity: options2.identity } : {}
   });
 }
 function configureParleyExtension(configuration, options2) {
   if (options2.app) configuration.app = options2.app;
   if (options2.resolveApp) configuration.resolveApp = options2.resolveApp;
+  if (options2.env) configuration.env = options2.env;
+  if (options2.publishSessionEnv === false) configuration.publishSessionEnv = false;
+  if (options2.identity) configuration.identity = options2.identity;
   const resolver = options2.resolvePresenceName;
   if (!resolver || resolver === configuration.resolvePresenceName) return;
   if (configuration.resolvePresenceName) {
@@ -16110,18 +16133,22 @@ function registerParleyExtension(pi, options2) {
 function installParleyExtension(pi, configuration, releaseRuntimeClaim, retainRegistrationCleanup) {
   let client = null;
   const config = loadRuntimeConfig((error) => console.error(error.message));
+  const sessionEnv = () => configuration.env ?? process.env;
   const askTimeoutMs = getAskTimeoutMs();
   const compactionPresenceSupported = false;
   void sessionCompactFailuresReachExtensions;
   const localExtensions = /* @__PURE__ */ new Map();
   let runtimeContext = null;
-  if (config.enabled && config.herdrNames) registerHerdrNames(pi, { sessionRenamesArrive: sessionInfoChangesReachExtensions() });
+  if (config.enabled && config.herdrNames) registerHerdrNames(pi, { sessionRenamesArrive: sessionInfoChangesReachExtensions(), env: sessionEnv() });
   let linkSessionInteractive = false;
   const links = new SessionLinks(
     (message) => {
       if (runtimeContext) notifyIfLive(runtimeContext, message, "info");
     },
-    () => (process.env.PI_PARLEY_LINK_BY_DEFAULT?.trim() ? process.env.PI_PARLEY_LINK_BY_DEFAULT.trim() !== "0" : config.linkByDefault) && linkSessionInteractive && !process.env.NODE_TEST_CONTEXT && !process.env.FLIGHTDECK_TAB_ID?.trim() && !process.env.FLIGHTDECK_PANE_ID?.trim() && !process.env[SUBAGENT_CHILD_AGENT_ENV]?.trim() && process.env.PI_SUBAGENT_CHILD !== "1"
+    () => {
+      const env = sessionEnv();
+      return (env.PI_PARLEY_LINK_BY_DEFAULT?.trim() ? env.PI_PARLEY_LINK_BY_DEFAULT.trim() !== "0" : config.linkByDefault) && linkSessionInteractive && !env.NODE_TEST_CONTEXT && !env.FLIGHTDECK_TAB_ID?.trim() && !env.FLIGHTDECK_PANE_ID?.trim() && !env[SUBAGENT_CHILD_AGENT_ENV]?.trim() && env.PI_SUBAGENT_CHILD !== "1";
+    }
   );
   let currentSessionId = null;
   let currentParleySessionId = null;
@@ -16737,7 +16764,7 @@ Session: ${from.cwd}${origin}${compaction}`, { from, message });
       throw new Error("Parley runtime not initialized");
     }
     const identity = buildPresenceIdentity(pi, currentParleySessionId ?? currentSessionId, configuration);
-    const tmuxPane = currentTmuxPane();
+    const tmuxPane = currentTmuxPane(sessionEnv());
     return {
       ...identity,
       ...currentSessionDescription ? { description: currentSessionDescription } : {},
@@ -16748,7 +16775,7 @@ Session: ${from.cwd}${origin}${compaction}`, { from, message });
       lastActivity: Date.now(),
       status: currentStatus(),
       ...tmuxPane ? { tmuxPane } : {},
-      app: appLabel(configuration.resolveApp?.()) ?? configuration.app ?? detectApp(),
+      app: appLabel(configuration.resolveApp?.()) ?? configuration.app ?? detectApp(sessionEnv()),
       ...localExtensions.size > 0 ? {
         extensions: currentExtensionCapabilities()
       } : {},
@@ -16756,7 +16783,7 @@ Session: ${from.cwd}${origin}${compaction}`, { from, message });
     };
   }
   function subagentAclFields() {
-    const metadata = readChildOrchestratorMetadata();
+    const metadata = readChildOrchestratorMetadata(sessionEnv());
     if (!metadata) {
       return {};
     }
@@ -16799,9 +16826,11 @@ Session: ${from.cwd}${origin}${compaction}`, { from, message });
     });
   }
   function publishParleySessionId(sessionId) {
+    if (configuration.publishSessionEnv === false) return;
     process.env[PARLEY_SESSION_ID_ENV] = sessionId;
   }
   function restoreParleySessionId() {
+    if (configuration.publishSessionEnv === false) return;
     if (previousParleySessionId === void 0) {
       delete process.env[PARLEY_SESSION_ID_ENV];
       return;
@@ -17556,7 +17585,7 @@ ${describeCompaction(senderDisplay, message.peerCompaction, from.id)}`, { from, 
     let nextReconnectPromise;
     let retryAfterFailure = false;
     nextReconnectPromise = (async () => {
-      const nextClient = new ParleyClient();
+      const nextClient = new ParleyClient({ env: sessionEnv() });
       client = nextClient;
       attachClientHandlers(nextClient);
       try {
@@ -17674,7 +17703,7 @@ ${describeCompaction(senderDisplay, message.peerCompaction, from.id)}`, { from, 
       focus: options2.focus,
       sessions,
       currentSessionId: currentSessionId2,
-      launcherCommand: resolveProjectLauncherCommand(process.env, config.projectLauncher),
+      launcherCommand: resolveProjectLauncherCommand(sessionEnv(), config.projectLauncher),
       sendRequest: (provider, request) => activeClient.send(provider.id, {
         text: projectLaunchRequestText(request),
         signal: options2.signal
@@ -17871,7 +17900,7 @@ Observed local session: ${target2.session ? references.current.sessionRef(target
   }
   function startSessionRuntime(ctx) {
     const nextSessionId = ctx.sessionManager.getSessionId();
-    const nextParleySessionId = resolveConfiguredParleySessionId(nextSessionId, config);
+    const nextParleySessionId = resolveConfiguredParleySessionId(nextSessionId, config, sessionEnv(), configuration.identity);
     try {
       buildPresenceIdentity(pi, nextParleySessionId, configuration);
     } catch (error) {
@@ -18026,7 +18055,7 @@ Observed local session: ${target2.session ? references.current.sessionRef(target
     } catch {
       linkSessionInteractive = false;
     }
-    links.start();
+    links.start(sessionEnv());
   });
   pi.on("session_shutdown", async () => {
     unsubscribeExtensionRegister();
@@ -18271,8 +18300,8 @@ Observed local session: ${target2.session ? references.current.sessionRef(target
       return { isError: true };
     }
   });
-  const childOrchestratorMetadata = readChildOrchestratorMetadata();
-  const nativeSupervisorChannelAvailable = Boolean(process.env[SUBAGENT_SUPERVISOR_CHANNEL_DIR_ENV]?.trim());
+  const childOrchestratorMetadata = readChildOrchestratorMetadata(sessionEnv());
+  const nativeSupervisorChannelAvailable = Boolean(sessionEnv()[SUBAGENT_SUPERVISOR_CHANNEL_DIR_ENV]?.trim());
   if (childOrchestratorMetadata && !nativeSupervisorChannelAvailable) {
     pi.registerTool(presentingTool(defineTool({
       name: "contact_supervisor",
@@ -20272,7 +20301,7 @@ function clickToExpand(child, context) {
     context.invalidate?.();
   });
 }
-var verbatim, PRESENTED_MARK, PARLEY_TOOL_NAME, SUBAGENT_CONTROL_PARLEY_EVENT, SUBAGENT_RESULT_PARLEY_EVENT, SUBAGENT_RESULT_PARLEY_DELIVERY_EVENT, INBOUND_MESSAGE_DEDUPE_MAX, INBOUND_MESSAGE_DEDUPE_RETENTION_MS, MAX_EXPLICIT_SEND_TARGETS, SEND_FANOUT_CONCURRENCY, COMPACTION_STATUS_FAILSAFE_MS, DEFAULT_UNNAMED_SESSION_ALIAS_PREFIX, SUBAGENT_ORCHESTRATOR_TARGET_ENV, SUBAGENT_ORCHESTRATOR_SESSION_ID_ENV, PARLEY_SESSION_ID_ENV, STABLE_PARLEY_SESSION_ID_ENV, SUBAGENT_RUN_ID_ENV, SUBAGENT_CHILD_AGENT_ENV, SUBAGENT_CHILD_INDEX_ENV, SUBAGENT_PARLEY_SESSION_NAME_ENV, SUBAGENT_SUPERVISOR_CHANNEL_DIR_ENV, SESSION_PRESENCE_NAME_CONTEXT, PARLEY_EXTENSION_RUNTIME_CLAIM_EVENT, PARLEY_COMMAND_VERBS, index_default;
+var verbatim, PRESENTED_MARK, PARLEY_TOOL_NAME, SUBAGENT_CONTROL_PARLEY_EVENT, SUBAGENT_RESULT_PARLEY_EVENT, SUBAGENT_RESULT_PARLEY_DELIVERY_EVENT, INBOUND_MESSAGE_DEDUPE_MAX, INBOUND_MESSAGE_DEDUPE_RETENTION_MS, MAX_EXPLICIT_SEND_TARGETS, SEND_FANOUT_CONCURRENCY, COMPACTION_STATUS_FAILSAFE_MS, DEFAULT_UNNAMED_SESSION_ALIAS_PREFIX, SUBAGENT_ORCHESTRATOR_TARGET_ENV, SUBAGENT_ORCHESTRATOR_SESSION_ID_ENV, PARLEY_SESSION_ID_ENV, STABLE_PARLEY_SESSION_ID_ENV, SUBAGENT_RUN_ID_ENV, SUBAGENT_CHILD_AGENT_ENV, SUBAGENT_CHILD_INDEX_ENV, SUBAGENT_PARLEY_SESSION_NAME_ENV, SUBAGENT_SUPERVISOR_CHANNEL_DIR_ENV, SESSION_PRESENCE_NAME_CONTEXT, PARLEY_EXTENSION_RUNTIME_CLAIM_EVENT, PARLEY_COMMAND_VERBS;
 var init_index = __esm({
   "index.ts"() {
     init_build();
@@ -20327,7 +20356,6 @@ var init_index = __esm({
       { value: "id", label: "id", description: "Insert this session's contact into the editor (--id for the canonical target)" },
       { value: "alias ", label: "alias", description: "Set or show this session's name (alias menu to choose)" }
     ];
-    index_default = registerParleyExtension;
   }
 });
 
@@ -20336,6 +20364,12 @@ import { EventEmitter as EventEmitter2 } from "node:events";
 import { appendFileSync, existsSync as existsSync4, mkdirSync as mkdirSync4, readFileSync as readFileSync7 } from "node:fs";
 import { dirname as dirname5 } from "node:path";
 import { randomUUID as randomUUID7 } from "node:crypto";
+function deliveryKey(message) {
+  const details = message.details;
+  if (message.customType === "parley_message" && details?.message?.id) return `message:${details.message.id}`;
+  if (message.customType === "parley_message_control" && details?.control?.messageId) return `control:${details.control.messageId}:${details.control.action ?? ""}`;
+  return void 0;
+}
 async function createHostedSession(options2) {
   let sessionId;
   let stateFile;
@@ -20348,16 +20382,73 @@ async function createHostedSession(options2) {
   let sessionName;
   let app;
   let busy = false;
+  const model = { id: options2.model ?? "unknown" };
   const bus = new EventEmitter2();
   const handlers = /* @__PURE__ */ new Map();
   const tools = [];
+  const deciding = /* @__PURE__ */ new Set();
+  const refused = /* @__PURE__ */ new Map();
+  const renamed = (name) => {
+    sessionName = name;
+    record({ kind: "name", name, at: (/* @__PURE__ */ new Date()).toISOString() });
+    void emit("session_info_changed", { type: "session_info_changed", name });
+  };
+  const handOver = (message, delivery) => {
+    const text = typeof message.content === "string" ? message.content : Array.isArray(message.content) ? message.content.map((part) => part?.text ?? "").join("\n") : "";
+    const key = deliveryKey(message);
+    if (key && deciding.has(key)) return;
+    const backoff = key ? refused.get(key) : void 0;
+    if (backoff && Date.now() < backoff.retryAt) throw new Error("The host isn't taking this message yet");
+    const accept = () => {
+      if (key) refused.delete(key);
+      record({ kind: "message", message, at: (/* @__PURE__ */ new Date()).toISOString() });
+    };
+    const refuse = (reason2) => {
+      if (!key) return;
+      const waitMs = Math.min(RETRY_MAX_MS, backoff ? backoff.waitMs * 2 : RETRY_FIRST_MS);
+      refused.set(key, { retryAt: Date.now() + waitMs, waitMs });
+      return reason2;
+    };
+    if (!text.trim()) {
+      accept();
+      return;
+    }
+    const outcome = options2.deliver({
+      text,
+      wake: delivery?.triggerTurn === true,
+      ...delivery?.deliverAs === "steer" || delivery?.deliverAs === "followUp" ? { during: delivery.deliverAs } : {},
+      customType: message.customType ?? "parley",
+      ...message.details !== void 0 ? { details: message.details } : {}
+    });
+    if (outcome && typeof outcome.then === "function") {
+      if (key) deciding.add(key);
+      void outcome.then(
+        (result2) => {
+          if (result2.accepted) accept();
+          else refuse(result2.reason);
+        },
+        (error) => {
+          refuse(error instanceof Error ? error.message : String(error));
+        }
+      ).finally(() => {
+        if (key) deciding.delete(key);
+      });
+      return;
+    }
+    const result = outcome;
+    if (!result || result.accepted) {
+      accept();
+      return;
+    }
+    const reason = refuse(result.reason);
+    if (reason !== void 0) throw new Error(reason);
+  };
   const pi = {
     getSessionName: () => sessionName,
     setSessionName: (name) => {
       if (name === sessionName) return;
-      sessionName = name;
-      record({ kind: "name", name, at: (/* @__PURE__ */ new Date()).toISOString() });
-      void emit("session_info_changed", { type: "session_info_changed", name });
+      renamed(name);
+      options2.nameChanged?.(name);
     },
     events: {
       on: (channel, handler) => {
@@ -20379,21 +20470,12 @@ async function createHostedSession(options2) {
     registerCommand: () => void 0,
     registerShortcut: () => void 0,
     registerMessageRenderer: () => void 0,
-    sendMessage: (message, delivery) => {
-      record({ kind: "message", message, at: (/* @__PURE__ */ new Date()).toISOString() });
-      const text = typeof message.content === "string" ? message.content : Array.isArray(message.content) ? message.content.map((part) => part?.text ?? "").join("\n") : "";
-      if (!text.trim()) return;
-      options2.deliver({
-        text,
-        wake: delivery?.triggerTurn === true,
-        ...delivery?.deliverAs === "steer" || delivery?.deliverAs === "followUp" ? { during: delivery.deliverAs } : {}
-      });
-    },
+    sendMessage: handOver,
     appendEntry: (type, data) => record({ kind: "entry", type, data, at: (/* @__PURE__ */ new Date()).toISOString() })
   };
   const ctx = {
     cwd: options2.cwd,
-    model: { id: options2.model ?? "unknown" },
+    model,
     hasUI: false,
     isIdle: () => !busy,
     abort: () => void 0,
@@ -20408,16 +20490,22 @@ async function createHostedSession(options2) {
     }
   };
   async function emit(event, payload = {}) {
+    const results = [];
     for (const handler of handlers.get(event) ?? []) {
       try {
-        await handler(payload, ctx);
+        results.push(await handler(payload, ctx));
       } catch (error) {
         console.error(`[parley] ${event} handler failed: ${error instanceof Error ? error.message : String(error)}`);
       }
     }
+    return results;
   }
-  const { registerParleyExtension: registerParleyExtension2 } = await Promise.resolve().then(() => (init_index(), index_exports));
-  registerParleyExtension2(pi, { resolveApp: () => app });
+  registerParleyExtension(pi, {
+    resolveApp: () => app,
+    identity: "session",
+    ...options2.env ? { env: options2.env } : {},
+    ...options2.publishSessionEnv === false ? { publishSessionEnv: false } : {}
+  });
   const tool = tools.find((candidate) => candidate.name === "parley");
   if (!tool) throw new Error("Parley registered no parley tool");
   const instructions = [tool.promptSnippet, ...tool.promptGuidelines ?? []].filter(Boolean).join("\n");
@@ -20461,12 +20549,36 @@ async function createHostedSession(options2) {
       await emit("tool_execution_end", { toolCallId, toolName: tool.name, isError: result.isError ?? false });
       const text = result.content.map((part) => part.text ?? "").filter(Boolean).join("\n");
       const failed = result.isError === true || result.details?.error === true;
-      return { text, isError: failed };
+      return { text, isError: failed, ...result.details !== void 0 ? { details: result.details } : {} };
+    },
+    async context(messages) {
+      let current2 = [...messages];
+      for (const result of await emit("context", { type: "context", messages: current2 })) {
+        const next = result?.messages;
+        if (Array.isArray(next)) current2 = next;
+      }
+      return current2;
     },
     setBusy(next) {
       if (next === busy) return;
       busy = next;
-      void emit(next ? "agent_start" : "agent_end", { type: next ? "agent_start" : "agent_end", messages: [] });
+      void (async () => {
+        await emit(next ? "agent_start" : "agent_end", { type: next ? "agent_start" : "agent_end", messages: [] });
+        if (next) await emit("turn_start", { type: "turn_start" });
+      })();
+    },
+    setName(name) {
+      const trimmed = name.trim();
+      if (!trimmed || trimmed === sessionName) return;
+      renamed(trimmed);
+    },
+    setModel(id) {
+      if (!id || id === model.id) return;
+      model.id = id;
+      void emit("model_select", { type: "model_select", model: { id } });
+    },
+    compaction(phase) {
+      void emit(phase === "start" ? "session_before_compact" : phase === "end" ? "session_compact" : "session_compact_failed", { type: phase });
     },
     name: () => sessionName,
     async stop() {
@@ -20474,8 +20586,12 @@ async function createHostedSession(options2) {
     }
   };
 }
+var RETRY_FIRST_MS, RETRY_MAX_MS;
 var init_hosted_session = __esm({
   "hosts/hosted-session.ts"() {
+    init_index();
+    RETRY_FIRST_MS = 1e3;
+    RETRY_MAX_MS = 3e4;
   }
 });
 
@@ -20772,7 +20888,7 @@ async function serveHost(host) {
     if (session.started() && sessionId === exact) return;
     if (session.started()) return;
     const handed = await askSiblingToRelease(hostPid, exact);
-    for (const text of handed?.output?.pending ?? []) pending.push({ text, wake: false });
+    for (const text of handed?.output?.pending ?? []) pending.push({ text, wake: false, customType: "parley_message" });
     sessionId = exact;
     control.claim(exact);
     await session.begin(exact);
@@ -20826,7 +20942,7 @@ function claudeHost(env = process.env, version2 = "0") {
     cwd: () => env.CLAUDE_PROJECT_DIR?.trim() || process.cwd(),
     wake: (text) => sendToInbox(env, text),
     // Claude Desktop's Code tab says so in CLAUDE_CODE_ENTRYPOINT ("claude-desktop…").
-    app: (current) => /desktop/i.test(current.CLAUDE_CODE_ENTRYPOINT ?? "") ? "Claude Desktop" : sessionPlace(current) ? `Claude Code in ${sessionPlace(current)}` : "Claude Code",
+    app: (current2) => /desktop/i.test(current2.CLAUDE_CODE_ENTRYPOINT ?? "") ? "Claude Desktop" : sessionPlace(current2) ? `Claude Code in ${sessionPlace(current2)}` : "Claude Code",
     hookOutput: (event, text) => event === "Stop" ? { decision: "block", reason: text } : { hookSpecificOutput: { hookEventName: event, additionalContext: text } }
   };
 }
@@ -20889,7 +21005,7 @@ function codexHost(env = process.env, version2 = "0") {
     sharedParent: () => /\bapp-server\b/.test(parentCommand()),
     // Codex puts the thread in every tool call's _meta.
     sessionOfCall: (meta) => typeof meta?.threadId === "string" && meta.threadId ? meta.threadId : void 0,
-    app: (current) => startedByChatGptApp() ? "Codex in the ChatGPT app" : sessionPlace(current) ? `Codex in ${sessionPlace(current)}` : "Codex",
+    app: (current2) => startedByChatGptApp() ? "Codex in the ChatGPT app" : sessionPlace(current2) ? `Codex in ${sessionPlace(current2)}` : "Codex",
     hookOutput: (event, text) => event === "Stop" ? { decision: "block", reason: text } : { hookSpecificOutput: { hookEventName: event, additionalContext: text } }
   };
 }

@@ -70,6 +70,15 @@ export interface ParleyExtensionOptions {
   readonly app?: string;
   /** Like `app`, asked each time the session registers; undefined falls back to `app`. */
   readonly resolveApp?: () => string | undefined;
+  /** The environment this session is read from: FlightDeck and herdr, scope, subagent role,
+   * whether it links by default. Default: the process's. An application running many
+   * sessions in one process gives each its own. */
+  readonly env?: Readonly<Record<string, string | undefined>>;
+  /** false: don't put this session's id in the process environment for child processes. */
+  readonly publishSessionEnv?: boolean;
+  /** "session": the session's own id is its Parley identity, never PI_PARLEY_STABLE_ID or a
+   * configured stableId, which would give every session in the process one identity. */
+  readonly identity?: "configured" | "session";
 }
 
 interface ParleyExtensionConfiguration {
@@ -77,6 +86,9 @@ interface ParleyExtensionConfiguration {
   presenceNameResolutionStarted: boolean;
   app?: string;
   resolveApp?: () => string | undefined;
+  env?: Readonly<Record<string, string | undefined>>;
+  publishSessionEnv?: boolean;
+  identity?: "configured" | "session";
 }
 
 /** Where a session runs: the terminal-like place it lives in, if any. */
@@ -352,17 +364,17 @@ function formatAttachments(attachments: Attachment[]): string {
   }
   return text;
 }
-function readChildOrchestratorMetadata(): ChildOrchestratorMetadata | null {
-  const orchestratorTarget = process.env[SUBAGENT_ORCHESTRATOR_TARGET_ENV]?.trim();
-  const orchestratorSessionId = process.env[SUBAGENT_ORCHESTRATOR_SESSION_ID_ENV]?.trim()
-    || process.env[PARLEY_SESSION_ID_ENV]?.trim();
-  const runId = process.env[SUBAGENT_RUN_ID_ENV]?.trim();
-  const agent = process.env[SUBAGENT_CHILD_AGENT_ENV]?.trim();
-  const index = process.env[SUBAGENT_CHILD_INDEX_ENV]?.trim();
+function readChildOrchestratorMetadata(env: NodeJS.ProcessEnv): ChildOrchestratorMetadata | null {
+  const orchestratorTarget = env[SUBAGENT_ORCHESTRATOR_TARGET_ENV]?.trim();
+  const orchestratorSessionId = env[SUBAGENT_ORCHESTRATOR_SESSION_ID_ENV]?.trim()
+    || env[PARLEY_SESSION_ID_ENV]?.trim();
+  const runId = env[SUBAGENT_RUN_ID_ENV]?.trim();
+  const agent = env[SUBAGENT_CHILD_AGENT_ENV]?.trim();
+  const index = env[SUBAGENT_CHILD_INDEX_ENV]?.trim();
   if (!orchestratorTarget || !runId || !agent || !index) {
     return null;
   }
-  const sessionName = process.env[SUBAGENT_PARLEY_SESSION_NAME_ENV]?.trim();
+  const sessionName = env[SUBAGENT_PARLEY_SESSION_NAME_ENV]?.trim();
   return {
     orchestratorTarget,
     ...(orchestratorSessionId ? { orchestratorSessionId } : {}),
@@ -745,15 +757,16 @@ function buildPresenceIdentity(
     runtimeFallbackAlias: resolvedName === undefined,
   };
 }
-function resolveConfiguredParleySessionId(piSessionId: string, config: ParleyConfig): string {
-  return process.env[STABLE_PARLEY_SESSION_ID_ENV]?.trim() || config.stableId || piSessionId;
+function resolveConfiguredParleySessionId(piSessionId: string, config: ParleyConfig, env: NodeJS.ProcessEnv, identity: "configured" | "session" = "configured"): string {
+  if (identity === "session") return piSessionId;
+  return env[STABLE_PARLEY_SESSION_ID_ENV]?.trim() || config.stableId || piSessionId;
 }
 // The tmux pane id (e.g. "%212") the session was launched in. $TMUX_PANE is
 // inherited at process start and immutable for the lifetime — moving the pane
 // between windows keeps its id — so it is a stable join key a peer can use to
 // live-resolve the current window via tmux. Absent outside tmux.
-function currentTmuxPane(): string | undefined {
-  const pane = process.env.TMUX_PANE?.trim();
+function currentTmuxPane(env: NodeJS.ProcessEnv): string | undefined {
+  const pane = env.TMUX_PANE?.trim();
   return pane ? pane : undefined;
 }
 function formatParleyContactSnippet(sessionId: string): string {
@@ -822,10 +835,19 @@ function normalizeParleyExtensionOptions(options: ParleyExtensionOptions | undef
   if (options.resolveApp !== undefined && typeof options.resolveApp !== "function") {
     throw new TypeError("resolveApp must be a function");
   }
+  if (options.env !== undefined && (!options.env || typeof options.env !== "object")) {
+    throw new TypeError("env must be an object of environment variables");
+  }
+  if (options.identity !== undefined && options.identity !== "configured" && options.identity !== "session") {
+    throw new TypeError('identity must be "configured" or "session"');
+  }
   return Object.freeze({
     ...(options.resolvePresenceName ? { resolvePresenceName: options.resolvePresenceName } : {}),
     ...(options.app ? { app: options.app.trim() } : {}),
     ...(options.resolveApp ? { resolveApp: options.resolveApp } : {}),
+    ...(options.env ? { env: Object.freeze({ ...options.env }) } : {}),
+    ...(options.publishSessionEnv === false ? { publishSessionEnv: false } : {}),
+    ...(options.identity ? { identity: options.identity } : {}),
   });
 }
 
@@ -835,6 +857,9 @@ function configureParleyExtension(
 ): void {
   if (options.app) configuration.app = options.app;
   if (options.resolveApp) configuration.resolveApp = options.resolveApp;
+  if (options.env) configuration.env = options.env;
+  if (options.publishSessionEnv === false) configuration.publishSessionEnv = false;
+  if (options.identity) configuration.identity = options.identity;
   const resolver = options.resolvePresenceName;
   if (!resolver || resolver === configuration.resolvePresenceName) return;
   if (configuration.resolvePresenceName) {
@@ -914,6 +939,8 @@ function installParleyExtension(
 ): void {
   let client: ParleyClient | null = null;
   const config: ParleyConfig = loadRuntimeConfig((error) => console.error(error.message));
+  // What this session is read from; the process's own unless the host gave it one.
+  const sessionEnv = (): NodeJS.ProcessEnv => (configuration.env ?? process.env) as NodeJS.ProcessEnv;
   const askTimeoutMs = getAskTimeoutMs();
   // Parley says nothing about anyone's context: no "compacting" presence, no compaction notices.
   const compactionPresenceSupported = false;
@@ -926,7 +953,7 @@ function installParleyExtension(
   }>();
   let runtimeContext: ExtensionContext | null = null;
   // In a herdr pane, the session's name follows herdr's and the other way round.
-  if (config.enabled && config.herdrNames) registerHerdrNames(pi, { sessionRenamesArrive: sessionInfoChangesReachExtensions() });
+  if (config.enabled && config.herdrNames) registerHerdrNames(pi, { sessionRenamesArrive: sessionInfoChangesReachExtensions(), env: sessionEnv() });
 
   // Cross-computer links: told to the person, never added to the model's context.
   // Linking is on by default for a person's interactive sessions. Not where an
@@ -936,10 +963,13 @@ function installParleyExtension(
   let linkSessionInteractive = false;
   const links = new SessionLinks(
     (message) => { if (runtimeContext) notifyIfLive(runtimeContext, message, "info"); },
-    () => (process.env.PI_PARLEY_LINK_BY_DEFAULT?.trim() ? process.env.PI_PARLEY_LINK_BY_DEFAULT.trim() !== "0" : config.linkByDefault)
-      && linkSessionInteractive && !process.env.NODE_TEST_CONTEXT
-      && !process.env.FLIGHTDECK_TAB_ID?.trim() && !process.env.FLIGHTDECK_PANE_ID?.trim()
-      && !process.env[SUBAGENT_CHILD_AGENT_ENV]?.trim() && process.env.PI_SUBAGENT_CHILD !== "1",
+    () => {
+      const env = sessionEnv();
+      return (env.PI_PARLEY_LINK_BY_DEFAULT?.trim() ? env.PI_PARLEY_LINK_BY_DEFAULT.trim() !== "0" : config.linkByDefault)
+        && linkSessionInteractive && !env.NODE_TEST_CONTEXT
+        && !env.FLIGHTDECK_TAB_ID?.trim() && !env.FLIGHTDECK_PANE_ID?.trim()
+        && !env[SUBAGENT_CHILD_AGENT_ENV]?.trim() && env.PI_SUBAGENT_CHILD !== "1";
+    },
   );
   let currentSessionId: string | null = null;
   let currentParleySessionId: string | null = null;
@@ -1624,7 +1654,7 @@ function installParleyExtension(
     }
 
     const identity = buildPresenceIdentity(pi, currentParleySessionId ?? currentSessionId, configuration);
-    const tmuxPane = currentTmuxPane();
+    const tmuxPane = currentTmuxPane(sessionEnv());
     return {
       ...identity,
       ...(currentSessionDescription ? { description: currentSessionDescription } : {}),
@@ -1635,7 +1665,7 @@ function installParleyExtension(
       lastActivity: Date.now(),
       status: currentStatus(),
       ...(tmuxPane ? { tmuxPane } : {}),
-      app: appLabel(configuration.resolveApp?.()) ?? configuration.app ?? detectApp(),
+      app: appLabel(configuration.resolveApp?.()) ?? configuration.app ?? detectApp(sessionEnv()),
       ...(localExtensions.size > 0
         ? {
             extensions: currentExtensionCapabilities(),
@@ -1651,7 +1681,7 @@ function installParleyExtension(
   // contact_supervisor bridge, so a session is only ever tagged as a
   // subagent when pi-subagents actually supplied bridge metadata.
   function subagentAclFields(): { isSubagent?: boolean; supervisorSessionId?: string; supervisorName?: string } {
-    const metadata = readChildOrchestratorMetadata();
+    const metadata = readChildOrchestratorMetadata(sessionEnv());
     if (!metadata) {
       return {};
     }
@@ -1705,9 +1735,11 @@ function installParleyExtension(
     });
   }
   function publishParleySessionId(sessionId: string): void {
+    if (configuration.publishSessionEnv === false) return;
     process.env[PARLEY_SESSION_ID_ENV] = sessionId;
   }
   function restoreParleySessionId(): void {
+    if (configuration.publishSessionEnv === false) return;
     if (previousParleySessionId === undefined) {
       delete process.env[PARLEY_SESSION_ID_ENV];
       return;
@@ -2537,7 +2569,7 @@ function installParleyExtension(
     let nextReconnectPromise!: Promise<ParleyClient>;
     let retryAfterFailure = false
     nextReconnectPromise = (async () => {
-      const nextClient = new ParleyClient();
+      const nextClient = new ParleyClient({ env: sessionEnv() });
       client = nextClient;
       attachClientHandlers(nextClient);
       try {
@@ -2697,7 +2729,7 @@ function installParleyExtension(
       focus: options.focus,
       sessions,
       currentSessionId,
-      launcherCommand: resolveProjectLauncherCommand(process.env, config.projectLauncher),
+      launcherCommand: resolveProjectLauncherCommand(sessionEnv(), config.projectLauncher),
       sendRequest: (provider, request) => activeClient.send(provider.id, {
         text: projectLaunchRequestText(request),
         signal: options.signal,
@@ -2921,7 +2953,7 @@ function installParleyExtension(
   }
   function startSessionRuntime(ctx: ExtensionContext): void {
     const nextSessionId = ctx.sessionManager.getSessionId();
-    const nextParleySessionId = resolveConfiguredParleySessionId(nextSessionId, config);
+    const nextParleySessionId = resolveConfiguredParleySessionId(nextSessionId, config, sessionEnv(), configuration.identity);
     try {
       buildPresenceIdentity(pi, nextParleySessionId, configuration);
     } catch (error) {
@@ -3087,7 +3119,7 @@ function installParleyExtension(
     }
     startSessionRuntime(ctx);
     try { linkSessionInteractive = ctx.hasUI === true; } catch { linkSessionInteractive = false; }
-    links.start();
+    links.start(sessionEnv());
   });
   
   pi.on("session_shutdown", async () => {
@@ -3374,8 +3406,8 @@ function installParleyExtension(
     }
   });
 
-  const childOrchestratorMetadata = readChildOrchestratorMetadata();
-  const nativeSupervisorChannelAvailable = Boolean(process.env[SUBAGENT_SUPERVISOR_CHANNEL_DIR_ENV]?.trim());
+  const childOrchestratorMetadata = readChildOrchestratorMetadata(sessionEnv());
+  const nativeSupervisorChannelAvailable = Boolean(sessionEnv()[SUBAGENT_SUPERVISOR_CHANNEL_DIR_ENV]?.trim());
   if (childOrchestratorMetadata && !nativeSupervisorChannelAvailable) {
     pi.registerTool(presentingTool(defineTool({
       name: "contact_supervisor",

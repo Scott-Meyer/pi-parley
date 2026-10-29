@@ -10,6 +10,7 @@ import {
 } from "node:fs";
 import { createRequire } from "node:module";
 import path from "node:path";
+import { hostProcessOptions } from "./host-process.ts";
 
 // Keep the untyped native dependency behind this module's descriptor-only adapter.
 interface NativeFileLocks {
@@ -19,8 +20,24 @@ interface NativeFileLocks {
 // Loaded on first use, so hosts that never lock (Bun clients) never touch the addon.
 let loadedNativeLocks: NativeFileLocks | undefined;
 function nativeLocks(): NativeFileLocks {
-  loadedNativeLocks ??= createRequire(import.meta.url)("fs-native-extensions") as NativeFileLocks;
+  loadedNativeLocks ??= loadNativeLocks();
   return loadedNativeLocks;
+}
+function loadNativeLocks(): NativeFileLocks {
+  const require = createRequire(import.meta.url);
+  const addon = hostProcessOptions().lockAddon;
+  if (!addon) return require("fs-native-extensions") as NativeFileLocks;
+  // The raw binding locks exclusively by (fd, offset, length, exclusive) and throws EAGAIN when held.
+  const binding = require(addon) as { tryLock(fd: number, offset: number, length: number, exclusive: boolean): void; unlock(fd: number, offset: number, length: number): void };
+  return {
+    tryLock(fd) {
+      try { binding.tryLock(fd, 0, 0, true); return true; } catch (error) {
+        if ((error as { code?: string }).code === "EAGAIN") return false;
+        throw error;
+      }
+    },
+    unlock(fd) { binding.unlock(fd, 0, 0); },
+  };
 }
 
 export interface ProcessLockOwner {

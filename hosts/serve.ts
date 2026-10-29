@@ -132,7 +132,7 @@ export async function serveHost(host: Host): Promise<void> {
     if (session.started() && sessionId === exact) return;
     if (session.started()) return; // serving another session already: leave it
     const handed = await askSiblingToRelease(hostPid, exact);
-    for (const text of (handed?.output?.pending as string[] | undefined) ?? []) pending.push({ text, wake: false });
+    for (const text of (handed?.output?.pending as string[] | undefined) ?? []) pending.push({ text, wake: false, customType: "parley_message" });
     sessionId = exact;
     control.claim(exact);
     await session.begin(exact);

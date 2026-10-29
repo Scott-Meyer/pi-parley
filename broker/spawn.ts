@@ -20,6 +20,7 @@ import { tryAcquireProcessLock } from "./process-lock.ts";
 import { isBrokerHealthOkMessage } from "./protocol.ts";
 import { BROKER_RUNTIME_OCCUPIED_EXIT_CODE } from "./runtime-claim.ts";
 import { bundledScript, nodeCommand } from "./bundle.ts";
+import { hostProcessOptions } from "./host-process.ts";
 
 const PARLEY_DIR = getParleyDirPath();
 const EXTENSION_DIR = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -196,7 +197,8 @@ export async function spawnBrokerIfNeeded(brokerCommand: string, brokerArgs: str
   // startup lock is safe: the broker, which always runs under Node, holds the real runtime
   // lock, and a losing duplicate exits with BROKER_RUNTIME_OCCUPIED_EXIT_CODE, which is
   // awaited below like any other owner.
-  const startup = process.versions.bun
+  const host = hostProcessOptions();
+  const startup = process.versions.bun || host.startupLock === false
     ? { status: "acquired" as const, lease: { release() {} } }
     : tryAcquireProcessLock(BROKER_STARTUP_LOCK_DIR);
   if (startup.status === "occupied") {
@@ -210,7 +212,9 @@ export async function spawnBrokerIfNeeded(brokerCommand: string, brokerArgs: str
 
     const bundledBroker = bundledScript("broker");
     const brokerPath = bundledBroker ?? join(dirname(fileURLToPath(import.meta.url)), "broker.ts");
-    const launch: BrokerLaunchSpec = bundledBroker
+    const launch: BrokerLaunchSpec = host.brokerLauncher
+      ? { kind: "direct", command: host.brokerLauncher.command, args: [...host.brokerLauncher.args], captureStartupStderr: true }
+      : bundledBroker
       ? (process.platform === "win32"
         ? { kind: "windows-launcher", command: "wscript.exe", args: ["//E:VBScript", getWindowsHiddenLauncherPath(PARLEY_DIR)],
           launcherPath: getWindowsHiddenLauncherPath(PARLEY_DIR), launcherCommandLine: [nodeCommand(), bundledBroker].map(quoteWindowsArg).join(" "), captureStartupStderr: false }
@@ -219,7 +223,8 @@ export async function spawnBrokerIfNeeded(brokerCommand: string, brokerArgs: str
     if (launch.kind === "windows-launcher") {
       writeWindowsHiddenLauncher(launch.launcherCommandLine, launch.launcherPath);
     }
-    const child = spawn(launch.command, launch.args, getBrokerSpawnOptions(EXTENSION_DIR, process.env, launch.captureStartupStderr));
+    const child = spawn(launch.command, launch.args, getBrokerSpawnOptions(EXTENSION_DIR,
+      host.brokerLauncher?.env ? { ...process.env, ...host.brokerLauncher.env } : process.env, launch.captureStartupStderr));
     let brokerStderr = "";
     const rememberBrokerStderr = (chunk: Buffer | string) => {
       brokerStderr = `${brokerStderr}${chunk.toString()}`.slice(-BROKER_STARTUP_STDERR_LIMIT);

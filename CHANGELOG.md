@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- `pi-parley/host`: Parley inside an application that isn't Pi, with many sessions in one process. Each session takes its identity only from the id the application gives it, can read its own environment instead of the process's, and can leave the process environment alone. Deliveries carry their kind and Parley's record of them, and count as shown only when the application accepts them; a refused one stays queued, is offered again with backoff, and reaches the next model call through `context()`. The application reports renames, models and compaction, and gets structured tool results. `configureParleyHost()` and `runBroker()` let a bundled application start the broker from its own file, with the lock addon at a path it chooses; `pi-parley/host/bundle-define` stamps in the build identity at bundle time.
+- The broker's logic moved to `broker/runtime.ts` (`runBroker`); `broker/broker.ts` is still the entry that starts it.
+
 ## 1.7.1 - 2026-10-29
 
 - When a link between two merged computers gains a scope binding (FlightDeck adding the ordinary scope next to its own), sessions on the other computer keep their names and still answer to them. Before, every session there took a new identity: long-running sessions showed it as `name~2`, and the name they already knew reported the session as not connected. Merged brokers now agree on a link feature (`peer-roster-merged-v1`) and send each session once, under its own scope's binding. A name a session already knows follows the same remote session when a link carries it another way.

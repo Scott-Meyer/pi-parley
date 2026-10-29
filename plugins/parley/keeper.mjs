@@ -1417,10 +1417,38 @@ import {
 } from "node:fs";
 import { createRequire } from "node:module";
 import path from "node:path";
+
+// broker/host-process.ts
+var current = {};
+function hostProcessOptions() {
+  return current;
+}
+
+// broker/process-lock.ts
 var loadedNativeLocks;
 function nativeLocks() {
-  loadedNativeLocks ??= createRequire(import.meta.url)("fs-native-extensions");
+  loadedNativeLocks ??= loadNativeLocks();
   return loadedNativeLocks;
+}
+function loadNativeLocks() {
+  const require2 = createRequire(import.meta.url);
+  const addon = hostProcessOptions().lockAddon;
+  if (!addon) return require2("fs-native-extensions");
+  const binding = require2(addon);
+  return {
+    tryLock(fd) {
+      try {
+        binding.tryLock(fd, 0, 0, true);
+        return true;
+      } catch (error) {
+        if (error.code === "EAGAIN") return false;
+        throw error;
+      }
+    },
+    unlock(fd) {
+      binding.unlock(fd, 0, 0);
+    }
+  };
 }
 function tryAcquireProcessLock(directory) {
   mkdirSync(directory, { recursive: true, mode: 448 });

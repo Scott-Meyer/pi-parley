@@ -28,6 +28,8 @@
       "import": "./dist/federation.js",
       "default": "./dist/federation.js"
     },
+    "./host": "./hosts/host.ts",
+    "./host/bundle-define": "./hosts/bundle-define.mjs",
     "./package.json": "./package.json",
     "./*": "./*"
   },
@@ -51,6 +53,8 @@
     "scripts/smoke-host-compat.mjs",
     "scripts/smoke-federation-package.mjs",
     "broker/broker.ts",
+    "broker/runtime.ts",
+    "broker/host-process.ts",
     "broker/bundle.ts",
     "broker/build.ts",
     "broker/client.ts",
@@ -82,6 +86,8 @@
     "hosts/hosted-session.ts",
     "hosts/mcp.ts",
     "hosts/serve.ts",
+    "hosts/host.ts",
+    "hosts/bundle-define.mjs",
     "link/client.ts",
     "link/completions.ts",
     "link/discover.ts",
@@ -99,7 +105,7 @@
     "prepack": "npm run build:federation",
     "test:host-compat": "node scripts/smoke-host-compat.mjs",
     "test:package:federation": "node scripts/smoke-federation-package.mjs",
-    "typecheck": "tsc --noEmit --module nodenext --moduleResolution nodenext --target es2022 --strict --skipLibCheck --allowImportingTsExtensions --types node federation.ts extension.ts index.ts pi-compat.ts compaction-awareness.ts session-profile.ts broker/federation-types.ts broker/federation-protocol.ts broker/federation-roster.ts broker/federation-send.ts broker/federation-conversation.ts broker/attachment.ts broker/federation-origin.ts broker/peer-link.ts broker/broker.ts broker/collaboration-state.ts link/client.ts link/completions.ts link/discover.ts link/keeper.ts link/paths.ts link/protocol.ts link/session.ts link/ssh.ts herdr/names.ts herdr/socket.ts hosts/claude.ts hosts/cli.ts hosts/codex.ts hosts/connect.ts hosts/control.ts hosts/hosted-session.ts hosts/mcp.ts hosts/serve.ts ui/*.ts",
+    "typecheck": "tsc --noEmit --module nodenext --moduleResolution nodenext --target es2022 --strict --skipLibCheck --allowImportingTsExtensions --types node federation.ts extension.ts index.ts pi-compat.ts compaction-awareness.ts session-profile.ts broker/federation-types.ts broker/federation-protocol.ts broker/federation-roster.ts broker/federation-send.ts broker/federation-conversation.ts broker/attachment.ts broker/federation-origin.ts broker/peer-link.ts broker/broker.ts broker/runtime.ts broker/host-process.ts broker/collaboration-state.ts link/client.ts link/completions.ts link/discover.ts link/keeper.ts link/paths.ts link/protocol.ts link/session.ts link/ssh.ts herdr/names.ts herdr/socket.ts hosts/claude.ts hosts/cli.ts hosts/codex.ts hosts/connect.ts hosts/control.ts hosts/hosted-session.ts hosts/host.ts hosts/mcp.ts hosts/serve.ts ui/*.ts",
     "build:plugin": "node scripts/build-plugin.mjs",
     "version": "npm run build:federation && npm run build:plugin && git add dist plugins .claude-plugin .agents"
   },
