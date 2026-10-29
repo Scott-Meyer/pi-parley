@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- The README says what an application bundling `pi-parley/host` installs beside it: `typebox` and `@mariozechner/pi-tui`, which Pi supplies to its extensions. The packed-package check bundles it from a clean install with just those two.
+
 ## 1.8.0 - 2026-10-29
 
 - `pi-parley/host` (new; its shape may still change in a minor release): Parley inside an application that isn't Pi, with many sessions in one process. Each session takes its identity only from the id the application gives it, can read its own environment instead of the process's, and can leave the process environment alone. Deliveries carry their kind and Parley's record of them, and count as shown only when the application accepts them; a refused one stays queued, is offered again with backoff, and reaches the next model call through `context()`. The application reports renames, models and compaction, and gets structured tool results. `configureParleyHost()` and `runBroker()` let a bundled application start the broker from its own file, with the lock addon at a path it chooses; `pi-parley/host/bundle-define` stamps in the build identity at bundle time.

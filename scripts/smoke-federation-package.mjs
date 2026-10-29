@@ -104,6 +104,19 @@ try {
   assert.deepEqual(parleySources, [], "type checking pi-parley/host reads only its declarations");
   console.log("✓ packed pi-parley/host type-checks from its declarations under stricter options");
 
+  // An application bundles pi-parley/host from a clean install. Parley leaves its host libraries
+  // to the host, so the application installs the two it names; without them the bundle can't
+  // resolve, with them it builds.
+  const { build } = await import(join(repo, "node_modules", "esbuild", "lib", "main.js"));
+  writeFileSync(join(consumer, "host-app.ts"), `import { createHostedSession } from "pi-parley/host"; void createHostedSession;\n`);
+  const bundleHost = () => build({ entryPoints: [join(consumer, "host-app.ts")], outfile: join(consumer, "host-app.mjs"), bundle: true,
+    platform: "node", format: "esm", absWorkingDir: consumer, logLevel: "silent" });
+  await assert.rejects(bundleHost(), /typebox|pi-tui/, "without its host libraries, the bundle names what's missing");
+  npm(["install", "--silent", "--ignore-scripts", "--no-save",
+    join(repo, "node_modules", "typebox"), join(repo, "node_modules", "@mariozechner", "pi-tui")], { cwd: consumer });
+  await bundleHost();
+  console.log("✓ packed pi-parley/host bundles from a clean install with its two host libraries");
+
   const runtimeCheck = `
     import assert from "node:assert/strict";
     import { Duplex } from "node:stream";
