@@ -22,7 +22,7 @@ import {
 
 function copySpawnModules(brokerDir: string): void {
   const sourceDir = path.dirname(fileURLToPath(import.meta.url));
-  for (const fileName of ["spawn.ts", "bundle.ts", "framing.ts", "paths.ts", "process-lock.ts", "runtime-claim.ts", "protocol.ts", "federation-protocol.ts", "federation-types.ts"]) {
+  for (const fileName of ["spawn.ts", "bundle.ts", "host-process.ts", "framing.ts", "paths.ts", "process-lock.ts", "runtime-claim.ts", "protocol.ts", "federation-protocol.ts", "federation-types.ts"]) {
     cpSync(path.join(sourceDir, fileName), path.join(brokerDir, fileName));
   }
   for (const fileName of ["session-profile.ts", "types.ts"]) {
