@@ -90,6 +90,15 @@ export class ReplyTracker {
     if (contexts.length > 0) this.activeContexts = [...contexts];
   }
 
+  /** Add to the active conversation without replacing it: for a host that has taken a
+   * message the model may not have reached yet, so a bare reply can't quietly go to it
+   * instead of the one already being answered. */
+  includeContexts(contexts: readonly ParleyContext[]): void {
+    const known = new Set(this.activeContexts.map((context) => context.message.id));
+    const added = contexts.filter((context) => !known.has(context.message.id));
+    if (added.length > 0) this.activeContexts = [...this.activeContexts, ...added];
+  }
+
   /** A sender as the model knows it: its reference when this tracker has seen it, else the text given. */
   private senderName(to: string): string {
     for (const context of this.messages.values()) if (context.from.id === to) return this.references.session(context.from);

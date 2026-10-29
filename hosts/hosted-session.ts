@@ -52,7 +52,10 @@ export interface HostedSessionOptions {
   readonly app?: () => string;
   /** Where a session's history lives (JSON lines), by its host session id. */
   readonly stateFile: (sessionId: string) => string;
-  /** Put a delivery in front of the agent. Returning nothing means it was accepted. */
+  /** Put a delivery in front of the agent. Returning nothing means it was accepted.
+   * Accepting means it will reach the model. Messages and withdrawals that are refused are
+   * offered again; other notices (compaction awareness, delivery expiry) are best effort,
+   * and a refused one is dropped. */
   readonly deliver: (delivery: Delivery) => DeliveryOutcome | Promise<DeliveryOutcome> | void;
   /** The environment this session is read from (FlightDeck, herdr, scope, whether it links
    * by default). Default: the process's. Pass {} for a session that is none of those. */

@@ -278,3 +278,32 @@ test("a delivery carries what to show a person: the colleague's words, and the m
     await cleanup();
   }
 });
+
+test("a message taken while another is being answered doesn't take over a bare reply: the model is asked which", { timeout: 60_000, skip: process.platform === "win32" }, async () => {
+  const { host, listed, inbox, cleanup } = app();
+  try {
+    const alpha = await host("alpha", { env: {} });
+    const gamma = await host("gamma", { env: {} });
+    const beta = await host("beta", { env: {} });
+    for (const [session, id] of [[alpha, "alpha-session"], [gamma, "gamma-session"], [beta, "beta-session"]] as const) await session.begin(id);
+    await eventually(async () => rows(await listed(beta), "alpha") === 1 && rows(await listed(beta), "gamma") === 1, "beta sees both");
+    // Beta is working on alpha's question when gamma's arrives; the host queues gamma's.
+    await alpha.call({ action: "ask", to: "beta", message: "alpha's question", blocking: false });
+    await eventually(() => inbox("beta").some((delivery) => /alpha's question/.test(delivery.text)), "beta takes alpha's question");
+    beta.setBusy(true);
+    await gamma.call({ action: "ask", to: "beta", message: "gamma's question", blocking: false });
+    await eventually(() => inbox("beta").some((delivery) => /gamma's question/.test(delivery.text)), "the host takes gamma's too");
+    const bare = await beta.call({ action: "reply", message: "meant for alpha" });
+    assert.equal(bare.isError, true, `a bare reply doesn't guess: ${bare.text}`);
+    assert.match(bare.text, /alpha/); assert.match(bare.text, /gamma/);
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    assert.equal([...inbox("alpha"), ...inbox("gamma")].some((delivery) => /meant for alpha/.test(delivery.text)), false, "nobody got it");
+    const askedRef = /Message: (#\d+)/.exec(inbox("beta").find((delivery) => /alpha's question/.test(delivery.text))!.text)?.[1];
+    assert.ok(askedRef);
+    const explicit = await beta.call({ action: "reply", replyTo: askedRef, message: "meant for alpha" });
+    assert.equal(explicit.isError, false, explicit.text);
+    await eventually(() => inbox("alpha").some((delivery) => /meant for alpha/.test(delivery.text)), "with replyTo, alpha gets it");
+  } finally {
+    await cleanup();
+  }
+});

@@ -30,7 +30,7 @@ function nodeCommand(execPath = process.execPath) {
 var bundledBuild;
 var init_bundle = __esm({
   "broker/bundle.ts"() {
-    bundledBuild = true ? JSON.parse('{"packageVersion":"1.7.1","sourceId":"8579f4af8967022cca09dbb129a576c540db27228395123af35974bf2254c3d0"}') : void 0;
+    bundledBuild = true ? JSON.parse('{"packageVersion":"1.7.1","sourceId":"cdb7f1e8a2d3492488c2c8ded559bfe0794a479385666242c7ef7f4545216823"}') : void 0;
   }
 });
 
@@ -13881,6 +13881,14 @@ var init_reply_tracker = __esm({
       activateContexts(contexts) {
         if (contexts.length > 0) this.activeContexts = [...contexts];
       }
+      /** Add to the active conversation without replacing it: for a host that has taken a
+       * message the model may not have reached yet, so a bare reply can't quietly go to it
+       * instead of the one already being answered. */
+      includeContexts(contexts) {
+        const known = new Set(this.activeContexts.map((context) => context.message.id));
+        const added = contexts.filter((context) => !known.has(context.message.id));
+        if (added.length > 0) this.activeContexts = [...this.activeContexts, ...added];
+      }
       /** A sender as the model knows it: its reference when this tracker has seen it, else the text given. */
       senderName(to) {
         for (const context of this.messages.values()) if (context.from.id === to) return this.references.session(context.from);
@@ -16465,7 +16473,7 @@ The earlier message is no longer the current request; prior work is not undone.`
       }
     }
     if (configuration.answerOnDelivery && freshModelContexts.size > 0) {
-      replyTracker.activateContexts([...freshModelContexts.values()]);
+      replyTracker.includeContexts([...freshModelContexts.values()]);
       freshModelContexts.clear();
     }
   }

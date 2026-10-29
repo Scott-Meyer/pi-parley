@@ -1340,10 +1340,12 @@ function installParleyExtension(
         confirmInboundEnvelope(key);
       }
     }
-    // A host without a model-boundary hook: what it has taken is in front of its model now,
-    // so a bare reply answers it. A context hook, if the host has one too, finds nothing left.
+    // A host without a model-boundary hook: what it has taken will reach its model, so a bare
+    // reply in this run can answer it. Taken alongside something already being answered, it's
+    // one more candidate, not a replacement: the model may not have reached it yet, so a bare
+    // reply asks which. A context hook, if the host has one too, finds nothing left.
     if (configuration.answerOnDelivery && freshModelContexts.size > 0) {
-      replyTracker.activateContexts([...freshModelContexts.values()]);
+      replyTracker.includeContexts([...freshModelContexts.values()]);
       freshModelContexts.clear();
     }
   }
