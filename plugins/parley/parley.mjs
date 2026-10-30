@@ -30,7 +30,7 @@ function nodeCommand(execPath = process.execPath) {
 var bundledBuild;
 var init_bundle = __esm({
   "broker/bundle.ts"() {
-    bundledBuild = true ? JSON.parse('{"packageVersion":"1.8.0","sourceId":"4d68681fce24da344eb65f90604f8419f5b9d73b090a7c35ba41e9e75df6596a"}') : void 0;
+    bundledBuild = true ? JSON.parse('{"packageVersion":"1.8.0","sourceId":"c41ebd5a81dd8f6f5ac57674c728b5f9830e16998888995f37034b8fa179250e"}') : void 0;
   }
 });
 
@@ -19035,6 +19035,9 @@ Sessions and messages are named the way people would name them: a session by its
         const sentTargets = modelParams.targets;
         modelParams = withoutPlaceholders(modelParams);
         const ignoredTargets = modelParams.action !== "send" && Array.isArray(sentTargets) && modelParams.targets === void 0 && sentTargets.some((target2) => typeof target2 === "string" && target2.trim() && target2.trim().toLowerCase() !== (typeof sentTo === "string" ? sentTo.trim().toLowerCase() : "")) ? sentTargets : void 0;
+        if (modelParams.action === "broadcast" && ignoredTargets) {
+          return attachSelfProfile(presentToolResult({ content: [{ type: "text", text: `Nothing was broadcast: broadcast doesn't take 'targets' (${JSON.stringify(ignoredTargets)}). To reach those sessions, send to them with targets; to reach a group, broadcast with 'to' as a pattern (flightdeck:*), 'cwd' or 'app'.` }], details: { error: true } }, { book }));
+        }
         const resolvedReferences = resolveModelReferences(modelParams);
         if ("error" in resolvedReferences) {
           return attachSelfProfile(presentToolResult({ content: [{ type: "text", text: resolvedReferences.error }], details: { error: true } }, { book }));

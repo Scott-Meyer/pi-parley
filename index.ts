@@ -4254,6 +4254,10 @@ Sessions and messages are named the way people would name them: a session by its
         && sentTargets.some((target) => typeof target === "string" && target.trim()
           && target.trim().toLowerCase() !== (typeof sentTo === "string" ? sentTo.trim().toLowerCase() : ""))
         ? sentTargets : undefined;
+      // A broadcast given a list was meant for those sessions, not everyone: refuse rather than widen it.
+      if (modelParams.action === "broadcast" && ignoredTargets) {
+        return attachSelfProfile(presentToolResult({ content: [{ type: "text" as const, text: `Nothing was broadcast: broadcast doesn't take 'targets' (${JSON.stringify(ignoredTargets)}). To reach those sessions, send to them with targets; to reach a group, broadcast with 'to' as a pattern (flightdeck:*), 'cwd' or 'app'.` }], details: { error: true } }, { book }));
+      }
       const resolvedReferences = resolveModelReferences(modelParams);
       if ("error" in resolvedReferences) {
         return attachSelfProfile(presentToolResult({ content: [{ type: "text" as const, text: resolvedReferences.error }], details: { error: true } }, { book }));

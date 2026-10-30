@@ -1717,13 +1717,14 @@ test("multi-target and broadcast sends reject ambiguous targeting and conversati
     assert.equal(threadedBatch.details?.error, true);
     assert.match(threadedBatch.content[0]?.text ?? "", /cannot use replyTo, supersedes, or retryOf/i);
 
-    const addressedBroadcast = await parleyTool.execute("invalid-broadcast", {
+    // A broadcast names a group (to as a pattern, cwd, app); a chosen list is send's.
+    const listedBroadcast = await parleyTool.execute("invalid-broadcast", {
       action: "broadcast",
-      to: "planner",
+      targets: ["planner", "reviewer"],
       message: "Not actually a broadcast",
     }, new AbortController().signal, undefined, harness.ctx);
-    assert.equal(addressedBroadcast.details?.error, true);
-    assert.match(addressedBroadcast.content[0]?.text ?? "", /does not accept 'to'/i);
+    assert.equal(listedBroadcast.details?.error, true, JSON.stringify(listedBroadcast.content));
+    assert.match(listedBroadcast.content[0]?.text ?? "", /doesn't take 'targets'/i);
 
     const threadedBroadcast = await parleyTool.execute("invalid-broadcast-thread", {
       action: "broadcast",
