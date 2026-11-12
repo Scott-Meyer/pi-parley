@@ -13,7 +13,7 @@ import type { BrokerDialPeerRequest, BrokerDialPeerResult, FederationBridgeAttac
 import { getBrokerSocketPath } from "./paths.ts";
 import { getTsxCliPath } from "./spawn.ts";
 import { ParleyClient } from "./client.ts";
-import { FEDERATION_EXACT_SEND_FEATURE } from "./federation-types.ts";
+import { FEDERATION_AUDIENCE_FEATURE, FEDERATION_EXACT_SEND_FEATURE } from "./federation-types.ts";
 
 // Fixture clients own their routing context; never inherit the invoking tab.
 for (const key of Object.keys(process.env)) {
@@ -314,7 +314,8 @@ test("two real brokers establish an explicit peer role through a FlightDeck-styl
       const sourceReader = createMessageReader(value => {
         const frame = value as { type?: string; features?: string[] };
         if (disableExactFeature && frame.type === "peer_hello") {
-          frame.features = frame.features?.filter(feature => feature !== FEDERATION_EXACT_SEND_FEATURE);
+          // An older peer: neither exact sends nor broadcast audiences.
+          frame.features = frame.features?.filter(feature => feature !== FEDERATION_EXACT_SEND_FEATURE && feature !== FEDERATION_AUDIENCE_FEATURE);
         }
         if (holdNextPeerSend && frame.type === "peer_send") {
           holdNextPeerSend = false;
@@ -557,6 +558,12 @@ test("two real brokers establish an explicit peer role through a FlightDeck-styl
     assert.equal(((remoteMessage.message as { content?: { text?: string } }).content)?.text, "roster-only route probe");
     // An identical retry of the delivered message replays without a second
     // remote delivery.
+    const labelledInbound = waitForBrokerMessage(remoteClient, value => value.type === "message"
+      && (value.message as { id?: string })?.id === "federated_broadcast_1");
+    const labelled = await exactSender.send(importedRemote.id, { text: "group notice", messageId: "federated_broadcast_1",
+      audience: { kind: "broadcast", group: "box:*" } });
+    assert.equal(labelled.delivered, true);
+    assert.deepEqual((((await labelledInbound).message) as { audience?: unknown }).audience, { kind: "broadcast", group: "box:*" });
     const replayed = await sendDirect(localClient, importedRemote.id, "federated_direct_1");
     assert.equal(replayed.type, "delivered");
 
@@ -731,6 +738,12 @@ test("two real brokers establish an explicit peer role through a FlightDeck-styl
     const legacyOrdinary = await exactSender.send(legacyRow.id, { text: "ordinary resolution on legacy peer", messageId: "legacy_real_client_send" });
     assert.equal(legacyOrdinary.delivered, true, "real client's automatic resolution may use legacy ordinary send");
     await ordinaryLegacyInbound;
+    const unlabelledInbound = waitForBrokerMessage(remoteClient, value => value.type === "message"
+      && (value.message as { id?: string })?.id === "legacy_broadcast_send");
+    const unlabelled = await exactSender.send(legacyRow.id, { text: "group notice", messageId: "legacy_broadcast_send",
+      audience: { kind: "broadcast", group: "box:*" } });
+    assert.equal(unlabelled.delivered, true, "a peer without the audience feature still gets the message");
+    assert.equal((((await unlabelledInbound).message) as { audience?: unknown }).audience, undefined, "just without the label");
     disableExactFeature = false;
 
     // Tear down and then race reciprocal dials. Canonical origin ordering picks

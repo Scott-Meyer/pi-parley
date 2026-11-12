@@ -10,8 +10,9 @@ import { ComposeOverlay, type ComposeResult } from "./ui/compose.ts";
 import { InlineMessageComponent, messageExpanded } from "./ui/inline-message.ts";
 import { ClickToExpand } from "./ui/click-to-expand.ts";
 import { getAskTimeoutMs, loadRuntimeConfig, type ParleyConfig } from "./config.ts";
+import { broadcastAudience } from "./broadcast-audience.ts";
 import { COMPACTION_AWARENESS_FEATURE, EXTENSION_BUS_FEATURE, SESSION_PROFILE_FEATURE } from "./types.ts";
-import type { Attachment, BrokerMessage, Message, MessageControl, MessageReceipt, MessageReceiptStatus, PeerCompactionNotice, SessionInfo, SessionRegistration } from "./types.ts";
+import type { Attachment, BrokerMessage, Message, MessageAudience, MessageControl, MessageReceipt, MessageReceiptStatus, PeerCompactionNotice, SessionInfo, SessionRegistration } from "./types.ts";
 import {
   PARLEY_EXTENSION_REGISTER_EVENT,
   PARLEY_EXTENSION_REGISTRY_READY_EVENT,
@@ -89,6 +90,8 @@ export interface ParleyExtensionOptions {
 export interface InboundDisplay {
   readonly text: string;
   readonly inReplyTo?: string;
+  /** A broadcast: sent to a group (as the sender named it), not to this session alone. */
+  readonly audience?: MessageAudience;
 }
 
 interface ParleyExtensionConfiguration {
@@ -821,6 +824,9 @@ function formatInboundDeliveryMetadata(message: Message, messageRef: (id: string
   if (message.replyTo) parts.push(`Reply to: ${messageRef(message.replyTo)}`);
   if (message.supersedes) parts.push(`Supersedes: ${messageRef(message.supersedes)}`);
   if (message.retryOf) parts.push(`Retry of: ${messageRef(message.retryOf)}`);
+  if (message.audience?.kind === "broadcast") {
+    parts.push(`Broadcast to ${message.audience.group ? verbatim(JSON.stringify(message.audience.group)) : "everyone on the sender's computer"}, not to you alone`);
+  }
   if (message.provenance?.type === "extension_outbox") {
     parts.push(`Via extension ${message.provenance.extensionName} (${message.provenance.extensionId}); request ${message.provenance.requestId}`);
   } else if (message.provenance?.type === "session_person") {
@@ -2323,7 +2329,7 @@ function installParleyExtension(
       : "";
     const body = entry.bodyText ?? injectedMessage.content.text + (injectedMessage.content.attachments?.length ? formatAttachments(injectedMessage.content.attachments) : "");
     return {
-      display: { text: body, ...(quoted !== undefined ? { inReplyTo: quoted } : {}) },
+      display: { text: body, ...(quoted !== undefined ? { inReplyTo: quoted } : {}), ...(injectedMessage.audience ? { audience: injectedMessage.audience } : {}) },
       content: presentForModel(`**From ${senderDisplay}**${focus}${request}${verbatim(topic)}\n\n${verbatim(body)}\n\n${formatInboundDeliveryMetadata(injectedMessage, messageRef)}\nSession: ${entry.from.cwd}${origin}${compactionNotice}`),
       topic,
       isRequestedAnswer,
@@ -2791,6 +2797,8 @@ function installParleyExtension(
       attachments?: Attachment[];
       batchId: string;
       broadcast: boolean;
+      /** What recipients read: sent to a group, not to them alone. */
+      audience?: MessageAudience;
       signal?: AbortSignal;
       allowRosterMailboxFallback?: boolean;
       /** The calling session's history writer; it drops writes once that session is replaced. */
@@ -2830,6 +2838,7 @@ function installParleyExtension(
           attachments: options.attachments,
           signal: options.signal,
           contactKind: options.broadcast ? "broadcast" as const : "direct" as const,
+          ...(options.audience ? { audience: options.audience } : {}),
         };
         let result = target.session
           ? await activeClient.sendToSession(target.session, sendOptions)
@@ -4648,6 +4657,8 @@ Sessions and messages are named the way people would name them: a session by its
               broadcast: !recipients.some((recipient) => recipient.session?.federation),
               // Still live-only: a broadcast never becomes mail for someone who left.
               allowRosterMailboxFallback: false,
+              // Recipients read that this went to a group, and which.
+              audience: grouped ? broadcastAudience({ to, cwd: inCwd, app }) : { kind: "broadcast" },
               signal: _signal,
               record: recordActionEntry,
             });

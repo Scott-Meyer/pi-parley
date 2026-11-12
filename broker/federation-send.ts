@@ -22,6 +22,7 @@
  *   independent of the transport sendId and explicit ask-completion intent.
  */
 
+import { AUDIENCE_GROUP_MAX_LENGTH } from "../types.ts";
 import { decodeConversationMessageId } from "./federation-conversation.ts";
 import type { SessionInfo } from "../types.ts";
 import {
@@ -56,6 +57,8 @@ export interface PeerSendMessagePayload {
   expectsReply?: boolean;
   completesAsk?: boolean;
   senderWaitMode?: "blocking" | "nonblocking";
+  /** Only on links that negotiated peer-send-audience-v1. */
+  audience?: { kind: "broadcast"; group?: string };
 }
 
 export interface PeerSendRequest {
@@ -164,14 +167,18 @@ export function isPeerSendRequest(value: unknown): value is PeerSendRequest {
     "message",
   ], ["targetEndpointEpoch", "senderEndpointEpoch", "senderOriginEpoch", "targetOriginEpoch"])) return false;
   if (!isRecord(value.message)
-    || !hasOnlyKeys(value.message, ["id", "timestamp", "text"], ["replyTo", "expectsReply", "completesAsk", "senderWaitMode"])) return false;
+    || !hasOnlyKeys(value.message, ["id", "timestamp", "text"], ["replyTo", "expectsReply", "completesAsk", "senderWaitMode", "audience"])) return false;
+  const audience = value.message.audience;
+  if (audience !== undefined && (!isRecord(audience) || audience.kind !== "broadcast"
+    || !Object.keys(audience).every((key) => key === "kind" || key === "group")
+    || (audience.group !== undefined && (typeof audience.group !== "string" || audience.group.length === 0 || audience.group.length > AUDIENCE_GROUP_MAX_LENGTH)))) return false;
   const conversation = value.senderOriginEpoch !== undefined;
   if (conversation) {
     if (!isFederationCorrelationId(value.senderOriginEpoch) || !isFederationCorrelationId(value.senderEndpointEpoch)
       || !isFederationCorrelationId(value.targetOriginEpoch) || !isFederationCorrelationId(value.targetEndpointEpoch)
       || !decodeConversationMessageId(value.message.id)) return false;
   } else if (value.senderEndpointEpoch !== undefined || value.targetOriginEpoch !== undefined
-    || Object.keys(value.message).some(key => !["id", "timestamp", "text"].includes(key))) return false;
+    || Object.keys(value.message).some(key => !["id", "timestamp", "text", "audience"].includes(key))) return false;
   if (value.message.replyTo !== undefined && !decodeConversationMessageId(value.message.replyTo)) return false;
   if (value.message.expectsReply !== undefined && typeof value.message.expectsReply !== "boolean") return false;
   if (value.message.completesAsk !== undefined && (typeof value.message.completesAsk !== "boolean"

@@ -13,6 +13,7 @@ import type {
   Message,
   MessageControl,
   MessageProvenance,
+  MessageAudience,
   MessageReceipt,
   SessionInfo,
   SessionRegistration,
@@ -39,6 +40,8 @@ export interface SendOptions {
   supersedes?: string;
   retryOf?: string;
   provenance?: MessageProvenance;
+  /** For a broadcast: the group it went to, as the recipient should read it. */
+  audience?: MessageAudience;
   /** Stops retries that have not yet been written; it cannot retract an in-flight frame. */
   signal?: AbortSignal;
   /** Broadcast delivery never reads or advances direct-collaboration watermarks. */
@@ -1010,6 +1013,7 @@ export class ParleyClient extends EventEmitter {
       expectsReply: options.expectsReply,
       senderWaitMode: options.senderWaitMode,
       provenance: options.provenance,
+      ...(options.audience ? { audience: options.audience } : {}),
       content: { text: options.text, attachments: options.attachments },
     };
     const cancelledResult = (): SendResult => failedBeforeSend("Send cancelled before the next delivery attempt", "E_CANCELLED");

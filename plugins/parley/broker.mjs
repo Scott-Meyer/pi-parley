@@ -91,6 +91,17 @@ function createMessageReader(onMessage, onError, maxFrameBytes = MAX_FRAME_BYTES
   };
 }
 
+// types.ts
+var EXTENSION_BUS_FEATURE = "extension-bus-v1";
+var EXACT_SEND_FEATURE = "exact-send-v1";
+var EXACT_IDENTITY_SEND_FEATURE = "exact-identity-send-v1";
+var COMPACTION_AWARENESS_FEATURE = "compaction-awareness-v1";
+var SESSION_PROFILE_FEATURE = "session-profile-v1";
+var FEDERATED_CONVERSATION_FEATURE = "federated-conversation-text-v1";
+var CONVERSATION_CONTRACT_FEATURE = "conversation-contract-v1";
+var PERSON_PROVENANCE_FEATURE = "person-provenance-v1";
+var AUDIENCE_GROUP_MAX_LENGTH = 300;
+
 // session-profile.ts
 var SESSION_DESCRIPTION_MIN_WORDS = 5;
 var SESSION_DESCRIPTION_MAX_WORDS = 9;
@@ -133,6 +144,7 @@ var FEDERATION_SCOPED_LINKS_FEATURE = "peer-links-by-scope-v1";
 var FEDERATION_PING_FEATURE = "peer-ping-v1";
 var FEDERATION_APP_FEATURE = "peer-roster-app-v1";
 var FEDERATION_MERGED_ROSTER_FEATURE = "peer-roster-merged-v1";
+var FEDERATION_AUDIENCE_FEATURE = "peer-send-audience-v1";
 var FEDERATION_CAPABILITY_MIN_LENGTH = 32;
 var FEDERATION_CAPABILITY_MAX_LENGTH = 128;
 var FEDERATION_CORRELATION_ID_MAX_LENGTH = 128;
@@ -155,7 +167,8 @@ var FEDERATION_SUPPORTED_FEATURES = [
   FEDERATION_CONVERSATION_FEATURE,
   FEDERATION_SCOPED_LINKS_FEATURE,
   FEDERATION_PING_FEATURE,
-  FEDERATION_APP_FEATURE
+  FEDERATION_APP_FEATURE,
+  FEDERATION_AUDIENCE_FEATURE
 ];
 
 // broker/federation-protocol.ts
@@ -404,6 +417,11 @@ function isAttachment(value) {
   }
   return value.language === void 0 || typeof value.language === "string";
 }
+function isMessageAudience(value) {
+  if (!isRecord2(value) || value.kind !== "broadcast") return false;
+  if (!Object.keys(value).every((key) => key === "kind" || key === "group")) return false;
+  return value.group === void 0 || typeof value.group === "string" && value.group.length > 0 && value.group.length <= AUDIENCE_GROUP_MAX_LENGTH;
+}
 function isMessageProvenance(value) {
   if (!isRecord2(value)) {
     return false;
@@ -446,6 +464,7 @@ function isMessage(value) {
   if (value.completesAsk === true && !value.replyTo) return false;
   if (value.senderWaitMode !== void 0 && value.senderWaitMode !== "blocking" && value.senderWaitMode !== "nonblocking") return false;
   if (value.replyDeadline !== void 0 && (!Number.isSafeInteger(value.replyDeadline) || value.replyDeadline < 0)) return false;
+  if (value.audience !== void 0 && !isMessageAudience(value.audience)) return false;
   if (value.provenance !== void 0 && !isMessageProvenance(value.provenance)) {
     return false;
   }
@@ -641,16 +660,6 @@ function normalizeCwd(cwd) {
 function sameCwd(a, b) {
   return normalizeCwd(a) === normalizeCwd(b);
 }
-
-// types.ts
-var EXTENSION_BUS_FEATURE = "extension-bus-v1";
-var EXACT_SEND_FEATURE = "exact-send-v1";
-var EXACT_IDENTITY_SEND_FEATURE = "exact-identity-send-v1";
-var COMPACTION_AWARENESS_FEATURE = "compaction-awareness-v1";
-var SESSION_PROFILE_FEATURE = "session-profile-v1";
-var FEDERATED_CONVERSATION_FEATURE = "federated-conversation-text-v1";
-var CONVERSATION_CONTRACT_FEATURE = "conversation-contract-v1";
-var PERSON_PROVENANCE_FEATURE = "person-provenance-v1";
 
 // broker/extension-state.ts
 import { createHash as createHash2, randomUUID } from "node:crypto";
@@ -1021,7 +1030,7 @@ import { dirname as dirname2, join as join5 } from "node:path";
 import { fileURLToPath } from "node:url";
 
 // broker/bundle.ts
-var bundledBuild = true ? JSON.parse('{"packageVersion":"1.8.0","sourceId":"c41ebd5a81dd8f6f5ac57674c728b5f9830e16998888995f37034b8fa179250e"}') : void 0;
+var bundledBuild = true ? JSON.parse('{"packageVersion":"1.8.0","sourceId":"b13553c7bff582441679b1d654e7149ad0c807a95dcf40f4dd4159762e5aa2e4"}') : void 0;
 
 // broker/build.ts
 function getBrokerBuildIdentity(extensionDir = join5(dirname2(fileURLToPath(import.meta.url)), "..")) {
@@ -3144,11 +3153,13 @@ function isPeerSendRequest(value) {
     "targetStableSessionId",
     "message"
   ], ["targetEndpointEpoch", "senderEndpointEpoch", "senderOriginEpoch", "targetOriginEpoch"])) return false;
-  if (!isRecord5(value.message) || !hasOnlyKeys3(value.message, ["id", "timestamp", "text"], ["replyTo", "expectsReply", "completesAsk", "senderWaitMode"])) return false;
+  if (!isRecord5(value.message) || !hasOnlyKeys3(value.message, ["id", "timestamp", "text"], ["replyTo", "expectsReply", "completesAsk", "senderWaitMode", "audience"])) return false;
+  const audience = value.message.audience;
+  if (audience !== void 0 && (!isRecord5(audience) || audience.kind !== "broadcast" || !Object.keys(audience).every((key) => key === "kind" || key === "group") || audience.group !== void 0 && (typeof audience.group !== "string" || audience.group.length === 0 || audience.group.length > AUDIENCE_GROUP_MAX_LENGTH))) return false;
   const conversation = value.senderOriginEpoch !== void 0;
   if (conversation) {
     if (!isFederationCorrelationId(value.senderOriginEpoch) || !isFederationCorrelationId(value.senderEndpointEpoch) || !isFederationCorrelationId(value.targetOriginEpoch) || !isFederationCorrelationId(value.targetEndpointEpoch) || !decodeConversationMessageId(value.message.id)) return false;
-  } else if (value.senderEndpointEpoch !== void 0 || value.targetOriginEpoch !== void 0 || Object.keys(value.message).some((key) => !["id", "timestamp", "text"].includes(key))) return false;
+  } else if (value.senderEndpointEpoch !== void 0 || value.targetOriginEpoch !== void 0 || Object.keys(value.message).some((key) => !["id", "timestamp", "text", "audience"].includes(key))) return false;
   if (value.message.replyTo !== void 0 && !decodeConversationMessageId(value.message.replyTo)) return false;
   if (value.message.expectsReply !== void 0 && typeof value.message.expectsReply !== "boolean") return false;
   if (value.message.completesAsk !== void 0 && (typeof value.message.completesAsk !== "boolean" || value.message.completesAsk && !value.message.replyTo)) return false;
@@ -4104,6 +4115,7 @@ var ParleyBroker = class {
       brokerReceivedAt: now,
       brokerDeliveredAt: now,
       content: { text: frame.message.text },
+      ...frame.message.audience ? { audience: frame.message.audience } : {},
       ...conversation ? {
         ...frame.message.replyTo ? { replyTo: frame.message.replyTo, completesAsk: conversationCompletesAsk(frame.message) } : {},
         ...frame.message.expectsReply !== void 0 ? { expectsReply: frame.message.expectsReply } : {},
@@ -4321,6 +4333,7 @@ var ParleyBroker = class {
         id: message.id,
         timestamp: message.timestamp,
         text: message.content.text,
+        ...message.audience && link.features.includes(FEDERATION_AUDIENCE_FEATURE) ? { audience: message.audience } : {},
         ...conversation ? {
           ...message.replyTo ? { replyTo: message.replyTo, completesAsk: conversationCompletesAsk(message) } : {},
           ...message.expectsReply !== void 0 ? { expectsReply: message.expectsReply } : {},

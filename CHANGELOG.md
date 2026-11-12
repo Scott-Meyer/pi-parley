@@ -3,6 +3,7 @@
 ## Unreleased
 
 - `broadcast` can name its group: `to` is a pattern over references (`flightdeck:*`, `build-vm:*`, `*`), `cwd` a directory, `app` a pattern over where sessions live (`Pi*`). A group reaches the sessions it names on any computer; without one, a broadcast stays on this computer as before.
+- A broadcast's recipients read that it went to a group, and which one as the sender named it (`Broadcast to "box:*", not to you alone`), so they don't take it as addressed to them alone. A linked computer that predates this still gets the message, just without that line.
 - `list` and `list-cwd` rows show one line in Pi and Oh My Pi until opened (`✓ 30 other sessions · 14 on this computer, 16 on 4 linked computers · 3 working`); opening the row shows the full list. The model still reads the whole list. Parley rows in Oh My Pi now open with its expand toggle; they read only Pi's render context before.
 - The README says what an application bundling `pi-parley/host` installs beside it: `typebox` and `@mariozechner/pi-tui`, which Pi supplies to its extensions. The packed-package check bundles it from a clean install with just those two.
 

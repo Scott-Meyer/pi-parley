@@ -12,6 +12,17 @@ export const CONVERSATION_CONTRACT_FEATURE = "conversation-contract-v1";
 /** Messages may say the person at the sending session wrote them (`session_person` provenance). */
 export const PERSON_PROVENANCE_FEATURE = "person-provenance-v1";
 
+/** Receivers refuse a longer audience label; senders shorten to fit. */
+export const AUDIENCE_GROUP_MAX_LENGTH = 300;
+
+/** A broadcast: to everyone visible on the sender's computer, or to the group it named
+ * (a reference pattern like flightdeck:*, a directory, an app). As the sender reports it. */
+export interface MessageAudience {
+  readonly kind: "broadcast";
+  /** How the sender named the group; absent means everyone on the sender's computer. */
+  readonly group?: string;
+}
+
 /** Broker preflight for a retained conversation identity; no delivery has occurred. */
 export interface PreparedConversation {
   messageId: string;
@@ -150,6 +161,8 @@ export interface Message {
   /** Broker-authored tracking deadline, not withdrawal or a work deadline. */
   replyDeadline?: number;
   provenance?: MessageProvenance;
+  /** The sender's statement that this went to a group, not to the recipient alone. */
+  audience?: MessageAudience;
   /** Broker-authored notice about the sender, attached only to direct contact. */
   peerCompaction?: PeerCompactionNotice;
   /** Opaque broker correlation proving this direct message reached a capable client. */

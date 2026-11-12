@@ -75,6 +75,7 @@ import {
   type FederationFailureCode,
   type FederationOrigin,
   FEDERATION_MERGED_ROSTER_FEATURE,
+  FEDERATION_AUDIENCE_FEATURE,
 } from "./federation-types.ts";
 
 const PARLEY_DIR = getParleyDirPath();
@@ -1181,6 +1182,7 @@ class ParleyBroker {
       brokerReceivedAt: now,
       brokerDeliveredAt: now,
       content: { text: frame.message.text },
+      ...(frame.message.audience ? { audience: frame.message.audience } : {}),
       ...(conversation ? {
         ...(frame.message.replyTo ? { replyTo: frame.message.replyTo, completesAsk: conversationCompletesAsk(frame.message) } : {}),
         ...(frame.message.expectsReply !== undefined ? { expectsReply: frame.message.expectsReply } : {}),
@@ -1429,6 +1431,7 @@ class ParleyBroker {
         id: message.id,
         timestamp: message.timestamp,
         text: message.content.text,
+        ...(message.audience && link.features.includes(FEDERATION_AUDIENCE_FEATURE) ? { audience: message.audience } : {}),
         ...(conversation ? {
           ...(message.replyTo ? { replyTo: message.replyTo, completesAsk: conversationCompletesAsk(message) } : {}),
           ...(message.expectsReply !== undefined ? { expectsReply: message.expectsReply } : {}),

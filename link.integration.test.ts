@@ -426,10 +426,12 @@ test("a broadcast reaches the group it names: this computer by default, or a com
     // No group: everyone visible on this computer, as before.
     assert.notEqual((await call("new-tab", { action: "broadcast", message: "local hello" })).details?.error, true);
     await eventually(() => got("old-tab", "local hello"), "the other laptop tab gets it");
+    assert.match(inbox("old-tab"), /Broadcast to everyone on the sender's computer, not to you alone/, "a recipient knows it wasn't singled out");
     // A computer, by its reference prefix.
     const boxOnly = await call("new-tab", { action: "broadcast", to: "box:*", message: "box hello" });
     assert.notEqual(boxOnly.details?.error, true, text(boxOnly));
     await eventually(() => got("box-old-tab", "box hello") && got("box-new-tab", "box hello"), "both box tabs get it");
+    assert.match(inbox("box-new-tab"), /Broadcast to .*box:\*.*, not to you alone/, "the group crosses the link as the sender named it");
     // Everyone, every computer.
     await call("new-tab", { action: "broadcast", to: "*", message: "everyone hello" });
     await eventually(() => ["old-tab", "box-old-tab", "box-new-tab"].every((name) => got(name, "everyone hello")), "all three others get it");

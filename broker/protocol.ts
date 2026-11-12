@@ -8,7 +8,9 @@ import type {
   PeerCompactionNotice,
   SessionInfo,
   SessionRegistration,
+  MessageAudience,
 } from "../types.ts";
+import { AUDIENCE_GROUP_MAX_LENGTH } from "../types.ts";
 import { isValidSessionDescription, isValidSessionName } from "../session-profile.ts";
 import {
   encodeOriginQualifiedSessionIdentity,
@@ -90,6 +92,12 @@ function isAttachment(value: unknown): value is Attachment {
   return value.language === undefined || typeof value.language === "string";
 }
 
+export function isMessageAudience(value: unknown): value is MessageAudience {
+  if (!isRecord(value) || value.kind !== "broadcast") return false;
+  if (!Object.keys(value).every((key) => key === "kind" || key === "group")) return false;
+  return value.group === undefined || (typeof value.group === "string" && value.group.length > 0 && value.group.length <= AUDIENCE_GROUP_MAX_LENGTH);
+}
+
 function isMessageProvenance(value: unknown): value is MessageProvenance {
   if (!isRecord(value)) {
     return false;
@@ -155,6 +163,7 @@ export function isMessage(value: unknown): value is Message {
   if (value.senderWaitMode !== undefined && value.senderWaitMode !== "blocking" && value.senderWaitMode !== "nonblocking") return false;
   if (value.replyDeadline !== undefined && (!Number.isSafeInteger(value.replyDeadline) || (value.replyDeadline as number) < 0)) return false;
 
+  if (value.audience !== undefined && !isMessageAudience(value.audience)) return false;
   if (value.provenance !== undefined && !isMessageProvenance(value.provenance)) {
     return false;
   }

@@ -30,7 +30,7 @@ function nodeCommand(execPath = process.execPath) {
 var bundledBuild;
 var init_bundle = __esm({
   "broker/bundle.ts"() {
-    bundledBuild = true ? JSON.parse('{"packageVersion":"1.8.0","sourceId":"c41ebd5a81dd8f6f5ac57674c728b5f9830e16998888995f37034b8fa179250e"}') : void 0;
+    bundledBuild = true ? JSON.parse('{"packageVersion":"1.8.0","sourceId":"b13553c7bff582441679b1d654e7149ad0c807a95dcf40f4dd4159762e5aa2e4"}') : void 0;
   }
 });
 
@@ -11362,6 +11362,22 @@ var init_pi_compat = __esm({
   }
 });
 
+// types.ts
+var EXTENSION_BUS_FEATURE, EXACT_SEND_FEATURE, EXACT_IDENTITY_SEND_FEATURE, COMPACTION_AWARENESS_FEATURE, SESSION_PROFILE_FEATURE, FEDERATED_CONVERSATION_FEATURE, CONVERSATION_CONTRACT_FEATURE, PERSON_PROVENANCE_FEATURE, AUDIENCE_GROUP_MAX_LENGTH;
+var init_types2 = __esm({
+  "types.ts"() {
+    EXTENSION_BUS_FEATURE = "extension-bus-v1";
+    EXACT_SEND_FEATURE = "exact-send-v1";
+    EXACT_IDENTITY_SEND_FEATURE = "exact-identity-send-v1";
+    COMPACTION_AWARENESS_FEATURE = "compaction-awareness-v1";
+    SESSION_PROFILE_FEATURE = "session-profile-v1";
+    FEDERATED_CONVERSATION_FEATURE = "federated-conversation-text-v1";
+    CONVERSATION_CONTRACT_FEATURE = "conversation-contract-v1";
+    PERSON_PROVENANCE_FEATURE = "person-provenance-v1";
+    AUDIENCE_GROUP_MAX_LENGTH = 300;
+  }
+});
+
 // session-profile.ts
 function normalizeInlineText(value) {
   return value.replace(/\s+/g, " ").trim();
@@ -11432,7 +11448,7 @@ var init_session_profile = __esm({
 });
 
 // broker/federation-types.ts
-var FEDERATION_IDENTITY_FEATURE, FEDERATION_SINGLE_HOP_FEATURE, FEDERATION_ROSTER_FEATURE, FEDERATION_SEND_FEATURE, FEDERATION_EXACT_SEND_FEATURE, FEDERATION_CONVERSATION_FEATURE, FEDERATION_SCOPED_LINKS_FEATURE, FEDERATION_PING_FEATURE, FEDERATION_APP_FEATURE, FEDERATION_CORRELATION_ID_MAX_LENGTH, FEDERATION_ORIGIN_ID_MAX_LENGTH, FEDERATION_SCOPE_ALIAS_MAX_LENGTH, FEDERATION_SESSION_ID_MAX_LENGTH, FEDERATION_REQUIRED_FEATURES, FEDERATION_SUPPORTED_FEATURES;
+var FEDERATION_IDENTITY_FEATURE, FEDERATION_SINGLE_HOP_FEATURE, FEDERATION_ROSTER_FEATURE, FEDERATION_SEND_FEATURE, FEDERATION_EXACT_SEND_FEATURE, FEDERATION_CONVERSATION_FEATURE, FEDERATION_SCOPED_LINKS_FEATURE, FEDERATION_PING_FEATURE, FEDERATION_APP_FEATURE, FEDERATION_AUDIENCE_FEATURE, FEDERATION_CORRELATION_ID_MAX_LENGTH, FEDERATION_ORIGIN_ID_MAX_LENGTH, FEDERATION_SCOPE_ALIAS_MAX_LENGTH, FEDERATION_SESSION_ID_MAX_LENGTH, FEDERATION_REQUIRED_FEATURES, FEDERATION_SUPPORTED_FEATURES;
 var init_federation_types = __esm({
   "broker/federation-types.ts"() {
     FEDERATION_IDENTITY_FEATURE = "peer-identity-v1";
@@ -11444,6 +11460,7 @@ var init_federation_types = __esm({
     FEDERATION_SCOPED_LINKS_FEATURE = "peer-links-by-scope-v1";
     FEDERATION_PING_FEATURE = "peer-ping-v1";
     FEDERATION_APP_FEATURE = "peer-roster-app-v1";
+    FEDERATION_AUDIENCE_FEATURE = "peer-send-audience-v1";
     FEDERATION_CORRELATION_ID_MAX_LENGTH = 128;
     FEDERATION_ORIGIN_ID_MAX_LENGTH = 96;
     FEDERATION_SCOPE_ALIAS_MAX_LENGTH = 64;
@@ -11460,7 +11477,8 @@ var init_federation_types = __esm({
       FEDERATION_CONVERSATION_FEATURE,
       FEDERATION_SCOPED_LINKS_FEATURE,
       FEDERATION_PING_FEATURE,
-      FEDERATION_APP_FEATURE
+      FEDERATION_APP_FEATURE,
+      FEDERATION_AUDIENCE_FEATURE
     ];
   }
 });
@@ -11576,6 +11594,11 @@ function isAttachment(value) {
   }
   return value.language === void 0 || typeof value.language === "string";
 }
+function isMessageAudience(value) {
+  if (!isRecord2(value) || value.kind !== "broadcast") return false;
+  if (!Object.keys(value).every((key) => key === "kind" || key === "group")) return false;
+  return value.group === void 0 || typeof value.group === "string" && value.group.length > 0 && value.group.length <= AUDIENCE_GROUP_MAX_LENGTH;
+}
 function isMessageProvenance(value) {
   if (!isRecord2(value)) {
     return false;
@@ -11618,6 +11641,7 @@ function isMessage(value) {
   if (value.completesAsk === true && !value.replyTo) return false;
   if (value.senderWaitMode !== void 0 && value.senderWaitMode !== "blocking" && value.senderWaitMode !== "nonblocking") return false;
   if (value.replyDeadline !== void 0 && (!Number.isSafeInteger(value.replyDeadline) || value.replyDeadline < 0)) return false;
+  if (value.audience !== void 0 && !isMessageAudience(value.audience)) return false;
   if (value.provenance !== void 0 && !isMessageProvenance(value.provenance)) {
     return false;
   }
@@ -11718,6 +11742,7 @@ function isSessionInfo(value) {
 }
 var init_protocol = __esm({
   "broker/protocol.ts"() {
+    init_types2();
     init_session_profile();
     init_federation_protocol();
     init_paths();
@@ -11885,21 +11910,6 @@ var init_config2 = __esm({
       linkByDefault: true,
       herdrNames: true
     };
-  }
-});
-
-// types.ts
-var EXTENSION_BUS_FEATURE, EXACT_SEND_FEATURE, EXACT_IDENTITY_SEND_FEATURE, COMPACTION_AWARENESS_FEATURE, SESSION_PROFILE_FEATURE, FEDERATED_CONVERSATION_FEATURE, CONVERSATION_CONTRACT_FEATURE, PERSON_PROVENANCE_FEATURE;
-var init_types2 = __esm({
-  "types.ts"() {
-    EXTENSION_BUS_FEATURE = "extension-bus-v1";
-    EXACT_SEND_FEATURE = "exact-send-v1";
-    EXACT_IDENTITY_SEND_FEATURE = "exact-identity-send-v1";
-    COMPACTION_AWARENESS_FEATURE = "compaction-awareness-v1";
-    SESSION_PROFILE_FEATURE = "session-profile-v1";
-    FEDERATED_CONVERSATION_FEATURE = "federated-conversation-text-v1";
-    CONVERSATION_CONTRACT_FEATURE = "conversation-contract-v1";
-    PERSON_PROVENANCE_FEATURE = "person-provenance-v1";
   }
 });
 
@@ -12732,6 +12742,7 @@ var init_client = __esm({
           expectsReply: options2.expectsReply,
           senderWaitMode: options2.senderWaitMode,
           provenance: options2.provenance,
+          ...options2.audience ? { audience: options2.audience } : {},
           content: { text: options2.text, attachments: options2.attachments }
         };
         const cancelledResult = () => failedBeforeSend("Send cancelled before the next delivery attempt", "E_CANCELLED");
@@ -13802,6 +13813,26 @@ var init_click_to_expand = __esm({
   }
 });
 
+// broadcast-audience.ts
+function broadcastAudience(scope) {
+  const to = scope.to?.trim();
+  const app = scope.app?.trim();
+  const cwd = scope.cwd?.trim();
+  const label = (directory) => [to, directory && `sessions in ${directory}`, app && `sessions in ${app}`].filter(Boolean).join(", ");
+  let group = label(cwd);
+  if (group.length > AUDIENCE_GROUP_MAX_LENGTH && cwd) {
+    const room = AUDIENCE_GROUP_MAX_LENGTH - label("\u2026").length;
+    if (room > 0) group = label(`\u2026${cwd.slice(-room)}`);
+  }
+  if (group.length > AUDIENCE_GROUP_MAX_LENGTH) group = `${group.slice(0, AUDIENCE_GROUP_MAX_LENGTH - 1)}\u2026`;
+  return group ? { kind: "broadcast", group } : { kind: "broadcast" };
+}
+var init_broadcast_audience = __esm({
+  "broadcast-audience.ts"() {
+    init_types2();
+  }
+});
+
 // extension-api.ts
 var PARLEY_EXTENSION_REGISTER_EVENT, PARLEY_EXTENSION_REGISTRY_READY_EVENT, PARLEY_OUTBOX_REQUEST_EVENT, PARLEY_OUTBOX_RESULT_EVENT;
 var init_extension_api = __esm({
@@ -14596,6 +14627,37 @@ var normalizeCache;
 var init_cwd = __esm({
   "cwd.ts"() {
     normalizeCache = /* @__PURE__ */ new Map();
+  }
+});
+
+// roster-summary.ts
+function summarizeRoster(others, cwd) {
+  const linked = others.filter((session) => session.federation);
+  return {
+    others: others.length,
+    local: others.length - linked.length,
+    linked: linked.length,
+    computers: new Set(linked.map((session) => session.federation.originId)).size,
+    working: others.filter((session) => session.status && session.status !== "idle").length,
+    ...cwd !== void 0 ? { cwd } : {}
+  };
+}
+function formatRosterSummary(summary) {
+  const where = summary.cwd !== void 0 ? ` in ${summary.cwd}` : "";
+  if (summary.others === 0) return `No other sessions${where}`;
+  const parts = [`${summary.others} other session${summary.others === 1 ? "" : "s"}${where}`];
+  if (summary.linked > 0) {
+    parts.push(`${summary.local} on this computer, ${summary.linked} on ${summary.computers} linked computer${summary.computers === 1 ? "" : "s"}`);
+  }
+  if (summary.working > 0) parts.push(`${summary.working} working`);
+  return parts.join(" \xB7 ");
+}
+function rosterSummaryOf(details) {
+  const roster = details?.roster;
+  return typeof roster === "object" && roster !== null && typeof roster.others === "number" ? roster : void 0;
+}
+var init_roster_summary = __esm({
+  "roster-summary.ts"() {
   }
 });
 
@@ -16047,6 +16109,9 @@ function formatInboundDeliveryMetadata(message, messageRef) {
   if (message.replyTo) parts.push(`Reply to: ${messageRef(message.replyTo)}`);
   if (message.supersedes) parts.push(`Supersedes: ${messageRef(message.supersedes)}`);
   if (message.retryOf) parts.push(`Retry of: ${messageRef(message.retryOf)}`);
+  if (message.audience?.kind === "broadcast") {
+    parts.push(`Broadcast to ${message.audience.group ? verbatim(JSON.stringify(message.audience.group)) : "everyone on the sender's computer"}, not to you alone`);
+  }
   if (message.provenance?.type === "extension_outbox") {
     parts.push(`Via extension ${message.provenance.extensionName} (${message.provenance.extensionId}); request ${message.provenance.requestId}`);
   } else if (message.provenance?.type === "session_person") {
@@ -17336,7 +17401,7 @@ Reply requested${waiting}.${elapsed ? " The original wait window has elapsed." :
 ${describeCompaction(senderDisplay, injectedMessage.peerCompaction, entry.from.id)}` : "";
     const body = entry.bodyText ?? injectedMessage.content.text + (injectedMessage.content.attachments?.length ? formatAttachments(injectedMessage.content.attachments) : "");
     return {
-      display: { text: body, ...quoted !== void 0 ? { inReplyTo: quoted } : {} },
+      display: { text: body, ...quoted !== void 0 ? { inReplyTo: quoted } : {}, ...injectedMessage.audience ? { audience: injectedMessage.audience } : {} },
       content: presentForModel(`**From ${senderDisplay}**${focus}${request}${verbatim(topic)}
 
 ${verbatim(body)}
@@ -17783,7 +17848,8 @@ Observed local session: ${target2.session ? references.current.sessionRef(target
           text: options2.message,
           attachments: options2.attachments,
           signal: options2.signal,
-          contactKind: options2.broadcast ? "broadcast" : "direct"
+          contactKind: options2.broadcast ? "broadcast" : "direct",
+          ...options2.audience ? { audience: options2.audience } : {}
         };
         let result = target2.session ? await activeClient.sendToSession(target2.session, sendOptions) : await activeClient.send(target2.requested, { ...sendOptions, exactIdentity: options2.isExactIdentity?.(target2.requested) === true });
         if (!options2.broadcast && options2.allowRosterMailboxFallback !== false && target2.session && result.code === "E_TARGET_NOT_FOUND") {
@@ -19191,7 +19257,7 @@ ${otherSessions.map((session) => formatSessionListRow(session, currentSession.cw
                   content: [{ type: "text", text: `${currentSection}
 
 ${otherSection}` }],
-                  details: {}
+                  details: { roster: summarizeRoster(otherSessions) }
                 };
               } catch (error) {
                 return {
@@ -19234,7 +19300,7 @@ ${otherSessions.map((session) => formatSessionListRow(session, currentSession.cw
                   content: [{ type: "text", text: `${currentSection}
 
 ${otherSection}` }],
-                  details: {}
+                  details: { roster: summarizeRoster(otherSessions, filterCwd) }
                 };
               } catch (error) {
                 return {
@@ -19371,6 +19437,8 @@ ${message}${attachmentText}`
                   broadcast: !recipients.some((recipient) => recipient.session?.federation),
                   // Still live-only: a broadcast never becomes mail for someone who left.
                   allowRosterMailboxFallback: false,
+                  // Recipients read that this went to a group, and which.
+                  audience: grouped ? broadcastAudience({ to, cwd: inCwd, app }) : { kind: "broadcast" },
                   signal: _signal,
                   record: recordActionEntry
                 });
@@ -20090,7 +20158,7 @@ Visible connected sessions: ${sessions.length} (including this session; scope an
       if (attachmentCount > 0) {
         text += " " + theme.fg("dim", `(${attachmentCount} attachment${attachmentCount === 1 ? "" : "s"})`);
       }
-      const open = rowExpanded(context);
+      const open = rowExpanded(context, theme.expanded);
       const fullMessage = typeof args.message === "string" ? args.message.trim() : "";
       if (open && fullMessage) {
         text += "\n" + fullMessage.split("\n").map((line) => "  " + theme.fg("text", line)).join("\n");
@@ -20099,7 +20167,7 @@ Visible connected sessions: ${sessions.length} (including this session; scope an
       }
       return clickToExpand(new Text(text, 0, 0), context);
     },
-    renderResult(result, { isPartial }, theme, context) {
+    renderResult(result, { isPartial, expanded }, theme, context) {
       const details = result.details;
       if (details?.senderIdentity) {
         const state = context.state ?? {};
@@ -20115,8 +20183,14 @@ Visible connected sessions: ${sessions.length} (including this session; scope an
       const failed = Boolean(context.isError || details?.error === true || details?.delivered === false && !details?.replyMessageId);
       const uncertain = details?.outcomeKnown === false || (details?.unknownCount ?? 0) > 0;
       let text = uncertain ? theme.fg("warning", "? ") : failed ? theme.fg("error", "\u2717 ") : theme.fg("success", "\u2713 ");
+      const open = rowExpanded(context, expanded);
+      const roster = !failed && !open ? rosterSummaryOf(details) : void 0;
+      if (roster) {
+        text += theme.fg("text", formatRosterSummary(roster));
+        if (roster.others > 0) text += theme.fg("dim", " (expand to see them)");
+        return clickToExpand(new Text(text, 0, 0), context);
+      }
       text += theme.fg(uncertain ? "warning" : failed ? "error" : "text", references.current.present(result.content.filter((item) => item.type === "text").map((item) => item.text).join("\n")));
-      const open = rowExpanded(context);
       if (details?.messageId && !open) {
         const messageRef2 = references.current.messageRef(details.messageId);
         if (!text.includes(messageRef2)) text += theme.fg("dim", ` (${messageRef2})`);
@@ -20333,9 +20407,9 @@ function parleyCommandSuggestions(prefix) {
   }
   return null;
 }
-function rowExpanded(context) {
+function rowExpanded(context, expanded) {
   const clicked = context?.state?.clickedOpen;
-  return clicked ?? Boolean(context?.expanded);
+  return clicked ?? Boolean(context?.expanded || expanded);
 }
 function clickToExpand(child, context) {
   if (!context) return child;
@@ -20359,12 +20433,14 @@ var init_index = __esm({
     init_inline_message();
     init_click_to_expand();
     init_config2();
+    init_broadcast_audience();
     init_types2();
     init_extension_api();
     init_reply_tracker();
     init_references();
     init_conversation_history();
     init_cwd();
+    init_roster_summary();
     init_compaction_awareness();
     init_message_results();
     init_session();
