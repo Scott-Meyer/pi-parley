@@ -54,6 +54,7 @@
     "reply-tracker.ts",
     "references.ts",
     "message-results.ts",
+    "roster-summary.ts",
     "conversation-history.ts",
     "dist/**",
     "scripts/smoke-host-compat.mjs",

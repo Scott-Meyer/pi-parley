@@ -2332,6 +2332,41 @@ test("parley tool renders compact call and result rows", async () => {
   assert.match(errorText, /Reason: Missing target/);
 });
 
+test("parley list rows fold to a one-line summary until opened", { concurrency: false }, async () => {
+  const { cleanup } = await setupClients();
+  const { default: piParleyExtension } = await import("./index.ts");
+  // The fixture's planner and orchestrator share this directory; one more works elsewhere.
+  const elsewhere = new ParleyClient();
+  const harness = createExtensionHarness("roster-viewer");
+
+  try {
+    await elsewhere.connect({ name: "faraway", cwd: `${repoDir}/other`, model: "test-model", pid: process.pid, startedAt: Date.now(), lastActivity: Date.now(), status: "thinking" });
+    piParleyExtension(harness.pi as never);
+    await harness.emitLifecycle("session_start");
+    const parleyTool = harness.tools.find((tool) => tool.name === "parley")!;
+    const render = (result: unknown, expanded: boolean) => renderToText(parleyTool.renderResult!(result as never, { isPartial: false, expanded }, renderTheme, { isError: false, expanded }));
+
+    const listed = await parleyTool.execute("roster-list", { action: "list" }, new AbortController().signal, undefined, harness.ctx);
+    const collapsed = render(listed, false);
+    assert.match(collapsed, /^✓ 3 other sessions · 1 working \(expand to see them\)$/);
+    const opened = render(listed, true);
+    assert.match(opened, /• planner — /);
+    assert.match(opened, /• faraway — /);
+    assert.match(listed.content.map((part) => (part as { text?: string }).text ?? "").join(""), /• faraway — /, "the model still reads the whole roster");
+    // OMP passes the tool's arguments where Pi passes its render context, and says "open" only in the options.
+    const ompOpened = renderToText(parleyTool.renderResult!(listed as never, { isPartial: false, expanded: true }, renderTheme, { action: "list" } as never));
+    assert.match(ompOpened, /• faraway — /);
+
+    const listedCwd = await parleyTool.execute("roster-list-cwd", { action: "list-cwd" }, new AbortController().signal, undefined, harness.ctx);
+    assert.equal(render(listedCwd, false), `✓ 2 other sessions in ${repoDir} (expand to see them)`);
+    assert.match(render(listedCwd, true), /• orchestrator — /);
+  } finally {
+    await harness.emitLifecycle("session_shutdown").catch(() => undefined);
+    await elsewhere.disconnect().catch(() => undefined);
+    await cleanup();
+  }
+});
+
 test("parley tool result hook marks failed details as errors", async () => {
   const { default: piParleyExtension } = await import("./index.ts");
   const harness = createExtensionHarness();

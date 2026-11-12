@@ -37,6 +37,7 @@ import { restoreConversationHistory, messageControlKey, matchesAskCounterpart, t
 import { resolve as resolvePath } from "node:path";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { sameCwd } from "./cwd.ts";
+import { formatRosterSummary, rosterSummaryOf, summarizeRoster } from "./roster-summary.ts";
 import { formatPeerCompactionNotice } from "./compaction-awareness.ts";
 import { formatCancellationResult, formatDeliveryResult } from "./message-results.ts";
 import { SessionLinks } from "./link/session.ts";
@@ -4448,7 +4449,7 @@ Sessions and messages are named the way people would name them: a session by its
 
             return {
               content: [{ type: "text", text: `${currentSection}\n\n${otherSection}` }],
-              details: {},
+              details: { roster: summarizeRoster(otherSessions) },
             };
           } catch (error) {
             return {
@@ -4502,7 +4503,7 @@ Sessions and messages are named the way people would name them: a session by its
 
             return {
               content: [{ type: "text", text: `${currentSection}\n\n${otherSection}` }],
-              details: {},
+              details: { roster: summarizeRoster(otherSessions, filterCwd) },
             };
           } catch (error) {
             return {
@@ -5391,7 +5392,8 @@ Sessions and messages are named the way people would name them: a session by its
       if (attachmentCount > 0) {
         text += " " + theme.fg("dim", `(${attachmentCount} attachment${attachmentCount === 1 ? "" : "s"})`);
       }
-      const open = rowExpanded(context);
+      // OMP calls renderCall(args, options, theme): its options, in the theme slot, say whether the row is open.
+      const open = rowExpanded(context, (theme as { expanded?: boolean }).expanded);
       const fullMessage = typeof args.message === "string" ? args.message.trim() : "";
       if (open && fullMessage) {
         text += "\n" + fullMessage.split("\n").map((line) => "  " + theme.fg("text", line)).join("\n");
@@ -5400,7 +5402,7 @@ Sessions and messages are named the way people would name them: a session by its
       }
       return clickToExpand(new Text(text, 0, 0), context);
     },
-    renderResult(result, { isPartial }, theme, context) {
+    renderResult(result, { isPartial, expanded }, theme, context) {
       const details = result.details as { delivered?: boolean; error?: boolean; messageId?: string; replyMessageId?: string; reason?: string; senderIdentity?: string; outcomeKnown?: boolean; unknownCount?: number } | undefined;
       if (details?.senderIdentity) {
         const state = (context.state ?? {}) as { senderIdentity?: string };
@@ -5416,8 +5418,15 @@ Sessions and messages are named the way people would name them: a session by its
       const failed = Boolean(context.isError || details?.error === true || (details?.delivered === false && !details?.replyMessageId));
       const uncertain = details?.outcomeKnown === false || (details?.unknownCount ?? 0) > 0;
       let text = uncertain ? theme.fg("warning", "? ") : failed ? theme.fg("error", "✗ ") : theme.fg("success", "✓ ");
+      const open = rowExpanded(context, expanded);
+      // A session list folds to one line until the row is opened.
+      const roster = !failed && !open ? rosterSummaryOf(details) : undefined;
+      if (roster) {
+        text += theme.fg("text", formatRosterSummary(roster));
+        if (roster.others > 0) text += theme.fg("dim", " (expand to see them)");
+        return clickToExpand(new Text(text, 0, 0), context);
+      }
       text += theme.fg(uncertain ? "warning" : failed ? "error" : "text", references.current.present(result.content.filter((item) => item.type === "text").map((item) => item.text).join("\n")));
-      const open = rowExpanded(context);
       if (details?.messageId && !open) {
         const messageRef = references.current.messageRef(details.messageId);
         if (!text.includes(messageRef)) text += theme.fg("dim", ` (${messageRef})`);
@@ -5681,9 +5690,10 @@ function parleyCommandSuggestions(prefix: string): { value: string; label: strin
 }
 
 /** A parley tool row is open when Ctrl+O opened every row, or a click opened this one. */
-function rowExpanded(context: { expanded?: boolean; state?: unknown } | undefined): boolean {
+/** Pi says whether a row is open in its render context; OMP says so only in the render options. */
+function rowExpanded(context: { expanded?: boolean; state?: unknown } | undefined, expanded?: boolean): boolean {
   const clicked = (context?.state as { clickedOpen?: boolean } | undefined)?.clickedOpen;
-  return clicked ?? Boolean(context?.expanded);
+  return clicked ?? Boolean(context?.expanded || expanded);
 }
 
 /** In fullscreen mode, a click on a parley tool row opens or shuts it, call and result together. */
