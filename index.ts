@@ -1,5 +1,5 @@
 import type { AgentSessionEvent, AgentToolResult, ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
-import { randomUUID } from "crypto";
+import { createHash, randomUUID } from "crypto";
 import { Type } from "typebox";
 import { Text } from "@mariozechner/pi-tui";
 import { defineTool, sessionCompactFailuresReachExtensions, sessionInfoChangesReachExtensions, StringEnum } from "./pi-compat.ts";
@@ -833,7 +833,9 @@ function formatInboundDeliveryMetadata(message: Message, messageRef: (id: string
     parts.push("Written by the person at the sending session, not its agent (as reported by that session)");
   }
   // Transport timestamps remain in details. A long mailbox delay changes the meaning of the text.
-  if (Date.now() - message.timestamp > 60_000) parts.push(`Originally sent: ${formatMessageTimestamp(message.timestamp)}`);
+  // The delay is arrival minus sending, a fact of the message, so the text never depends on when it's read.
+  const arrivedAt = message.receiverReceivedAt ?? message.injectedAt;
+  if (arrivedAt !== undefined && arrivedAt - message.timestamp > 60_000) parts.push(`Originally sent: ${formatMessageTimestamp(message.timestamp)}`);
   return parts.join("\n");
 }
 const PARLEY_EXTENSION_RUNTIME_CLAIM_EVENT = "pi-parley:extension-runtime-claim:v1";
@@ -1316,8 +1318,19 @@ function installParleyExtension(
   const deferredInboundControls = new Map<string, { from: SessionInfo; control: MessageControl; content: string; receivedAt: number }>();
   let inboundRetryTimer: NodeJS.Timeout | null = null;
   const pendingHostEnvelopes = new Map<string, InboundEnvelope>();
-  // Keep full snapshots until the host persists them; presentation is not persistence.
-  const contextFallbackEnvelopes = new Map<string, InboundEnvelope>();
+  // The model's view of the conversation is append-only. Providers cache prompts by prefix, so
+  // any earlier message that reads differently on a later request (a new label or status, a
+  // clock, a copy that moves) re-sends everything after it. Whatever the model was shown stays
+  // exactly as and where it was shown; anything new, including a changed status, arrives later
+  // as its own message or tool result.
+  //
+  // Envelopes the model saw before the host recorded them (a steered message still in Pi's
+  // queue, or a host that dropped it), by key, with the host message they followed.
+  const insertedContext = new Map<string, { after: string | undefined; message: InboundEnvelope & { role: "custom" } }>();
+  // Envelope keys the host has recorded in its own session, whether or not a context includes them.
+  const hostRecordedEnvelopes = new Set<string>();
+  // What each host message was shown as, by its content, so presentation never drifts with state.
+  const shownProjections = new Map<string, unknown>();
   const presentedInboundEnvelopes = new Set<string>();
   const settledInboundMessages = new Set<string>();
   const inboundMessageDispositions = new Map<string, NonNullable<ParleyContext["disposition"]>>();
@@ -1343,12 +1356,12 @@ function installParleyExtension(
 
   function confirmPersistedInbound(): void {
     const ctx = getLiveContext();
-    if (!ctx || (pendingHostEnvelopes.size === 0 && contextFallbackEnvelopes.size === 0)) return;
+    if (!ctx || (pendingHostEnvelopes.size === 0 && insertedContext.size === 0)) return;
     for (const entry of ctx.sessionManager.getEntries()) {
       if (entry.type !== "custom_message") continue;
       const key = inboundEnvelopeKey(entry);
       if (key) {
-        contextFallbackEnvelopes.delete(key);
+        hostRecordedEnvelopes.add(key);
         confirmInboundEnvelope(key);
       }
     }
@@ -1398,42 +1411,6 @@ function installParleyExtension(
     if (!key.startsWith("message:")) return false;
     const id = key.slice("message:".length);
     return settledInboundMessages.has(id) || inboundMessageDispositions.has(id);
-  }
-
-  /** A retained snapshot is background history, not another incoming request.
-   * Status comes from the live conversation, while timing and content stay tied to arrival. */
-  function historicalInboundEnvelope(envelope: { customType: string; content: string | Array<{ type: string; text?: string }>; details?: unknown; timestamp: number }): string {
-    if (envelope.customType === "parley_message_control") {
-      const details = envelope.details as { control: MessageControl };
-      const disposition = inboundMessageDispositions.get(details.control.messageId);
-      const status = disposition
-        ? `${disposition.state}${disposition.replacementId ? ` by message ${references.current.messageRef(disposition.replacementId)}` : ""}`
-        : details.control.action === "cancel" ? "withdrawn" : "superseded";
-      const raw = typeof envelope.content === "string" ? envelope.content : envelope.content.map((part) => part.text ?? "").join("\n");
-      // Already-presented notice text is final; an older one keeps its quoted previews verbatim.
-      const content = (envelope.details as Record<string, unknown> | undefined)?.[PRESENTED_MARK] === true
-        ? verbatim(raw)
-        : protectLegacyPeerText(raw, legacyPeerText(envelope.details));
-      return presentForModel(`**Parley history — withdrawal/update**\nReceived: ${formatMessageTimestamp(envelope.timestamp)}\nStatus: ${status}\nPreviously received context, not a new delivery.\n\n${content}`, details);
-    }
-    const entry = envelope.details as InboundMessageEntry;
-    const { from, message } = entry;
-    const retained = replyTracker.getMessage(message.id);
-    const disposition = inboundMessageDispositions.get(message.id);
-    const answered = settledInboundMessages.has(message.id);
-    const status = disposition
-      ? `${disposition.state}${disposition.replacementId ? ` by message ${references.current.messageRef(disposition.replacementId)}` : ""}`
-      : answered ? "answered"
-      : message.expectsReply
-        ? `unanswered request${replyTracker.replyWindowElapsed(retained ?? { from, message, receivedAt: envelope.timestamp }) ? "; reply window elapsed, not withdrawn" : ""}`
-        : message.replyTo ? message.completesAsk === false ? "received threaded progress" : "received reply"
-        : "received notification; no reply requested";
-    const origin = from.federation
-      ? `\nRemote origin: ${references.current.originRef(from.federation)}; scope ${from.federation.remoteScopeAlias}` : "";
-    const compaction = message.peerCompaction
-      ? `\n\n${describeCompaction(references.current.sessionRef(from), message.peerCompaction, from.id)}` : "";
-    const body = entry.bodyText ?? message.content.text + (message.content.attachments?.length ? formatAttachments(message.content.attachments) : "");
-    return presentForModel(`**Parley history — from ${references.current.sessionRef(from)}**${from.description ? ` — ${from.description}` : ""}\nReceived: ${formatMessageTimestamp(envelope.timestamp)}\nStatus: ${status}\nShown again from earlier in this conversation, not a new delivery; the status above is current.${verbatim(entry.replyTopic ?? "")}\n\n${verbatim(body)}\n\n${formatInboundDeliveryMetadata(message, messageRef)}\nSession: ${from.cwd}${origin}${compaction}`, { from, message });
   }
 
   function settleOutgoingReply(from: SessionInfo, message: Message): void {
@@ -2947,7 +2924,9 @@ function installParleyExtension(
     deferredInboundMessages.clear();
     deferredInboundControls.clear();
     pendingHostEnvelopes.clear();
-    contextFallbackEnvelopes.clear();
+    insertedContext.clear();
+    hostRecordedEnvelopes.clear();
+    shownProjections.clear();
     presentedInboundEnvelopes.clear();
     settledInboundMessages.clear();
     inboundMessageDispositions.clear();
@@ -3185,7 +3164,9 @@ function installParleyExtension(
     deferredInboundMessages.clear();
     deferredInboundControls.clear();
     pendingHostEnvelopes.clear();
-    contextFallbackEnvelopes.clear();
+    insertedContext.clear();
+    hostRecordedEnvelopes.clear();
+    shownProjections.clear();
     presentedInboundEnvelopes.clear();
     settledInboundMessages.clear();
     inboundMessageDispositions.clear();
@@ -3248,14 +3229,21 @@ function installParleyExtension(
   onSessionCompactFailed("session_compact_failed", (_event, ctx) => {
     finishCompactionStatus(ctx);
   });
+  /** Which host message this is, cheaply and stably, so something shown after it can return to that place. */
+  function contextAnchor(message: { role: string; timestamp?: number; customType?: string; toolCallId?: string; details?: unknown }): string {
+    const key = message.role === "custom" ? inboundEnvelopeKey(message) : undefined;
+    return [message.role, key ?? message.timestamp ?? "", message.toolCallId ?? "", message.customType ?? ""].join("\0");
+  }
   pi.on("context", (event) => {
     if (!getLiveContext()) return;
     // Host persistence can arrive after fallback visibility has drained the retry queue.
     confirmPersistedInbound();
     // This is the actual model boundary, including hosts whose asynchronous sendMessage failed.
-    // Duplicate host retries are collapsed by message ID, not by identical body text.
+    // Duplicate host retries are collapsed by message ID, not by identical body text. Nothing
+    // here may make an earlier message read differently or move (see insertedContext).
+    type ContextMessage = (typeof event.messages)[number];
     const seen = new Set<string>();
-    const messages: typeof event.messages = [];
+    const messages: ContextMessage[] = [];
     // Learn what every parley call and result in this projection declares before presenting any
     // of it, so a summary that precedes the call it mentions is still readable.
     const projectionIdentities: DeclaredIdentities = { messages: new Set(), sessions: new Set() };
@@ -3275,76 +3263,116 @@ function installParleyExtension(
       messages: new Set([...projectionIdentities.messages].filter(isCanonicalIdentity)),
       sessions: new Set([...projectionIdentities.sessions].filter(isCanonicalIdentity)),
     };
+    // Envelope keys this host context carries, wherever they sit in it.
+    const hostKeys = new Set<string>();
     for (const message of event.messages) {
+      const key = message.role === "custom" ? inboundEnvelopeKey(message) : undefined;
+      if (key) hostKeys.add(key);
+    }
+    // Present each host message once, from its own content; later requests reuse that exact result.
+    const shownThisTime = new Set<string>();
+    const presentOnce = <T,>(source: object, present: () => T): T => {
+      // Text this runtime presented is final already; only older text needs remembering.
+      if (((source as { details?: unknown }).details as Record<string, unknown> | undefined)?.[PRESENTED_MARK] === true) return present();
+      const fingerprint = createHash("sha256").update(JSON.stringify(source)).digest("base64");
+      shownThisTime.add(fingerprint);
+      if (shownProjections.has(fingerprint)) return shownProjections.get(fingerprint) as T;
+      const shown = present();
+      shownProjections.set(fingerprint, shown);
+      return shown;
+    };
+    const present = (message: ContextMessage): ContextMessage | undefined => {
       if (message.role === "assistant" && Array.isArray(message.content)) {
+        if (!message.content.some((part) => part.type === "toolCall" && part.name === PARLEY_TOOL_NAME)) return message;
         // The model's own earlier parley calls may carry canonical identities (older versions,
         // programmatic arguments). Present them in this projection only; history is untouched.
-        messages.push({ ...message, content: message.content.map((part) => part.type === "toolCall" && part.name === PARLEY_TOOL_NAME
+        return presentOnce(message, () => ({ ...message, content: message.content.map((part) => part.type === "toolCall" && part.name === PARLEY_TOOL_NAME
           ? { ...part, arguments: presentToolArgumentsForModel(part.arguments, projectionIdentities) }
-          : part) });
-        continue;
+          : part) }));
       }
       if (message.role === "compactionSummary" || message.role === "branchSummary") {
-        messages.push({ ...message, summary: references.current.present(message.summary, canonicalIdentities) });
-        continue;
+        return presentOnce(message, () => ({ ...message, summary: references.current.present(message.summary, canonicalIdentities) }));
       }
       if (message.role === "toolResult" && (message.toolName === PARLEY_TOOL_NAME || message.toolName === "contact_supervisor")) {
         // Results recorded before references existed (or by other versions) still reach the model readable.
-        messages.push({ ...message, content: projectForModel(message.content, message.details, canonicalIdentities) });
-        continue;
+        return presentOnce(message, () => ({ ...message, content: projectForModel(message.content, message.details, canonicalIdentities) }));
       }
-      if (message.role !== "custom") {
-        messages.push(message);
-        continue;
-      }
-      if (message.customType === "parley_persistence_notice" && conversationPersistenceWarning) continue;
+      if (message.role !== "custom" || !message.customType?.startsWith("parley_")) return message;
       const key = inboundEnvelopeKey(message);
-      if (!key) {
-        messages.push(message.customType?.startsWith("parley_")
-          ? { ...message, content: projectForModel(message.content, message.details, canonicalIdentities) }
-          : message);
-        continue;
+      if (key) {
+        // The first copy the model saw is the one it keeps; host retries and later records are the same message.
+        if (seen.has(key)) return undefined;
+        seen.add(key);
+        const details = message.details as { message?: Message; control?: MessageControl; receivedAt?: number };
+        const timestamp = details.message?.receiverReceivedAt ?? details.receivedAt ?? details.message?.timestamp ?? details.control?.timestamp ?? message.timestamp;
+        return presentOnce(message, () => {
+          const presented = (message.details as Record<string, unknown> | undefined)?.[PRESENTED_MARK] === true;
+          const stored = typeof message.content === "string" ? message.content
+            : message.content.map((part) => part.type === "text" ? part.text : "").join("\n");
+          // An older incoming message that still carries identities is rebuilt from its typed record,
+          // so metadata and the colleague's words are told apart by structure rather than by matching
+          // text. One with nothing to present stays exactly as stored.
+          const content = !presented && message.customType === "parley_message" && details.message
+            && references.current.present(stored, canonicalIdentities) !== stored
+            ? formatInboundEnvelope(message.details as InboundMessageEntry, details.message).content
+            : projectForModel(message.content, message.details, canonicalIdentities);
+          return { ...message, content, timestamp };
+        });
       }
-      if (seen.has(key)) continue;
-      seen.add(key);
-      const details = message.details as { message?: Message; control?: MessageControl; receivedAt?: number };
-      const timestamp = details.message?.receiverReceivedAt ?? details.receivedAt ?? details.message?.timestamp ?? details.control?.timestamp ?? message.timestamp;
-      if (!isHistoricalInboundEnvelope(key)) {
-        const presented = (message.details as Record<string, unknown> | undefined)?.[PRESENTED_MARK] === true;
-        const stored = typeof message.content === "string" ? message.content
-          : message.content.map((part) => part.type === "text" ? part.text : "").join("\n");
-        // An older incoming message that still carries identities is rebuilt from its typed record,
-        // so metadata and the colleague's words are told apart by structure rather than by matching
-        // text. One with nothing to present stays exactly as stored.
-        const content = !presented && message.customType === "parley_message" && details.message
-          && references.current.present(stored, canonicalIdentities) !== stored
-          ? formatInboundEnvelope(message.details as InboundMessageEntry, details.message).content
-          : projectForModel(message.content, message.details, canonicalIdentities);
-        messages.push({ ...message, content, timestamp });
-        continue;
+      return presentOnce(message, () => ({ ...message, content: projectForModel(message.content, message.details, canonicalIdentities) }));
+    };
+    // Envelopes shown earlier go back exactly where they were, unless the host has since recorded
+    // its own copy and left it out of this context (compaction, another branch).
+    const insertAfter = (anchor: string | undefined): void => {
+      for (const [key, inserted] of insertedContext) {
+        if (inserted.after !== anchor || seen.has(key)) continue;
+        if (hostRecordedEnvelopes.has(key) && !hostKeys.has(key)) continue;
+        seen.add(key);
+        messages.push(inserted.message);
       }
-      messages.push({ ...message, content: historicalInboundEnvelope({ ...message, timestamp }), timestamp });
+    };
+    insertAfter(undefined);
+    for (const message of event.messages) {
+      const shown = present(message);
+      if (shown) messages.push(shown);
+      insertAfter(contextAnchor(message));
     }
+    // Anything shown earlier whose place has left this context, and that the host never recorded,
+    // is still the model's only copy: it stays, from here on, at the end of what's left.
+    const lastAnchor = event.messages.length ? contextAnchor(event.messages.at(-1)!) : undefined;
+    for (const [key, inserted] of insertedContext) {
+      if (seen.has(key) || hostRecordedEnvelopes.has(key)) continue;
+      inserted.after = lastAnchor;
+      // Re-queued so later contexts replay these in the order shown here.
+      insertedContext.delete(key);
+      insertedContext.set(key, inserted);
+      seen.add(key);
+      messages.push(inserted.message);
+    }
+    // New envelopes the host hasn't put in front of the model yet are shown now, after everything
+    // it has. From now on they stay there, and the host's own copy, when it arrives, is the same message.
     for (const [key, envelope] of pendingHostEnvelopes) {
-      if (!seen.has(key)) contextFallbackEnvelopes.set(key, envelope);
+      if (!seen.has(key)) {
+        const message = { role: "custom" as const, ...envelope };
+        insertedContext.set(key, { after: lastAnchor, message });
+        seen.add(key);
+        messages.push(message);
+      }
       confirmInboundEnvelope(key);
     }
-    const history: typeof messages = [];
-    for (const [key, envelope] of contextFallbackEnvelopes) {
-      if (seen.has(key)) continue;
-      if (isHistoricalInboundEnvelope(key)) {
-        history.push({ role: "custom", ...envelope, content: historicalInboundEnvelope(envelope) });
-      } else {
-        messages.push({ role: "custom", ...envelope });
-      }
-      seen.add(key);
-    }
     for (const key of seen) presentedInboundEnvelopes.add(key);
-    // Background snapshots precede host-owned context, so they don't masquerade as its latest input.
-    messages.unshift(...history);
-    if (conversationPersistenceWarning) messages.push({
-      role: "custom", customType: "parley_persistence_notice", content: conversationPersistenceWarning, display: true, timestamp: Date.now(),
-    });
+    if (conversationPersistenceWarning) {
+      // One notice per distinct problem, kept where the model first saw it.
+      const key = `notice:${conversationPersistenceWarning}`;
+      if (!insertedContext.has(key)) {
+        const message = { role: "custom" as const, customType: "parley_persistence_notice", content: conversationPersistenceWarning, display: true, details: undefined, timestamp: Date.now() };
+        insertedContext.set(key, { after: lastAnchor, message });
+        messages.push(message);
+      }
+    }
+    if (shownProjections.size > 2 * shownThisTime.size + 256) {
+      for (const fingerprint of shownProjections.keys()) if (!shownThisTime.has(fingerprint)) shownProjections.delete(fingerprint);
+    }
     replyTracker.activateContexts([...freshModelContexts.values()]);
     freshModelContexts.clear();
     return { messages };

@@ -30,7 +30,7 @@ function nodeCommand(execPath = process.execPath) {
 var bundledBuild;
 var init_bundle = __esm({
   "broker/bundle.ts"() {
-    bundledBuild = true ? JSON.parse('{"packageVersion":"1.8.0","sourceId":"b13553c7bff582441679b1d654e7149ad0c807a95dcf40f4dd4159762e5aa2e4"}') : void 0;
+    bundledBuild = true ? JSON.parse('{"packageVersion":"1.8.0","sourceId":"00e53c18c45dc418ed7997bb5cd07531f98e8403d583b046a811c1a5ca5a91e4"}') : void 0;
   }
 });
 
@@ -15614,7 +15614,7 @@ var init_project_agent = __esm({
 });
 
 // index.ts
-import { randomUUID as randomUUID6 } from "crypto";
+import { createHash as createHash3, randomUUID as randomUUID6 } from "crypto";
 import { resolve as resolvePath } from "node:path";
 import { AsyncLocalStorage } from "node:async_hooks";
 function sessionPlace(env = process.env) {
@@ -16117,7 +16117,8 @@ function formatInboundDeliveryMetadata(message, messageRef) {
   } else if (message.provenance?.type === "session_person") {
     parts.push("Written by the person at the sending session, not its agent (as reported by that session)");
   }
-  if (Date.now() - message.timestamp > 6e4) parts.push(`Originally sent: ${formatMessageTimestamp(message.timestamp)}`);
+  const arrivedAt = message.receiverReceivedAt ?? message.injectedAt;
+  if (arrivedAt !== void 0 && arrivedAt - message.timestamp > 6e4) parts.push(`Originally sent: ${formatMessageTimestamp(message.timestamp)}`);
   return parts.join("\n");
 }
 function normalizeParleyExtensionOptions(options2) {
@@ -16509,7 +16510,9 @@ The earlier message is no longer the current request; prior work is not undone.`
   const deferredInboundControls = /* @__PURE__ */ new Map();
   let inboundRetryTimer = null;
   const pendingHostEnvelopes = /* @__PURE__ */ new Map();
-  const contextFallbackEnvelopes = /* @__PURE__ */ new Map();
+  const insertedContext = /* @__PURE__ */ new Map();
+  const hostRecordedEnvelopes = /* @__PURE__ */ new Set();
+  const shownProjections = /* @__PURE__ */ new Map();
   const presentedInboundEnvelopes = /* @__PURE__ */ new Set();
   const settledInboundMessages = /* @__PURE__ */ new Set();
   const inboundMessageDispositions = /* @__PURE__ */ new Map();
@@ -16532,12 +16535,12 @@ The earlier message is no longer the current request; prior work is not undone.`
   }
   function confirmPersistedInbound() {
     const ctx = getLiveContext();
-    if (!ctx || pendingHostEnvelopes.size === 0 && contextFallbackEnvelopes.size === 0) return;
+    if (!ctx || pendingHostEnvelopes.size === 0 && insertedContext.size === 0) return;
     for (const entry of ctx.sessionManager.getEntries()) {
       if (entry.type !== "custom_message") continue;
       const key = inboundEnvelopeKey(entry);
       if (key) {
-        contextFallbackEnvelopes.delete(key);
+        hostRecordedEnvelopes.add(key);
         confirmInboundEnvelope(key);
       }
     }
@@ -16580,42 +16583,6 @@ The earlier message is no longer the current request; prior work is not undone.`
     if (!key.startsWith("message:")) return false;
     const id = key.slice("message:".length);
     return settledInboundMessages.has(id) || inboundMessageDispositions.has(id);
-  }
-  function historicalInboundEnvelope(envelope) {
-    if (envelope.customType === "parley_message_control") {
-      const details = envelope.details;
-      const disposition2 = inboundMessageDispositions.get(details.control.messageId);
-      const status2 = disposition2 ? `${disposition2.state}${disposition2.replacementId ? ` by message ${references.current.messageRef(disposition2.replacementId)}` : ""}` : details.control.action === "cancel" ? "withdrawn" : "superseded";
-      const raw = typeof envelope.content === "string" ? envelope.content : envelope.content.map((part) => part.text ?? "").join("\n");
-      const content = envelope.details?.[PRESENTED_MARK] === true ? verbatim(raw) : protectLegacyPeerText(raw, legacyPeerText(envelope.details));
-      return presentForModel(`**Parley history \u2014 withdrawal/update**
-Received: ${formatMessageTimestamp(envelope.timestamp)}
-Status: ${status2}
-Previously received context, not a new delivery.
-
-${content}`, details);
-    }
-    const entry = envelope.details;
-    const { from, message } = entry;
-    const retained = replyTracker.getMessage(message.id);
-    const disposition = inboundMessageDispositions.get(message.id);
-    const answered = settledInboundMessages.has(message.id);
-    const status = disposition ? `${disposition.state}${disposition.replacementId ? ` by message ${references.current.messageRef(disposition.replacementId)}` : ""}` : answered ? "answered" : message.expectsReply ? `unanswered request${replyTracker.replyWindowElapsed(retained ?? { from, message, receivedAt: envelope.timestamp }) ? "; reply window elapsed, not withdrawn" : ""}` : message.replyTo ? message.completesAsk === false ? "received threaded progress" : "received reply" : "received notification; no reply requested";
-    const origin = from.federation ? `
-Remote origin: ${references.current.originRef(from.federation)}; scope ${from.federation.remoteScopeAlias}` : "";
-    const compaction = message.peerCompaction ? `
-
-${describeCompaction(references.current.sessionRef(from), message.peerCompaction, from.id)}` : "";
-    const body = entry.bodyText ?? message.content.text + (message.content.attachments?.length ? formatAttachments(message.content.attachments) : "");
-    return presentForModel(`**Parley history \u2014 from ${references.current.sessionRef(from)}**${from.description ? ` \u2014 ${from.description}` : ""}
-Received: ${formatMessageTimestamp(envelope.timestamp)}
-Status: ${status}
-Shown again from earlier in this conversation, not a new delivery; the status above is current.${verbatim(entry.replyTopic ?? "")}
-
-${verbatim(body)}
-
-${formatInboundDeliveryMetadata(message, messageRef)}
-Session: ${from.cwd}${origin}${compaction}`, { from, message });
   }
   function settleOutgoingReply(from, message) {
     if (!message.replyTo || message.completesAsk === false || message.expectsReply) return;
@@ -17944,7 +17911,9 @@ Observed local session: ${target2.session ? references.current.sessionRef(target
     deferredInboundMessages.clear();
     deferredInboundControls.clear();
     pendingHostEnvelopes.clear();
-    contextFallbackEnvelopes.clear();
+    insertedContext.clear();
+    hostRecordedEnvelopes.clear();
+    shownProjections.clear();
     presentedInboundEnvelopes.clear();
     settledInboundMessages.clear();
     inboundMessageDispositions.clear();
@@ -18171,7 +18140,9 @@ Observed local session: ${target2.session ? references.current.sessionRef(target
     deferredInboundMessages.clear();
     deferredInboundControls.clear();
     pendingHostEnvelopes.clear();
-    contextFallbackEnvelopes.clear();
+    insertedContext.clear();
+    hostRecordedEnvelopes.clear();
+    shownProjections.clear();
     presentedInboundEnvelopes.clear();
     settledInboundMessages.clear();
     inboundMessageDispositions.clear();
@@ -18220,6 +18191,10 @@ Observed local session: ${target2.session ? references.current.sessionRef(target
   onSessionCompactFailed("session_compact_failed", (_event, ctx) => {
     finishCompactionStatus(ctx);
   });
+  function contextAnchor(message) {
+    const key = message.role === "custom" ? inboundEnvelopeKey(message) : void 0;
+    return [message.role, key ?? message.timestamp ?? "", message.toolCallId ?? "", message.customType ?? ""].join("\0");
+  }
   pi.on("context", (event) => {
     if (!getLiveContext()) return;
     confirmPersistedInbound();
@@ -18239,65 +18214,92 @@ Observed local session: ${target2.session ? references.current.sessionRef(target
       messages: new Set([...projectionIdentities.messages].filter(isCanonicalIdentity)),
       sessions: new Set([...projectionIdentities.sessions].filter(isCanonicalIdentity))
     };
+    const hostKeys = /* @__PURE__ */ new Set();
     for (const message of event.messages) {
+      const key = message.role === "custom" ? inboundEnvelopeKey(message) : void 0;
+      if (key) hostKeys.add(key);
+    }
+    const shownThisTime = /* @__PURE__ */ new Set();
+    const presentOnce = (source, present2) => {
+      if (source.details?.[PRESENTED_MARK] === true) return present2();
+      const fingerprint = createHash3("sha256").update(JSON.stringify(source)).digest("base64");
+      shownThisTime.add(fingerprint);
+      if (shownProjections.has(fingerprint)) return shownProjections.get(fingerprint);
+      const shown = present2();
+      shownProjections.set(fingerprint, shown);
+      return shown;
+    };
+    const present = (message) => {
       if (message.role === "assistant" && Array.isArray(message.content)) {
-        messages.push({ ...message, content: message.content.map((part) => part.type === "toolCall" && part.name === PARLEY_TOOL_NAME ? { ...part, arguments: presentToolArgumentsForModel(part.arguments, projectionIdentities) } : part) });
-        continue;
+        if (!message.content.some((part) => part.type === "toolCall" && part.name === PARLEY_TOOL_NAME)) return message;
+        return presentOnce(message, () => ({ ...message, content: message.content.map((part) => part.type === "toolCall" && part.name === PARLEY_TOOL_NAME ? { ...part, arguments: presentToolArgumentsForModel(part.arguments, projectionIdentities) } : part) }));
       }
       if (message.role === "compactionSummary" || message.role === "branchSummary") {
-        messages.push({ ...message, summary: references.current.present(message.summary, canonicalIdentities) });
-        continue;
+        return presentOnce(message, () => ({ ...message, summary: references.current.present(message.summary, canonicalIdentities) }));
       }
       if (message.role === "toolResult" && (message.toolName === PARLEY_TOOL_NAME || message.toolName === "contact_supervisor")) {
-        messages.push({ ...message, content: projectForModel(message.content, message.details, canonicalIdentities) });
-        continue;
+        return presentOnce(message, () => ({ ...message, content: projectForModel(message.content, message.details, canonicalIdentities) }));
       }
-      if (message.role !== "custom") {
-        messages.push(message);
-        continue;
-      }
-      if (message.customType === "parley_persistence_notice" && conversationPersistenceWarning) continue;
+      if (message.role !== "custom" || !message.customType?.startsWith("parley_")) return message;
       const key = inboundEnvelopeKey(message);
-      if (!key) {
-        messages.push(message.customType?.startsWith("parley_") ? { ...message, content: projectForModel(message.content, message.details, canonicalIdentities) } : message);
-        continue;
+      if (key) {
+        if (seen.has(key)) return void 0;
+        seen.add(key);
+        const details = message.details;
+        const timestamp = details.message?.receiverReceivedAt ?? details.receivedAt ?? details.message?.timestamp ?? details.control?.timestamp ?? message.timestamp;
+        return presentOnce(message, () => {
+          const presented = message.details?.[PRESENTED_MARK] === true;
+          const stored = typeof message.content === "string" ? message.content : message.content.map((part) => part.type === "text" ? part.text : "").join("\n");
+          const content = !presented && message.customType === "parley_message" && details.message && references.current.present(stored, canonicalIdentities) !== stored ? formatInboundEnvelope(message.details, details.message).content : projectForModel(message.content, message.details, canonicalIdentities);
+          return { ...message, content, timestamp };
+        });
       }
-      if (seen.has(key)) continue;
+      return presentOnce(message, () => ({ ...message, content: projectForModel(message.content, message.details, canonicalIdentities) }));
+    };
+    const insertAfter = (anchor) => {
+      for (const [key, inserted] of insertedContext) {
+        if (inserted.after !== anchor || seen.has(key)) continue;
+        if (hostRecordedEnvelopes.has(key) && !hostKeys.has(key)) continue;
+        seen.add(key);
+        messages.push(inserted.message);
+      }
+    };
+    insertAfter(void 0);
+    for (const message of event.messages) {
+      const shown = present(message);
+      if (shown) messages.push(shown);
+      insertAfter(contextAnchor(message));
+    }
+    const lastAnchor = event.messages.length ? contextAnchor(event.messages.at(-1)) : void 0;
+    for (const [key, inserted] of insertedContext) {
+      if (seen.has(key) || hostRecordedEnvelopes.has(key)) continue;
+      inserted.after = lastAnchor;
+      insertedContext.delete(key);
+      insertedContext.set(key, inserted);
       seen.add(key);
-      const details = message.details;
-      const timestamp = details.message?.receiverReceivedAt ?? details.receivedAt ?? details.message?.timestamp ?? details.control?.timestamp ?? message.timestamp;
-      if (!isHistoricalInboundEnvelope(key)) {
-        const presented = message.details?.[PRESENTED_MARK] === true;
-        const stored = typeof message.content === "string" ? message.content : message.content.map((part) => part.type === "text" ? part.text : "").join("\n");
-        const content = !presented && message.customType === "parley_message" && details.message && references.current.present(stored, canonicalIdentities) !== stored ? formatInboundEnvelope(message.details, details.message).content : projectForModel(message.content, message.details, canonicalIdentities);
-        messages.push({ ...message, content, timestamp });
-        continue;
-      }
-      messages.push({ ...message, content: historicalInboundEnvelope({ ...message, timestamp }), timestamp });
+      messages.push(inserted.message);
     }
     for (const [key, envelope] of pendingHostEnvelopes) {
-      if (!seen.has(key)) contextFallbackEnvelopes.set(key, envelope);
+      if (!seen.has(key)) {
+        const message = { role: "custom", ...envelope };
+        insertedContext.set(key, { after: lastAnchor, message });
+        seen.add(key);
+        messages.push(message);
+      }
       confirmInboundEnvelope(key);
     }
-    const history = [];
-    for (const [key, envelope] of contextFallbackEnvelopes) {
-      if (seen.has(key)) continue;
-      if (isHistoricalInboundEnvelope(key)) {
-        history.push({ role: "custom", ...envelope, content: historicalInboundEnvelope(envelope) });
-      } else {
-        messages.push({ role: "custom", ...envelope });
-      }
-      seen.add(key);
-    }
     for (const key of seen) presentedInboundEnvelopes.add(key);
-    messages.unshift(...history);
-    if (conversationPersistenceWarning) messages.push({
-      role: "custom",
-      customType: "parley_persistence_notice",
-      content: conversationPersistenceWarning,
-      display: true,
-      timestamp: Date.now()
-    });
+    if (conversationPersistenceWarning) {
+      const key = `notice:${conversationPersistenceWarning}`;
+      if (!insertedContext.has(key)) {
+        const message = { role: "custom", customType: "parley_persistence_notice", content: conversationPersistenceWarning, display: true, details: void 0, timestamp: Date.now() };
+        insertedContext.set(key, { after: lastAnchor, message });
+        messages.push(message);
+      }
+    }
+    if (shownProjections.size > 2 * shownThisTime.size + 256) {
+      for (const fingerprint of shownProjections.keys()) if (!shownThisTime.has(fingerprint)) shownProjections.delete(fingerprint);
+    }
     replyTracker.activateContexts([...freshModelContexts.values()]);
     freshModelContexts.clear();
     return { messages };

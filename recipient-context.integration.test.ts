@@ -60,7 +60,7 @@ async function modelContext(harness: ReturnType<typeof createExtensionHarness>, 
   return (result.find(Boolean) as { messages: Array<{ role: string; customType?: string; content: string; details?: unknown; timestamp: number }> }).messages;
 }
 
-test("host-owned first delivery and historical replay retain arrival timing despite SDK timestamps", async () => {
+test("a delivered message reaches the model identically on every later request, timed by its arrival despite SDK timestamps", async () => {
   const peer = await colleague("timing-planner");
   const harness = createExtensionHarness("timing-worker", { sessionId: "timing-worker-id", isIdle: () => false });
   try {
@@ -79,10 +79,65 @@ test("host-owned first delivery and historical replay retain arrival timing desp
     assert.match(first.content, /^\*\*From timing-planner/);
     assert.equal(first.timestamp, arrival);
     const replay = (await modelContext(harness, hostHistory)).find((entry) => entry.customType === "parley_message")!;
-    assert.match(replay.content, /Parley history/);
-    assert.equal(replay.timestamp, first.timestamp);
+    assert.deepEqual(replay, first, "what the model was shown is never rewritten");
     assert.deepEqual(hostHistory, original, "projection never mutates host-owned history");
   } finally {
+    await harness.emitLifecycle("session_shutdown");
+    await peer.disconnect();
+  }
+});
+
+test("every request starts with exactly what the model was shown before, so prompt caches keep their prefix", async () => {
+  // A busy Pi session over several turns. Pi takes one steered message per turn into its history
+  // and records it then; a prefix-cached provider re-sends everything after the first earlier
+  // message that reads differently, or moves.
+  const peer = await colleague("prefix-planner");
+  const harness = createExtensionHarness("prefix-worker", { sessionId: "prefix-worker-id", isIdle: () => false, persistMessages: false });
+  const realNow = Date.now;
+  try {
+    const target = await start(harness, peer, "prefix-worker");
+    const history: unknown[] = [{ role: "user", content: "Run the migration review", timestamp: realNow() }];
+    const takeIntoHistory = (index: number) => {
+      const message = harness.sentMessages[index]!.message;
+      harness.persistedMessages.push(message);
+      // The SDK stamps its own time on what it records.
+      history.push({ role: "custom", ...structuredClone(message), display: true, timestamp: Date.now() });
+    };
+    const assistant = (words: string) => history.push({ role: "assistant", content: [{ type: "text", text: words }], timestamp: Date.now() });
+    const views: unknown[][] = [];
+    const request = async () => {
+      const view = structuredClone(await modelContext(harness, structuredClone(history)));
+      const previous = views.at(-1);
+      if (previous) assert.deepEqual(view.slice(0, previous.length), previous, `request ${views.length + 1} rewrote or moved what the model saw before`);
+      views.push(view);
+      return view;
+    };
+
+    const question = await peer.send(target.id, { text: "Can the index be built online?", expectsReply: true });
+    await peer.send(target.id, { text: "Also, the schema notes are attached." });
+    await until(() => harness.sentMessages.length === 2, "two steered messages");
+    takeIntoHistory(0);
+    // The second is still in Pi's steering queue: the model sees it now, after everything else.
+    assert.match(JSON.stringify(await request()), /schema notes are attached/);
+    assistant("Looking at both.");
+    takeIntoHistory(1);
+    await request();
+
+    // Time passes, the model answers, and the colleague withdraws the question.
+    Date.now = () => realNow() + 5 * 60_000;
+    await call(harness, { action: "reply", replyTo: question.id, message: "Yes, concurrently" });
+    assistant("Answered.");
+    await request();
+    await peer.cancelMessage(question.id);
+    await until(() => harness.sentMessages.some((item) => item.message.customType === "parley_message_control"), "withdrawal steered");
+    const withNotice = await request();
+    assert.match(String(withNotice.at(-1) && (withNotice.at(-1) as { content: string }).content), /withdrawn by its sender/, "news arrives as a new message at the end");
+    assistant("Noted the withdrawal.");
+    takeIntoHistory(harness.sentMessages.length - 1);
+    await request();
+    assert.equal(views.at(-1)!.filter((item) => (item as { customType?: string }).customType === "parley_message_control").length, 1, "the recorded copy is the same message, not a second one");
+  } finally {
+    Date.now = realNow;
     await harness.emitLifecycle("session_shutdown");
     await peer.disconnect();
   }
@@ -133,10 +188,7 @@ test("busy headless answers retain correlation and survive fire-and-forget host 
     const later = await modelContext(harness, hostHistory);
     const retainedAnswer = later.find((item) => item.content.includes("Yes, with"))!;
     assert.equal(later.filter((item) => item.content.includes("Yes, with")).length, 1, "fallback remains context when the failed host never persisted it");
-    assert.match(retainedAnswer.content, /Parley history.*\nReceived: .*\nStatus: received reply/);
-    assert.match(retainedAnswer.content, /Can the index be built online/);
-    assert.match(retainedAnswer.content, /CREATE INDEX CONCURRENTLY example ON records \(id\);/);
-    assert.equal(retainedAnswer.timestamp, firstAnswer.timestamp, "history keeps the original arrival timestamp");
+    assert.deepEqual(retainedAnswer, firstAnswer, "the unrecorded answer stays exactly as the model first saw it");
     assert.deepEqual(later.at(-1), hostHistory[0], "retained snapshots are background, not the latest host input");
     assert.deepEqual(hostHistory, originalHostHistory, "context transforms never mutate host history");
     await peer.send(target.id, { text: "Rollback is still under review", replyTo: second!.id, completesAsk: false });
@@ -166,18 +218,15 @@ test("a busy headless recipient learns a withdrawal even when its host drops the
     assert.doesNotMatch(text(await call(harness, { action: "pending" })), /awaiting your reply/);
     assert.ok(harness.sentMessages.every((entry) => entry.options?.deliverAs === "steer"));
     const laterContext = await modelContext(harness);
-    assert.ok(laterContext.every((item) => !item.content.includes("Reply requested")), "withdrawn fallback must not reappear as a fresh request");
-    const retainedRequest = laterContext.find((item) => item.customType === "parley_message")!;
-    assert.match(retainedRequest.content, /Parley history/);
-    assert.match(retainedRequest.content, /Status: withdrawn/);
-    assert.match(retainedRequest.content, /Start the migration after review/);
-    const retainedControl = laterContext.find((item) => item.customType === "parley_message_control")!;
-    assert.match(retainedControl.content, /Parley history/);
-    assert.match(retainedControl.content, /Status: withdrawn/);
+    const retainedRequest = laterContext.findIndex((item) => item.customType === "parley_message");
+    const retainedControl = laterContext.findIndex((item) => item.customType === "parley_message_control");
+    assert.equal(laterContext[retainedRequest]!.content, request, "the request still reads as it did; nothing rewrites it");
+    assert.equal(laterContext[retainedControl]!.content, withdrawal);
+    assert.ok(retainedRequest < retainedControl, "the withdrawal follows the request it withdraws");
   } finally { await harness.emitLifecycle("session_shutdown"); await peer.disconnect(); }
 });
 
-test("retained requests track answers and replacements without renewing delivery or implicit conversation", async () => {
+test("answers and replacements reach the model as new messages and current status, never by rewriting the request", async () => {
   const peer = await colleague("historical-planner");
   const harness = createExtensionHarness("historical-worker", { sessionId: "historical-worker-id", isIdle: () => false, persistMessages: false });
   const hostHistory = [{ role: "user", content: "Work on the current deployment", timestamp: Date.now() }];
@@ -190,28 +239,25 @@ test("retained requests track answers and replacements without renewing delivery
     await until(() => harness.sentMessages.length === 1, "request offered to host");
     const first = (await modelContext(harness, hostHistory)).find((item) => item.customType === "parley_message")!;
     assert.match(first.content, /Reply requested · async ask/);
-    assert.doesNotMatch(first.content, /Parley history/);
-    const unanswered = (await modelContext(harness, hostHistory)).find((item) => item.customType === "parley_message")!;
-    assert.match(unanswered.content, /Status: unanswered request/);
-    assert.doesNotMatch(unanswered.content, /Reply requested/);
-    assert.equal(unanswered.timestamp, first.timestamp);
+    assert.match(first.content, /rollback protocol and all validation checkpoints/);
+    assert.deepEqual((await modelContext(harness, hostHistory)).find((item) => item.customType === "parley_message"), first);
+    assert.ok(mentions(text(await call(harness, { action: "pending" })), harness.referenceFor(request.id)), "pending is where an unanswered request shows as unanswered");
     await call(harness, { action: "reply", replyTo: request.id, message: "Reviewed the complete plan" });
     const answered = (await modelContext(harness, hostHistory)).find((item) => item.customType === "parley_message")!;
-    assert.match(answered.content, /Status: answered/);
-    assert.match(answered.content, /rollback protocol and all validation checkpoints/);
-    assert.equal(answered.timestamp, first.timestamp);
+    assert.deepEqual(answered, first, "answering the request doesn't rewrite what the model was shown");
+    assert.ok(!mentions(text(await call(harness, { action: "pending" })), harness.referenceFor(request.id)));
 
     const old = await peer.send(target.id, { text: "Use the initial deployment plan", expectsReply: true });
     await until(() => harness.sentMessages.length === 2, "initial deployment request");
-    await modelContext(harness, hostHistory);
+    const before = await modelContext(harness, hostHistory);
     const replacement = await peer.send(target.id, { text: "The replacement plan is now available", supersedes: old.id });
     await until(() => harness.sentMessages.length === 4, "replacement plus supersession control");
     const updated = await modelContext(harness, hostHistory);
-    const oldHistory = updated.find((item) => item.customType === "parley_message" && mentions(item.content, harness.referenceFor(old.id)))!;
-    assert.match(oldHistory.content, /Status: superseded by message/);
-    assert.ok(mentions(oldHistory.content, harness.referenceFor(replacement.id)));
-    assert.match(oldHistory.content, /Use the initial deployment plan/);
-    assert.doesNotMatch(oldHistory.content, /Reply requested/);
+    assert.deepEqual(updated.slice(0, before.length), before, "the replacement is added after everything the model already saw");
+    const added = updated.slice(before.length).map((item) => item.content).join("\n");
+    assert.match(added, /The replacement plan is now available/);
+    assert.match(added, /superseded/);
+    assert.match(text(await call(harness, { action: "read", messageId: old.id })), new RegExp(`Status: superseded by message ${harness.referenceFor(replacement.id)}`));
     await harness.emitLifecycle("agent_end");
     await harness.emitLifecycle("agent_start");
     await modelContext(harness, hostHistory);
@@ -242,9 +288,7 @@ test("every context boundary reconciles late host persistence after fallback con
     const owned = [{ role: "custom", ...original, display: true, timestamp: Date.now() }, ...hostHistory];
     const historical = await modelContext(harness, owned);
     assert.equal(historical.filter((item) => item.customType === "parley_message").length, 1);
-    assert.match(historical[0]!.content, /Parley history/);
-    assert.match(historical[0]!.content, /Status: withdrawn/);
-    assert.match(original.content!, /Reply requested/, "the host-owned original remains unchanged");
+    assert.equal(historical[0]!.content, original.content, "the host's record reaches the model as recorded");
     await harness.emitLifecycle("agent_end");
     await harness.emitLifecycle("agent_start");
     await modelContext(harness, owned);
@@ -268,11 +312,7 @@ test("replying to a persisted request before its first model boundary does not r
     const hostHistory = harness.persistedMessages.map((message) => ({ role: "custom", ...message, display: true, timestamp: Date.now() }));
     const messages = await modelContext(harness, hostHistory);
     const original = messages.find((item) => item.customType === "parley_message")!;
-    assert.match(original.content, /Parley history/);
-    assert.match(original.content, /Status: answered/);
-    assert.match(original.content, /not a new delivery/);
-    assert.match(original.content, /Review the rollout before launch/);
-    assert.doesNotMatch(original.content, /Reply requested/);
+    assert.equal(original.content, hostHistory[0]!.content, "the request reads as recorded; the model's own reply is what answers it");
     assert.match(text(await call(harness, { action: "pending" })), /No unresolved inbound asks/);
     const implicitReply = await call(harness, { action: "reply", message: "An unrelated acknowledgment" });
     assert.equal(implicitReply.details?.error, true);
@@ -281,7 +321,7 @@ test("replying to a persisted request before its first model boundary does not r
   } finally { await harness.emitLifecycle("session_shutdown"); await peer.disconnect(); }
 });
 
-test("a withdrawal before the first model boundary gives persisted original text its current disposition", async () => {
+test("a withdrawal before the first model boundary follows the original, which reads as recorded", async () => {
   const peer = await colleague("early-withdrawal-planner");
   const harness = createExtensionHarness("early-withdrawal-worker", { sessionId: "early-withdrawal-worker-id", isIdle: () => false });
   try {
@@ -292,13 +332,12 @@ test("a withdrawal before the first model boundary gives persisted original text
     await until(() => harness.persistedMessages.length === 2, "withdrawal before first model call");
     const hostHistory = harness.persistedMessages.map((message) => ({ role: "custom", ...message, display: true, timestamp: Date.now() }));
     const messages = await modelContext(harness, hostHistory);
-    const original = messages.find((item) => item.customType === "parley_message")!;
-    assert.match(original.content, /Parley history/);
-    assert.match(original.content, /Status: withdrawn/);
-    assert.match(original.content, /not a new delivery/);
-    assert.doesNotMatch(original.content, /Previously delivered/);
-    assert.match(original.content, /Start the superseded rollout/);
-    assert.doesNotMatch(original.content, /Reply requested/);
+    const original = messages.findIndex((item) => item.customType === "parley_message");
+    const withdrawal = messages.findIndex((item) => item.customType === "parley_message_control");
+    assert.equal(messages[original]!.content, hostHistory[0]!.content);
+    assert.ok(original < withdrawal, "the withdrawal follows the original it withdraws");
+    assert.match(messages[withdrawal]!.content, /withdrawn by its sender/);
+    assert.match(text(await call(harness, { action: "read", messageId: request.id })), /Status: withdrawn/);
     assert.match(text(await call(harness, { action: "reply", message: "No live request" })), /No active parley context/);
   } finally { await harness.emitLifecycle("session_shutdown"); await peer.disconnect(); }
 });
