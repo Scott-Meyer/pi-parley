@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.9.0 - 2026-11-18
 
 - `broadcast` can name its group: `to` is a pattern over references (`flightdeck:*`, `build-vm:*`, `*`), `cwd` a directory, `app` a pattern over where sessions live (`Pi*`). A group reaches the sessions it names on any computer; without one, a broadcast stays on this computer as before.
 - A broadcast's recipients read that it went to a group, and which one as the sender named it (`Broadcast to "box:*", not to you alone`), so they don't take it as addressed to them alone. A linked computer that predates this still gets the message, just without that line.

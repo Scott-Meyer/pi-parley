@@ -27,6 +27,8 @@ export const FEDERATION_APP_FEATURE = "peer-roster-app-v1";
  * Between two such brokers each session travels once, under its own scope's
  * binding, so its identity doesn't depend on which bindings the link has. */
 export const FEDERATION_MERGED_ROSTER_FEATURE = "peer-roster-merged-v1";
+/** Optional: a routed send may say it was a broadcast to a group (message.audience). */
+export const FEDERATION_AUDIENCE_FEATURE = "peer-send-audience-v1";
 export const FEDERATION_CAPABILITY_MIN_LENGTH = 32;
 export const FEDERATION_CAPABILITY_MAX_LENGTH = 128;
 export const FEDERATION_CORRELATION_ID_MAX_LENGTH = 128;
@@ -50,4 +52,5 @@ export const FEDERATION_SUPPORTED_FEATURES = [
     FEDERATION_SCOPED_LINKS_FEATURE,
     FEDERATION_PING_FEATURE,
     FEDERATION_APP_FEATURE,
+    FEDERATION_AUDIENCE_FEATURE,
 ];

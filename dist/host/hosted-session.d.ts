@@ -73,10 +73,10 @@ export interface HostedSession {
     /** How the tool is meant to be used, for hosts that take server instructions. */
     readonly instructions: string;
     call(args: Record<string, unknown>, signal?: AbortSignal): Promise<ToolOutcome>;
-    /** The messages about to go to the model, in Pi's shape; returns what to send instead.
-     * Makes references readable, drops duplicate copies of a message, adds any delivery the
-     * host hasn't accepted yet, and marks which messages are being answered. Accepted
-     * deliveries kept as custom messages (customType, details) get all of that. */
+    /** The messages about to go to the model, in Pi's shape, returned unchanged. Parley notes which
+     * of its accepted deliveries (kept as custom messages with customType and details) the model is
+     * being sent, so a bare reply answers what the model has seen. A refused delivery isn't shown
+     * here; Parley offers it again until the host accepts it. */
     context(messages: readonly HostedContextMessage[]): Promise<HostedContextMessage[]>;
     /** The host's agent started or finished a turn. */
     setBusy(busy: boolean): void;
