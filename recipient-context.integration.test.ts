@@ -55,8 +55,17 @@ function call(harness: ReturnType<typeof createExtensionHarness>, params: Record
   return harness.tools.find((tool) => tool.name === "parley")!.execute("scenario", params, AbortSignal.timeout(8_000), undefined, harness.ctx);
 }
 function text(result: { content: { text: string }[] }) { return result.content.map((item) => item.text).join("\n"); }
+// Like Pi: what Parley queued with sendMessage is in the host's history by the next model call,
+// recorded and after what came before. Parley adds nothing of its own.
+const takenByHost = new WeakMap<object, unknown[]>();
 async function modelContext(harness: ReturnType<typeof createExtensionHarness>, messages: unknown[] = []) {
-  const result = await harness.emitLifecycleResults("context", { messages });
+  const taken = takenByHost.get(harness) ?? [];
+  takenByHost.set(harness, taken);
+  for (const { message } of harness.sentMessages.slice(taken.length)) {
+    if (!harness.persistedMessages.includes(message)) harness.persistedMessages.push(message);
+    taken.push({ role: "custom", ...structuredClone(message), display: true, timestamp: Date.now() });
+  }
+  const result = await harness.emitLifecycleResults("context", { messages: [...messages, ...structuredClone(taken)] });
   return (result.find(Boolean) as { messages: Array<{ role: string; customType?: string; content: string; details?: unknown; timestamp: number }> }).messages;
 }
 
@@ -107,7 +116,8 @@ test("every request starts with exactly what the model was shown before, so prom
     const assistant = (words: string) => history.push({ role: "assistant", content: [{ type: "text", text: words }], timestamp: Date.now() });
     const views: unknown[][] = [];
     const request = async () => {
-      const view = structuredClone(await modelContext(harness, structuredClone(history)));
+      const result = await harness.emitLifecycleResults("context", { messages: structuredClone(history) });
+      const view = structuredClone((result.find(Boolean) as { messages: unknown[] }).messages);
       const previous = views.at(-1);
       if (previous) assert.deepEqual(view.slice(0, previous.length), previous, `request ${views.length + 1} rewrote or moved what the model saw before`);
       views.push(view);
@@ -118,8 +128,8 @@ test("every request starts with exactly what the model was shown before, so prom
     await peer.send(target.id, { text: "Also, the schema notes are attached." });
     await until(() => harness.sentMessages.length === 2, "two steered messages");
     takeIntoHistory(0);
-    // The second is still in Pi's steering queue: the model sees it now, after everything else.
-    assert.match(JSON.stringify(await request()), /schema notes are attached/);
+    // The second is still in Pi's steering queue: the model sees it when Pi takes it, not before.
+    assert.doesNotMatch(JSON.stringify(await request()), /schema notes are attached/);
     assistant("Looking at both.");
     takeIntoHistory(1);
     await request();
@@ -131,10 +141,11 @@ test("every request starts with exactly what the model was shown before, so prom
     await request();
     await peer.cancelMessage(question.id);
     await until(() => harness.sentMessages.some((item) => item.message.customType === "parley_message_control"), "withdrawal steered");
-    const withNotice = await request();
-    assert.match(String(withNotice.at(-1) && (withNotice.at(-1) as { content: string }).content), /withdrawn by its sender/, "news arrives as a new message at the end");
-    assistant("Noted the withdrawal.");
+    assistant("Still answered.");
     takeIntoHistory(harness.sentMessages.length - 1);
+    const withNotice = await request();
+    assert.match(String((withNotice.at(-1) as { content: string }).content), /withdrawn by its sender/, "news arrives as a new message at the end");
+    assistant("Noted the withdrawal.");
     await request();
     assert.equal(views.at(-1)!.filter((item) => (item as { customType?: string }).customType === "parley_message_control").length, 1, "the recorded copy is the same message, not a second one");
 
@@ -144,7 +155,7 @@ test("every request starts with exactly what the model was shown before, so prom
     await harness.emitLifecycle("session_shutdown");
     extension(restored.pi as never);
     await restored.emitLifecycle("session_start");
-    const resumed = structuredClone(await modelContext(restored, structuredClone(history)));
+    const resumed = structuredClone(((await restored.emitLifecycleResults("context", { messages: structuredClone(history) })).find(Boolean) as { messages: unknown[] }).messages);
     assert.deepEqual(resumed, views.at(-1), "a reload neither moves nor rewrites what the model saw");
   } finally {
     Date.now = realNow;
@@ -154,7 +165,7 @@ test("every request starts with exactly what the model was shown before, so prom
   }
 });
 
-test("busy headless answers retain correlation and survive fire-and-forget host rejection without treating progress as an answer", async () => {
+test("a busy headless answer settles when its host takes it, not when sendMessage returns, and progress is not an answer", async () => {
   const peer = await colleague("context-planner");
   const harness = createExtensionHarness("context-worker", { sessionId: "context-worker-id", isIdle: () => false, hasUI: false, persistMessages: false });
   const asked: Message[] = [];
@@ -198,9 +209,8 @@ test("busy headless answers retain correlation and survive fire-and-forget host 
     const originalHostHistory = structuredClone(hostHistory);
     const later = await modelContext(harness, hostHistory);
     const retainedAnswer = later.find((item) => item.content.includes("Yes, with"))!;
-    assert.equal(later.filter((item) => item.content.includes("Yes, with")).length, 1, "fallback remains context when the failed host never persisted it");
+    assert.equal(later.filter((item) => item.content.includes("Yes, with")).length, 1, "the host's copy appears once");
     assert.deepEqual(retainedAnswer, firstAnswer, "the unrecorded answer stays exactly as the model first saw it");
-    assert.deepEqual(later.at(-1), hostHistory[0], "retained snapshots are background, not the latest host input");
     assert.deepEqual(hostHistory, originalHostHistory, "context transforms never mutate host history");
     await peer.send(target.id, { text: "Rollback is still under review", replyTo: second!.id, completesAsk: false });
     await until(() => asynchronousFailures === 3, "progress delivered");
@@ -209,7 +219,7 @@ test("busy headless answers retain correlation and survive fire-and-forget host 
   } finally { await harness.emitLifecycle("session_shutdown"); await peer.disconnect(); }
 });
 
-test("a busy headless recipient learns a withdrawal even when its host drops the cancellation injection", async () => {
+test("a busy headless recipient learns a withdrawal when its host takes it", async () => {
   const peer = await colleague("withdrawal-planner");
   const harness = createExtensionHarness("withdrawal-worker", { sessionId: "withdrawal-worker-id", isIdle: () => false, persistMessages: false });
   try {
@@ -273,37 +283,6 @@ test("answers and replacements reach the model as new messages and current statu
     await harness.emitLifecycle("agent_start");
     await modelContext(harness, hostHistory);
     assert.match(text(await call(harness, { action: "reply", message: "An unrelated acknowledgment" })), /No active parley context/);
-    assert.deepEqual(harness.persistedMessages, [], "the host never persisted any fallback projection");
-  } finally { await harness.emitLifecycle("session_shutdown"); await peer.disconnect(); }
-});
-
-test("every context boundary reconciles late host persistence after fallback confirmation drains retries", async () => {
-  const peer = await colleague("late-persistence-planner");
-  const harness = createExtensionHarness("late-persistence-worker", { sessionId: "late-persistence-worker-id", isIdle: () => false, persistMessages: false });
-  const hostHistory = [{ role: "user", content: "A later host-owned discussion", timestamp: Date.now() }];
-  try {
-    const target = await start(harness, peer, "late-persistence-worker");
-    const request = await peer.send(target.id, { text: "Prepare the full release checklist", expectsReply: true });
-    await until(() => harness.sentMessages.length === 1, "request queued without persistence");
-    await modelContext(harness, hostHistory);
-    await peer.cancelMessage(request.id);
-    await until(() => harness.sentMessages.length === 2, "withdrawal queued without persistence");
-    const visible = await modelContext(harness, hostHistory);
-    assert.equal(visible.filter((item) => item.customType?.startsWith("parley_message")).length, 2);
-    // Host persistence arrives later, after both fallback confirmations emptied the retry queue.
-    // These journal entries need not be in the model input (e.g. after compaction or branch navigation).
-    harness.persistedMessages.push(...structuredClone(harness.sentMessages.map((item) => item.message)));
-    const reconciled = await modelContext(harness, hostHistory);
-    assert.deepEqual(reconciled, hostHistory, "persisted snapshots no longer leak into an unrelated model context");
-    const original = harness.sentMessages[0]!.message;
-    const owned = [{ role: "custom", ...original, display: true, timestamp: Date.now() }, ...hostHistory];
-    const historical = await modelContext(harness, owned);
-    assert.equal(historical.filter((item) => item.customType === "parley_message").length, 1);
-    assert.equal(historical[0]!.content, original.content, "the host's record reaches the model as recorded");
-    await harness.emitLifecycle("agent_end");
-    await harness.emitLifecycle("agent_start");
-    await modelContext(harness, owned);
-    assert.match(text(await call(harness, { action: "reply", message: "No renewed reply target" })), /No active parley context/);
   } finally { await harness.emitLifecycle("session_shutdown"); await peer.disconnect(); }
 });
 
@@ -501,7 +480,7 @@ test("history write failures preserve live messages, withdrawals, answer settlem
     const outgoingQuestion = received[0]!;
     historyBroken = true;
     const request = await peer.send(target.id, { text: "Review the migration before release", expectsReply: true });
-    await until(() => harness.sentMessages.length === 1, "live request despite history failure");
+    await until(() => harness.sentMessages.some((item) => item.message.content?.includes("Review the migration before release")), "live request despite history failure");
     assert.match(text(await call(harness, { action: "read", messageId: request.id })), /Review the migration before release/);
     const context = await modelContext(harness);
     assert.match(context.map((item) => item.content).join("\n"), /Review the migration before release/);

@@ -88,7 +88,7 @@ export interface HostedSession {
   call(args: Record<string, unknown>, signal?: AbortSignal): Promise<ToolOutcome>;
   /** The messages about to go to the model, in Pi's shape; returns what to send instead.
    * Makes references readable, drops duplicate copies of a message, adds any delivery the
-   * host hasn't accepted yet, and marks which messages are being answered. Accepted
+   * host refused (which counts as taking it), and marks which messages are being answered. Accepted
    * deliveries kept as custom messages (customType, details) get all of that. */
   context(messages: readonly HostedContextMessage[]): Promise<HostedContextMessage[]>;
   /** The host's agent started or finished a turn. */
@@ -156,7 +156,7 @@ export async function createHostedSession(options: HostedSessionOptions): Promis
   const tools: ToolDefinition[] = [];
   // Deliveries the host is still deciding on, and ones it refused, by incoming message.
   const deciding = new Set<string>();
-  const refused = new Map<string, { retryAt: number; waitMs: number }>();
+  const refused = new Map<string, { retryAt: number; waitMs: number; message: SentMessage }>();
 
   const renamed = (name: string) => {
     sessionName = name;
@@ -178,7 +178,7 @@ export async function createHostedSession(options: HostedSessionOptions): Promis
     const refuse = (reason: string) => {
       if (!key) return;
       const waitMs = Math.min(RETRY_MAX_MS, backoff ? backoff.waitMs * 2 : RETRY_FIRST_MS);
-      refused.set(key, { retryAt: Date.now() + waitMs, waitMs });
+      refused.set(key, { retryAt: Date.now() + waitMs, waitMs, message });
       return reason;
     };
     if (!text.trim()) { accept(); return; }
@@ -308,7 +308,15 @@ export async function createHostedSession(options: HostedSessionOptions): Promis
       return { text, isError: failed, ...(result.details !== undefined ? { details: result.details } : {}) };
     },
     async context(messages) {
+      // A delivery the host refused still reaches its model's next call, after what the host
+      // has. Being shown is being taken: it's recorded, and not offered again.
+      const carried = new Set(messages.map((message) => message.role === "custom" ? deliveryKey(message as SentMessage) : undefined));
       let current = [...messages];
+      for (const [key, held] of refused) {
+        refused.delete(key);
+        record({ kind: "message", message: held.message, at: new Date().toISOString() });
+        if (!carried.has(key)) current.push({ role: "custom", display: true, timestamp: Date.now(), ...held.message } as HostedContextMessage);
+      }
       for (const result of await emit("context", { type: "context", messages: current })) {
         const next = (result as { messages?: HostedContextMessage[] } | undefined)?.messages;
         if (Array.isArray(next)) current = next;

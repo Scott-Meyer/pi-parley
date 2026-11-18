@@ -30,7 +30,7 @@ function nodeCommand(execPath = process.execPath) {
 var bundledBuild;
 var init_bundle = __esm({
   "broker/bundle.ts"() {
-    bundledBuild = true ? JSON.parse('{"packageVersion":"1.8.0","sourceId":"d69242ae958b7cb48af95e0d63b2fb316781851d323be99036e3671155136e50"}') : void 0;
+    bundledBuild = true ? JSON.parse('{"packageVersion":"1.8.0","sourceId":"63322cfbf4c1b2882d46968376444408e0dbc7d52495195219843ed6061c768e"}') : void 0;
   }
 });
 
@@ -16411,7 +16411,18 @@ function installParleyExtension(pi, configuration, releaseRuntimeClaim, retainRe
     try {
       pi.appendEntry(type, data);
     } catch (error) {
+      const first = conversationPersistenceWarning === void 0;
       conversationPersistenceWarning = `Parley history was not fully persisted (${type}: ${previewText(failureText(error), 160) ?? "history write failed"}). Messages and conversation updates remain available in this running session, but recovery after restart may be incomplete.`;
+      const ctx = first ? getLiveContext() : void 0;
+      if (ctx) {
+        try {
+          pi.sendMessage(
+            { customType: "parley_persistence_notice", content: conversationPersistenceWarning, display: true, details: { [PRESENTED_MARK]: true } },
+            ctx.isIdle() ? { triggerTurn: false } : { deliverAs: "steer" }
+          );
+        } catch {
+        }
+      }
     }
   }
   const seenInboundMessages = /* @__PURE__ */ new Map();
@@ -16510,9 +16521,6 @@ The earlier message is no longer the current request; prior work is not undone.`
   const deferredInboundControls = /* @__PURE__ */ new Map();
   let inboundRetryTimer = null;
   const pendingHostEnvelopes = /* @__PURE__ */ new Map();
-  const insertedContext = /* @__PURE__ */ new Map();
-  const hostRecordedEnvelopes = /* @__PURE__ */ new Set();
-  const restoredPlacements = /* @__PURE__ */ new Map();
   const shownProjections = /* @__PURE__ */ new Map();
   const presentedInboundEnvelopes = /* @__PURE__ */ new Set();
   const settledInboundMessages = /* @__PURE__ */ new Set();
@@ -16536,14 +16544,11 @@ The earlier message is no longer the current request; prior work is not undone.`
   }
   function confirmPersistedInbound() {
     const ctx = getLiveContext();
-    if (!ctx || pendingHostEnvelopes.size === 0 && insertedContext.size === 0) return;
+    if (!ctx || pendingHostEnvelopes.size === 0) return;
     for (const entry of ctx.sessionManager.getEntries()) {
       if (entry.type !== "custom_message") continue;
       const key = inboundEnvelopeKey(entry);
-      if (key) {
-        hostRecordedEnvelopes.add(key);
-        confirmInboundEnvelope(key);
-      }
+      if (key) confirmInboundEnvelope(key);
     }
     if (configuration.answerOnDelivery && freshModelContexts.size > 0) {
       replyTracker.includeContexts([...freshModelContexts.values()]);
@@ -17912,9 +17917,6 @@ Observed local session: ${target2.session ? references.current.sessionRef(target
     deferredInboundMessages.clear();
     deferredInboundControls.clear();
     pendingHostEnvelopes.clear();
-    insertedContext.clear();
-    hostRecordedEnvelopes.clear();
-    restoredPlacements.clear();
     shownProjections.clear();
     presentedInboundEnvelopes.clear();
     settledInboundMessages.clear();
@@ -17930,11 +17932,6 @@ Observed local session: ${target2.session ? references.current.sessionRef(target
       const custom = entry;
       return custom.type === "custom" && custom.customType === REFERENCE_ENTRY_TYPE ? [custom.data] : [];
     }));
-    for (const entry of restoredEntries) {
-      const custom = entry;
-      if (custom.type !== "custom" || custom.customType !== CONTEXT_PLACEMENT_ENTRY_TYPE || typeof custom.data?.key !== "string") continue;
-      if (!restoredPlacements.has(custom.data.key)) restoredPlacements.set(custom.data.key, typeof custom.data.after === "string" ? custom.data.after : void 0);
-    }
     const history = restoreConversationHistory(restoredEntries);
     for (const id of history.persistedIncoming) presentedInboundEnvelopes.add(`message:${id}`);
     for (const key of history.persistedControls) presentedInboundEnvelopes.add(`control:${key}`);
@@ -18147,9 +18144,6 @@ Observed local session: ${target2.session ? references.current.sessionRef(target
     deferredInboundMessages.clear();
     deferredInboundControls.clear();
     pendingHostEnvelopes.clear();
-    insertedContext.clear();
-    hostRecordedEnvelopes.clear();
-    restoredPlacements.clear();
     shownProjections.clear();
     presentedInboundEnvelopes.clear();
     settledInboundMessages.clear();
@@ -18199,16 +18193,6 @@ Observed local session: ${target2.session ? references.current.sessionRef(target
   onSessionCompactFailed("session_compact_failed", (_event, ctx) => {
     finishCompactionStatus(ctx);
   });
-  function contextAnchors(messages) {
-    const occurrences = /* @__PURE__ */ new Map();
-    return messages.map((message) => {
-      const key = message.role === "custom" ? inboundEnvelopeKey(message) : void 0;
-      const base = [message.role, key ?? message.timestamp ?? "", message.toolCallId ?? "", message.customType ?? ""].join("\0");
-      const occurrence = occurrences.get(base) ?? 0;
-      occurrences.set(base, occurrence + 1);
-      return `${base}\0${occurrence}`;
-    });
-  }
   pi.on("context", (event) => {
     if (!getLiveContext()) return;
     confirmPersistedInbound();
@@ -18228,20 +18212,6 @@ Observed local session: ${target2.session ? references.current.sessionRef(target
       messages: new Set([...projectionIdentities.messages].filter(isCanonicalIdentity)),
       sessions: new Set([...projectionIdentities.sessions].filter(isCanonicalIdentity))
     };
-    const hostKeys = /* @__PURE__ */ new Map();
-    for (const message of event.messages) {
-      const key = message.role === "custom" ? inboundEnvelopeKey(message) : void 0;
-      if (key && !hostKeys.has(key)) hostKeys.set(key, message);
-    }
-    for (const [key, after] of restoredPlacements) {
-      const recorded = hostKeys.get(key);
-      if (!recorded || recorded.role !== "custom" || insertedContext.has(key)) continue;
-      const details = recorded.details;
-      const timestamp = details?.message?.receiverReceivedAt ?? details?.receivedAt ?? details?.message?.timestamp ?? details?.control?.timestamp ?? recorded.timestamp;
-      insertedContext.set(key, { after, message: { ...recorded, role: "custom", timestamp } });
-      restoredPlacements.delete(key);
-    }
-    const anchors = contextAnchors(event.messages);
     const presentOnce = (source, present2) => {
       if (source.details?.[PRESENTED_MARK] === true) return present2();
       const fingerprint = createHash3("sha256").update(JSON.stringify(source)).digest("base64");
@@ -18277,48 +18247,12 @@ Observed local session: ${target2.session ? references.current.sessionRef(target
       }
       return presentOnce(message, () => ({ ...message, content: projectForModel(message.content, message.details, canonicalIdentities) }));
     };
-    const insertAfter = (anchor) => {
-      for (const [key, inserted] of insertedContext) {
-        if (inserted.after !== anchor || seen.has(key)) continue;
-        if (hostRecordedEnvelopes.has(key) && !hostKeys.has(key)) continue;
-        seen.add(key);
-        messages.push(inserted.message);
-      }
-    };
-    insertAfter(void 0);
-    event.messages.forEach((message, index) => {
+    for (const message of event.messages) {
       const shown = present(message);
       if (shown) messages.push(shown);
-      insertAfter(anchors[index]);
-    });
-    const lastAnchor = anchors.at(-1);
-    for (const [key, inserted] of insertedContext) {
-      if (seen.has(key) || hostRecordedEnvelopes.has(key)) continue;
-      inserted.after = lastAnchor;
-      insertedContext.delete(key);
-      insertedContext.set(key, inserted);
-      seen.add(key);
-      messages.push(inserted.message);
     }
-    for (const [key, envelope] of pendingHostEnvelopes) {
-      if (!seen.has(key)) {
-        const message = { role: "custom", ...envelope };
-        insertedContext.set(key, { after: lastAnchor, message });
-        recordConversationEntry(CONTEXT_PLACEMENT_ENTRY_TYPE, { key, after: lastAnchor });
-        seen.add(key);
-        messages.push(message);
-      }
-      confirmInboundEnvelope(key);
-    }
+    for (const key of [...pendingHostEnvelopes.keys()]) if (seen.has(key)) confirmInboundEnvelope(key);
     for (const key of seen) presentedInboundEnvelopes.add(key);
-    if (conversationPersistenceWarning) {
-      const key = `notice:${conversationPersistenceWarning}`;
-      if (!insertedContext.has(key)) {
-        const message = { role: "custom", customType: "parley_persistence_notice", content: conversationPersistenceWarning, display: true, details: void 0, timestamp: Date.now() };
-        insertedContext.set(key, { after: lastAnchor, message });
-        messages.push(message);
-      }
-    }
     replyTracker.activateContexts([...freshModelContexts.values()]);
     freshModelContexts.clear();
     return { messages };
@@ -20441,7 +20375,7 @@ function clickToExpand(child, context) {
     context.invalidate?.();
   });
 }
-var verbatim, PRESENTED_MARK, CONTEXT_PLACEMENT_ENTRY_TYPE, PARLEY_TOOL_NAME, SUBAGENT_CONTROL_PARLEY_EVENT, SUBAGENT_RESULT_PARLEY_EVENT, SUBAGENT_RESULT_PARLEY_DELIVERY_EVENT, INBOUND_MESSAGE_DEDUPE_MAX, INBOUND_MESSAGE_DEDUPE_RETENTION_MS, MAX_EXPLICIT_SEND_TARGETS, SEND_FANOUT_CONCURRENCY, COMPACTION_STATUS_FAILSAFE_MS, DEFAULT_UNNAMED_SESSION_ALIAS_PREFIX, SUBAGENT_ORCHESTRATOR_TARGET_ENV, SUBAGENT_ORCHESTRATOR_SESSION_ID_ENV, PARLEY_SESSION_ID_ENV, STABLE_PARLEY_SESSION_ID_ENV, SUBAGENT_RUN_ID_ENV, SUBAGENT_CHILD_AGENT_ENV, SUBAGENT_CHILD_INDEX_ENV, SUBAGENT_PARLEY_SESSION_NAME_ENV, SUBAGENT_SUPERVISOR_CHANNEL_DIR_ENV, SESSION_PRESENCE_NAME_CONTEXT, PARLEY_EXTENSION_RUNTIME_CLAIM_EVENT, PARLEY_COMMAND_VERBS;
+var verbatim, PRESENTED_MARK, PARLEY_TOOL_NAME, SUBAGENT_CONTROL_PARLEY_EVENT, SUBAGENT_RESULT_PARLEY_EVENT, SUBAGENT_RESULT_PARLEY_DELIVERY_EVENT, INBOUND_MESSAGE_DEDUPE_MAX, INBOUND_MESSAGE_DEDUPE_RETENTION_MS, MAX_EXPLICIT_SEND_TARGETS, SEND_FANOUT_CONCURRENCY, COMPACTION_STATUS_FAILSAFE_MS, DEFAULT_UNNAMED_SESSION_ALIAS_PREFIX, SUBAGENT_ORCHESTRATOR_TARGET_ENV, SUBAGENT_ORCHESTRATOR_SESSION_ID_ENV, PARLEY_SESSION_ID_ENV, STABLE_PARLEY_SESSION_ID_ENV, SUBAGENT_RUN_ID_ENV, SUBAGENT_CHILD_AGENT_ENV, SUBAGENT_CHILD_INDEX_ENV, SUBAGENT_PARLEY_SESSION_NAME_ENV, SUBAGENT_SUPERVISOR_CHANNEL_DIR_ENV, SESSION_PRESENCE_NAME_CONTEXT, PARLEY_EXTENSION_RUNTIME_CLAIM_EVENT, PARLEY_COMMAND_VERBS;
 var init_index = __esm({
   "index.ts"() {
     init_build();
@@ -20471,7 +20405,6 @@ var init_index = __esm({
     init_session_profile();
     verbatim = (text) => ReferenceBook.verbatim(text);
     PRESENTED_MARK = "referencesPresented";
-    CONTEXT_PLACEMENT_ENTRY_TYPE = "parley_context_placed";
     PARLEY_TOOL_NAME = "parley";
     SUBAGENT_CONTROL_PARLEY_EVENT = "subagent:control-parley";
     SUBAGENT_RESULT_PARLEY_EVENT = "subagent:result-parley";
@@ -20554,7 +20487,7 @@ async function createHostedSession(options2) {
     const refuse = (reason2) => {
       if (!key) return;
       const waitMs = Math.min(RETRY_MAX_MS, backoff ? backoff.waitMs * 2 : RETRY_FIRST_MS);
-      refused.set(key, { retryAt: Date.now() + waitMs, waitMs });
+      refused.set(key, { retryAt: Date.now() + waitMs, waitMs, message });
       return reason2;
     };
     if (!text.trim()) {
@@ -20703,7 +20636,13 @@ async function createHostedSession(options2) {
       return { text, isError: failed, ...result.details !== void 0 ? { details: result.details } : {} };
     },
     async context(messages) {
+      const carried = new Set(messages.map((message) => message.role === "custom" ? deliveryKey(message) : void 0));
       let current2 = [...messages];
+      for (const [key, held] of refused) {
+        refused.delete(key);
+        record({ kind: "message", message: held.message, at: (/* @__PURE__ */ new Date()).toISOString() });
+        if (!carried.has(key)) current2.push({ role: "custom", display: true, timestamp: Date.now(), ...held.message });
+      }
       for (const result of await emit("context", { type: "context", messages: current2 })) {
         const next = result?.messages;
         if (Array.isArray(next)) current2 = next;

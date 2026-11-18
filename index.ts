@@ -34,8 +34,6 @@ import { ReferenceBook, REFERENCE_ENTRY_TYPE, isCanonicalIdentity, type Declared
 const verbatim = (text: string): string => ReferenceBook.verbatim(text);
 /** Details key marking content this runtime already presented for the model. */
 const PRESENTED_MARK = "referencesPresented";
-/** Where the model first saw an envelope its host recorded only later, so a reload keeps it there. */
-const CONTEXT_PLACEMENT_ENTRY_TYPE = "parley_context_placed";
 import { restoreConversationHistory, messageControlKey, matchesAskCounterpart, type OutstandingAsk } from "./conversation-history.ts";
 import { resolve as resolvePath } from "node:path";
 import { AsyncLocalStorage } from "node:async_hooks";
@@ -1212,7 +1210,18 @@ function installParleyExtension(
       pi.appendEntry(type, data);
     } catch (error) {
       // History is recovery support, not the acceptance boundary for live conversation.
+      const first = conversationPersistenceWarning === undefined;
       conversationPersistenceWarning = `Parley history was not fully persisted (${type}: ${previewText(failureText(error), 160) ?? "history write failed"}). Messages and conversation updates remain available in this running session, but recovery after restart may be incomplete.`;
+      // Said once, as a message in the conversation; later parley results repeat the latest.
+      const ctx = first ? getLiveContext() : undefined;
+      if (ctx) {
+        try {
+          pi.sendMessage({ customType: "parley_persistence_notice", content: conversationPersistenceWarning, display: true, details: { [PRESENTED_MARK]: true } },
+            ctx.isIdle() ? { triggerTurn: false } : { deliverAs: "steer" });
+        } catch {
+          // Tool results still carry the warning.
+        }
+      }
     }
   }
 
@@ -1320,20 +1329,11 @@ function installParleyExtension(
   const deferredInboundControls = new Map<string, { from: SessionInfo; control: MessageControl; content: string; receivedAt: number }>();
   let inboundRetryTimer: NodeJS.Timeout | null = null;
   const pendingHostEnvelopes = new Map<string, InboundEnvelope>();
-  // The model's view of the conversation is append-only. Providers cache prompts by prefix, so
-  // any earlier message that reads differently on a later request (a new label or status, a
-  // clock, a copy that moves) re-sends everything after it. Whatever the model was shown stays
-  // exactly as and where it was shown; anything new, including a changed status, arrives later
-  // as its own message or tool result.
-  //
-  // Envelopes the model saw before the host recorded them (a steered message still in Pi's
-  // queue, or a host that dropped it), by key, with the host message they followed.
-  const insertedContext = new Map<string, { after: string | undefined; message: InboundEnvelope & { role: "custom" } }>();
-  // Envelope keys the host has recorded in its own session, whether or not a context includes them.
-  const hostRecordedEnvelopes = new Set<string>();
-  // Where those envelopes were shown, as recorded in the session, waiting for their host copies after a reload.
-  const restoredPlacements = new Map<string, string | undefined>();
-  // What each host message was shown as, by its content, so presentation never drifts with state.
+  // What the model sees of the conversation is the host's history, append-only. Providers cache
+  // prompts by prefix, so an earlier message that reads differently on a later request re-sends
+  // everything after it. Parley adds to the conversation only through the host (sendMessage,
+  // tool results) and never edits or inserts into what the host sends the model.
+  // What each older host message was presented as, by content, so presentation never drifts with state.
   const shownProjections = new Map<string, unknown>();
   const presentedInboundEnvelopes = new Set<string>();
   const settledInboundMessages = new Set<string>();
@@ -1348,7 +1348,7 @@ function installParleyExtension(
       const ctx = getLiveContext(runtimeContext, generation);
       if (!ctx) return;
       confirmPersistedInbound();
-      // Busy queues are recovered by the context event, not repeated steering copies.
+      // A busy host delivers what it queued itself; only an idle one is offered unconfirmed messages again.
       if (ctx.isIdle()) {
         for (const entry of deferredInboundMessages.values()) sendIncomingMessage(entry, "trigger", generation);
         for (const key of deferredInboundControls.keys()) flushInboundControl(key);
@@ -1360,14 +1360,11 @@ function installParleyExtension(
 
   function confirmPersistedInbound(): void {
     const ctx = getLiveContext();
-    if (!ctx || (pendingHostEnvelopes.size === 0 && insertedContext.size === 0)) return;
+    if (!ctx || pendingHostEnvelopes.size === 0) return;
     for (const entry of ctx.sessionManager.getEntries()) {
       if (entry.type !== "custom_message") continue;
       const key = inboundEnvelopeKey(entry);
-      if (key) {
-        hostRecordedEnvelopes.add(key);
-        confirmInboundEnvelope(key);
-      }
+      if (key) confirmInboundEnvelope(key);
     }
     // A host without a model-boundary hook: what it has taken will reach its model, so a bare
     // reply in this run can answer it. Taken alongside something already being answered, it's
@@ -2928,9 +2925,6 @@ function installParleyExtension(
     deferredInboundMessages.clear();
     deferredInboundControls.clear();
     pendingHostEnvelopes.clear();
-    insertedContext.clear();
-    hostRecordedEnvelopes.clear();
-    restoredPlacements.clear();
     shownProjections.clear();
     presentedInboundEnvelopes.clear();
     settledInboundMessages.clear();
@@ -2946,11 +2940,6 @@ function installParleyExtension(
       const custom = entry as { type?: string; customType?: string; data?: unknown };
       return custom.type === "custom" && custom.customType === REFERENCE_ENTRY_TYPE ? [custom.data] : [];
     }));
-    for (const entry of restoredEntries) {
-      const custom = entry as { type?: string; customType?: string; data?: { key?: unknown; after?: unknown } };
-      if (custom.type !== "custom" || custom.customType !== CONTEXT_PLACEMENT_ENTRY_TYPE || typeof custom.data?.key !== "string") continue;
-      if (!restoredPlacements.has(custom.data.key)) restoredPlacements.set(custom.data.key, typeof custom.data.after === "string" ? custom.data.after : undefined);
-    }
     const history = restoreConversationHistory(restoredEntries);
     for (const id of history.persistedIncoming) presentedInboundEnvelopes.add(`message:${id}`);
     for (const key of history.persistedControls) presentedInboundEnvelopes.add(`control:${key}`);
@@ -3174,9 +3163,6 @@ function installParleyExtension(
     deferredInboundMessages.clear();
     deferredInboundControls.clear();
     pendingHostEnvelopes.clear();
-    insertedContext.clear();
-    hostRecordedEnvelopes.clear();
-    restoredPlacements.clear();
     shownProjections.clear();
     presentedInboundEnvelopes.clear();
     settledInboundMessages.clear();
@@ -3240,28 +3226,12 @@ function installParleyExtension(
   onSessionCompactFailed("session_compact_failed", (_event, ctx) => {
     finishCompactionStatus(ctx);
   });
-  /**
-   * Which host message each one is, cheaply and stably, so something shown after it can return
-   * to that place. Messages that look alike are told apart by how many came before them, which an
-   * append-only history never changes.
-   */
-  function contextAnchors(messages: ReadonlyArray<{ role: string; timestamp?: number; customType?: string; toolCallId?: string; details?: unknown }>): string[] {
-    const occurrences = new Map<string, number>();
-    return messages.map((message) => {
-      const key = message.role === "custom" ? inboundEnvelopeKey(message) : undefined;
-      const base = [message.role, key ?? message.timestamp ?? "", message.toolCallId ?? "", message.customType ?? ""].join("\0");
-      const occurrence = occurrences.get(base) ?? 0;
-      occurrences.set(base, occurrence + 1);
-      return `${base}\0${occurrence}`;
-    });
-  }
   pi.on("context", (event) => {
     if (!getLiveContext()) return;
-    // Host persistence can arrive after fallback visibility has drained the retry queue.
     confirmPersistedInbound();
-    // This is the actual model boundary, including hosts whose asynchronous sendMessage failed.
-    // Duplicate host retries are collapsed by message ID, not by identical body text. Nothing
-    // here may make an earlier message read differently or move (see insertedContext).
+    // The model gets the host's own history. Nothing here adds to it, moves it, or makes an
+    // earlier message read differently; a duplicate host copy of a message is dropped, the
+    // first copy kept. Text from older versions is made readable once and stays that way.
     type ContextMessage = (typeof event.messages)[number];
     const seen = new Set<string>();
     const messages: ContextMessage[] = [];
@@ -3284,22 +3254,6 @@ function installParleyExtension(
       messages: new Set([...projectionIdentities.messages].filter(isCanonicalIdentity)),
       sessions: new Set([...projectionIdentities.sessions].filter(isCanonicalIdentity)),
     };
-    // Envelope keys this host context carries, wherever they sit in it.
-    const hostKeys = new Map<string, ContextMessage>();
-    for (const message of event.messages) {
-      const key = message.role === "custom" ? inboundEnvelopeKey(message) : undefined;
-      if (key && !hostKeys.has(key)) hostKeys.set(key, message);
-    }
-    // After a reload, an envelope the model first saw early goes back to that place; its host copy is the same message.
-    for (const [key, after] of restoredPlacements) {
-      const recorded = hostKeys.get(key);
-      if (!recorded || recorded.role !== "custom" || insertedContext.has(key)) continue;
-      const details = recorded.details as { message?: Message; control?: MessageControl; receivedAt?: number } | undefined;
-      const timestamp = details?.message?.receiverReceivedAt ?? details?.receivedAt ?? details?.message?.timestamp ?? details?.control?.timestamp ?? recorded.timestamp;
-      insertedContext.set(key, { after, message: { ...(recorded as unknown as InboundEnvelope), role: "custom", timestamp } });
-      restoredPlacements.delete(key);
-    }
-    const anchors = contextAnchors(event.messages);
     // Present each host message once, from its own content; later requests reuse that exact result.
     const presentOnce = <T,>(source: object, present: () => T): T => {
       // Text this runtime presented is final already; only older text needs remembering.
@@ -3350,56 +3304,13 @@ function installParleyExtension(
       }
       return presentOnce(message, () => ({ ...message, content: projectForModel(message.content, message.details, canonicalIdentities) }));
     };
-    // Envelopes shown earlier go back exactly where they were, unless the host has since recorded
-    // its own copy and left it out of this context (compaction, another branch).
-    const insertAfter = (anchor: string | undefined): void => {
-      for (const [key, inserted] of insertedContext) {
-        if (inserted.after !== anchor || seen.has(key)) continue;
-        if (hostRecordedEnvelopes.has(key) && !hostKeys.has(key)) continue;
-        seen.add(key);
-        messages.push(inserted.message);
-      }
-    };
-    insertAfter(undefined);
-    event.messages.forEach((message, index) => {
+    for (const message of event.messages) {
       const shown = present(message);
       if (shown) messages.push(shown);
-      insertAfter(anchors[index]);
-    });
-    // Anything shown earlier whose place has left this context, and that the host never recorded,
-    // is still the model's only copy: it stays, from here on, at the end of what's left.
-    const lastAnchor = anchors.at(-1);
-    for (const [key, inserted] of insertedContext) {
-      if (seen.has(key) || hostRecordedEnvelopes.has(key)) continue;
-      inserted.after = lastAnchor;
-      // Re-queued so later contexts replay these in the order shown here.
-      insertedContext.delete(key);
-      insertedContext.set(key, inserted);
-      seen.add(key);
-      messages.push(inserted.message);
     }
-    // New envelopes the host hasn't put in front of the model yet are shown now, after everything
-    // it has. From now on they stay there, and the host's own copy, when it arrives, is the same message.
-    for (const [key, envelope] of pendingHostEnvelopes) {
-      if (!seen.has(key)) {
-        const message = { role: "custom" as const, ...envelope };
-        insertedContext.set(key, { after: lastAnchor, message });
-        recordConversationEntry(CONTEXT_PLACEMENT_ENTRY_TYPE, { key, after: lastAnchor });
-        seen.add(key);
-        messages.push(message);
-      }
-      confirmInboundEnvelope(key);
-    }
+    // What the host has put in front of the model is what the model has seen.
+    for (const key of [...pendingHostEnvelopes.keys()]) if (seen.has(key)) confirmInboundEnvelope(key);
     for (const key of seen) presentedInboundEnvelopes.add(key);
-    if (conversationPersistenceWarning) {
-      // One notice per distinct problem, kept where the model first saw it.
-      const key = `notice:${conversationPersistenceWarning}`;
-      if (!insertedContext.has(key)) {
-        const message = { role: "custom" as const, customType: "parley_persistence_notice", content: conversationPersistenceWarning, display: true, details: undefined, timestamp: Date.now() };
-        insertedContext.set(key, { after: lastAnchor, message });
-        messages.push(message);
-      }
-    }
     replyTracker.activateContexts([...freshModelContexts.values()]);
     freshModelContexts.clear();
     return { messages };
