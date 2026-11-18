@@ -30,7 +30,7 @@ function nodeCommand(execPath = process.execPath) {
 var bundledBuild;
 var init_bundle = __esm({
   "broker/bundle.ts"() {
-    bundledBuild = true ? JSON.parse('{"packageVersion":"1.8.0","sourceId":"00e53c18c45dc418ed7997bb5cd07531f98e8403d583b046a811c1a5ca5a91e4"}') : void 0;
+    bundledBuild = true ? JSON.parse('{"packageVersion":"1.8.0","sourceId":"d69242ae958b7cb48af95e0d63b2fb316781851d323be99036e3671155136e50"}') : void 0;
   }
 });
 
@@ -16512,6 +16512,7 @@ The earlier message is no longer the current request; prior work is not undone.`
   const pendingHostEnvelopes = /* @__PURE__ */ new Map();
   const insertedContext = /* @__PURE__ */ new Map();
   const hostRecordedEnvelopes = /* @__PURE__ */ new Set();
+  const restoredPlacements = /* @__PURE__ */ new Map();
   const shownProjections = /* @__PURE__ */ new Map();
   const presentedInboundEnvelopes = /* @__PURE__ */ new Set();
   const settledInboundMessages = /* @__PURE__ */ new Set();
@@ -17913,6 +17914,7 @@ Observed local session: ${target2.session ? references.current.sessionRef(target
     pendingHostEnvelopes.clear();
     insertedContext.clear();
     hostRecordedEnvelopes.clear();
+    restoredPlacements.clear();
     shownProjections.clear();
     presentedInboundEnvelopes.clear();
     settledInboundMessages.clear();
@@ -17928,6 +17930,11 @@ Observed local session: ${target2.session ? references.current.sessionRef(target
       const custom = entry;
       return custom.type === "custom" && custom.customType === REFERENCE_ENTRY_TYPE ? [custom.data] : [];
     }));
+    for (const entry of restoredEntries) {
+      const custom = entry;
+      if (custom.type !== "custom" || custom.customType !== CONTEXT_PLACEMENT_ENTRY_TYPE || typeof custom.data?.key !== "string") continue;
+      if (!restoredPlacements.has(custom.data.key)) restoredPlacements.set(custom.data.key, typeof custom.data.after === "string" ? custom.data.after : void 0);
+    }
     const history = restoreConversationHistory(restoredEntries);
     for (const id of history.persistedIncoming) presentedInboundEnvelopes.add(`message:${id}`);
     for (const key of history.persistedControls) presentedInboundEnvelopes.add(`control:${key}`);
@@ -18142,6 +18149,7 @@ Observed local session: ${target2.session ? references.current.sessionRef(target
     pendingHostEnvelopes.clear();
     insertedContext.clear();
     hostRecordedEnvelopes.clear();
+    restoredPlacements.clear();
     shownProjections.clear();
     presentedInboundEnvelopes.clear();
     settledInboundMessages.clear();
@@ -18191,9 +18199,15 @@ Observed local session: ${target2.session ? references.current.sessionRef(target
   onSessionCompactFailed("session_compact_failed", (_event, ctx) => {
     finishCompactionStatus(ctx);
   });
-  function contextAnchor(message) {
-    const key = message.role === "custom" ? inboundEnvelopeKey(message) : void 0;
-    return [message.role, key ?? message.timestamp ?? "", message.toolCallId ?? "", message.customType ?? ""].join("\0");
+  function contextAnchors(messages) {
+    const occurrences = /* @__PURE__ */ new Map();
+    return messages.map((message) => {
+      const key = message.role === "custom" ? inboundEnvelopeKey(message) : void 0;
+      const base = [message.role, key ?? message.timestamp ?? "", message.toolCallId ?? "", message.customType ?? ""].join("\0");
+      const occurrence = occurrences.get(base) ?? 0;
+      occurrences.set(base, occurrence + 1);
+      return `${base}\0${occurrence}`;
+    });
   }
   pi.on("context", (event) => {
     if (!getLiveContext()) return;
@@ -18214,16 +18228,23 @@ Observed local session: ${target2.session ? references.current.sessionRef(target
       messages: new Set([...projectionIdentities.messages].filter(isCanonicalIdentity)),
       sessions: new Set([...projectionIdentities.sessions].filter(isCanonicalIdentity))
     };
-    const hostKeys = /* @__PURE__ */ new Set();
+    const hostKeys = /* @__PURE__ */ new Map();
     for (const message of event.messages) {
       const key = message.role === "custom" ? inboundEnvelopeKey(message) : void 0;
-      if (key) hostKeys.add(key);
+      if (key && !hostKeys.has(key)) hostKeys.set(key, message);
     }
-    const shownThisTime = /* @__PURE__ */ new Set();
+    for (const [key, after] of restoredPlacements) {
+      const recorded = hostKeys.get(key);
+      if (!recorded || recorded.role !== "custom" || insertedContext.has(key)) continue;
+      const details = recorded.details;
+      const timestamp = details?.message?.receiverReceivedAt ?? details?.receivedAt ?? details?.message?.timestamp ?? details?.control?.timestamp ?? recorded.timestamp;
+      insertedContext.set(key, { after, message: { ...recorded, role: "custom", timestamp } });
+      restoredPlacements.delete(key);
+    }
+    const anchors = contextAnchors(event.messages);
     const presentOnce = (source, present2) => {
       if (source.details?.[PRESENTED_MARK] === true) return present2();
       const fingerprint = createHash3("sha256").update(JSON.stringify(source)).digest("base64");
-      shownThisTime.add(fingerprint);
       if (shownProjections.has(fingerprint)) return shownProjections.get(fingerprint);
       const shown = present2();
       shownProjections.set(fingerprint, shown);
@@ -18265,12 +18286,12 @@ Observed local session: ${target2.session ? references.current.sessionRef(target
       }
     };
     insertAfter(void 0);
-    for (const message of event.messages) {
+    event.messages.forEach((message, index) => {
       const shown = present(message);
       if (shown) messages.push(shown);
-      insertAfter(contextAnchor(message));
-    }
-    const lastAnchor = event.messages.length ? contextAnchor(event.messages.at(-1)) : void 0;
+      insertAfter(anchors[index]);
+    });
+    const lastAnchor = anchors.at(-1);
     for (const [key, inserted] of insertedContext) {
       if (seen.has(key) || hostRecordedEnvelopes.has(key)) continue;
       inserted.after = lastAnchor;
@@ -18283,6 +18304,7 @@ Observed local session: ${target2.session ? references.current.sessionRef(target
       if (!seen.has(key)) {
         const message = { role: "custom", ...envelope };
         insertedContext.set(key, { after: lastAnchor, message });
+        recordConversationEntry(CONTEXT_PLACEMENT_ENTRY_TYPE, { key, after: lastAnchor });
         seen.add(key);
         messages.push(message);
       }
@@ -18296,9 +18318,6 @@ Observed local session: ${target2.session ? references.current.sessionRef(target
         insertedContext.set(key, { after: lastAnchor, message });
         messages.push(message);
       }
-    }
-    if (shownProjections.size > 2 * shownThisTime.size + 256) {
-      for (const fingerprint of shownProjections.keys()) if (!shownThisTime.has(fingerprint)) shownProjections.delete(fingerprint);
     }
     replyTracker.activateContexts([...freshModelContexts.values()]);
     freshModelContexts.clear();
@@ -20422,7 +20441,7 @@ function clickToExpand(child, context) {
     context.invalidate?.();
   });
 }
-var verbatim, PRESENTED_MARK, PARLEY_TOOL_NAME, SUBAGENT_CONTROL_PARLEY_EVENT, SUBAGENT_RESULT_PARLEY_EVENT, SUBAGENT_RESULT_PARLEY_DELIVERY_EVENT, INBOUND_MESSAGE_DEDUPE_MAX, INBOUND_MESSAGE_DEDUPE_RETENTION_MS, MAX_EXPLICIT_SEND_TARGETS, SEND_FANOUT_CONCURRENCY, COMPACTION_STATUS_FAILSAFE_MS, DEFAULT_UNNAMED_SESSION_ALIAS_PREFIX, SUBAGENT_ORCHESTRATOR_TARGET_ENV, SUBAGENT_ORCHESTRATOR_SESSION_ID_ENV, PARLEY_SESSION_ID_ENV, STABLE_PARLEY_SESSION_ID_ENV, SUBAGENT_RUN_ID_ENV, SUBAGENT_CHILD_AGENT_ENV, SUBAGENT_CHILD_INDEX_ENV, SUBAGENT_PARLEY_SESSION_NAME_ENV, SUBAGENT_SUPERVISOR_CHANNEL_DIR_ENV, SESSION_PRESENCE_NAME_CONTEXT, PARLEY_EXTENSION_RUNTIME_CLAIM_EVENT, PARLEY_COMMAND_VERBS;
+var verbatim, PRESENTED_MARK, CONTEXT_PLACEMENT_ENTRY_TYPE, PARLEY_TOOL_NAME, SUBAGENT_CONTROL_PARLEY_EVENT, SUBAGENT_RESULT_PARLEY_EVENT, SUBAGENT_RESULT_PARLEY_DELIVERY_EVENT, INBOUND_MESSAGE_DEDUPE_MAX, INBOUND_MESSAGE_DEDUPE_RETENTION_MS, MAX_EXPLICIT_SEND_TARGETS, SEND_FANOUT_CONCURRENCY, COMPACTION_STATUS_FAILSAFE_MS, DEFAULT_UNNAMED_SESSION_ALIAS_PREFIX, SUBAGENT_ORCHESTRATOR_TARGET_ENV, SUBAGENT_ORCHESTRATOR_SESSION_ID_ENV, PARLEY_SESSION_ID_ENV, STABLE_PARLEY_SESSION_ID_ENV, SUBAGENT_RUN_ID_ENV, SUBAGENT_CHILD_AGENT_ENV, SUBAGENT_CHILD_INDEX_ENV, SUBAGENT_PARLEY_SESSION_NAME_ENV, SUBAGENT_SUPERVISOR_CHANNEL_DIR_ENV, SESSION_PRESENCE_NAME_CONTEXT, PARLEY_EXTENSION_RUNTIME_CLAIM_EVENT, PARLEY_COMMAND_VERBS;
 var init_index = __esm({
   "index.ts"() {
     init_build();
@@ -20452,6 +20471,7 @@ var init_index = __esm({
     init_session_profile();
     verbatim = (text) => ReferenceBook.verbatim(text);
     PRESENTED_MARK = "referencesPresented";
+    CONTEXT_PLACEMENT_ENTRY_TYPE = "parley_context_placed";
     PARLEY_TOOL_NAME = "parley";
     SUBAGENT_CONTROL_PARLEY_EVENT = "subagent:control-parley";
     SUBAGENT_RESULT_PARLEY_EVENT = "subagent:result-parley";

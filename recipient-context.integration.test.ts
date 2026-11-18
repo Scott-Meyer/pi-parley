@@ -93,6 +93,7 @@ test("every request starts with exactly what the model was shown before, so prom
   // message that reads differently, or moves.
   const peer = await colleague("prefix-planner");
   const harness = createExtensionHarness("prefix-worker", { sessionId: "prefix-worker-id", isIdle: () => false, persistMessages: false });
+  const restored = createExtensionHarness("prefix-worker", { sessionId: "prefix-worker-id", isIdle: () => false, persistMessages: false });
   const realNow = Date.now;
   try {
     const target = await start(harness, peer, "prefix-worker");
@@ -136,9 +137,19 @@ test("every request starts with exactly what the model was shown before, so prom
     takeIntoHistory(harness.sentMessages.length - 1);
     await request();
     assert.equal(views.at(-1)!.filter((item) => (item as { customType?: string }).customType === "parley_message_control").length, 1, "the recorded copy is the same message, not a second one");
+
+    // A reload: the same session resumes from what it recorded, and the model's view is unchanged.
+    restored.entries.push(...structuredClone(harness.entries));
+    restored.persistedMessages.push(...structuredClone(harness.persistedMessages));
+    await harness.emitLifecycle("session_shutdown");
+    extension(restored.pi as never);
+    await restored.emitLifecycle("session_start");
+    const resumed = structuredClone(await modelContext(restored, structuredClone(history)));
+    assert.deepEqual(resumed, views.at(-1), "a reload neither moves nor rewrites what the model saw");
   } finally {
     Date.now = realNow;
     await harness.emitLifecycle("session_shutdown");
+    await restored.emitLifecycle("session_shutdown");
     await peer.disconnect();
   }
 });

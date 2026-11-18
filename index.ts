@@ -34,6 +34,8 @@ import { ReferenceBook, REFERENCE_ENTRY_TYPE, isCanonicalIdentity, type Declared
 const verbatim = (text: string): string => ReferenceBook.verbatim(text);
 /** Details key marking content this runtime already presented for the model. */
 const PRESENTED_MARK = "referencesPresented";
+/** Where the model first saw an envelope its host recorded only later, so a reload keeps it there. */
+const CONTEXT_PLACEMENT_ENTRY_TYPE = "parley_context_placed";
 import { restoreConversationHistory, messageControlKey, matchesAskCounterpart, type OutstandingAsk } from "./conversation-history.ts";
 import { resolve as resolvePath } from "node:path";
 import { AsyncLocalStorage } from "node:async_hooks";
@@ -1329,6 +1331,8 @@ function installParleyExtension(
   const insertedContext = new Map<string, { after: string | undefined; message: InboundEnvelope & { role: "custom" } }>();
   // Envelope keys the host has recorded in its own session, whether or not a context includes them.
   const hostRecordedEnvelopes = new Set<string>();
+  // Where those envelopes were shown, as recorded in the session, waiting for their host copies after a reload.
+  const restoredPlacements = new Map<string, string | undefined>();
   // What each host message was shown as, by its content, so presentation never drifts with state.
   const shownProjections = new Map<string, unknown>();
   const presentedInboundEnvelopes = new Set<string>();
@@ -2926,6 +2930,7 @@ function installParleyExtension(
     pendingHostEnvelopes.clear();
     insertedContext.clear();
     hostRecordedEnvelopes.clear();
+    restoredPlacements.clear();
     shownProjections.clear();
     presentedInboundEnvelopes.clear();
     settledInboundMessages.clear();
@@ -2941,6 +2946,11 @@ function installParleyExtension(
       const custom = entry as { type?: string; customType?: string; data?: unknown };
       return custom.type === "custom" && custom.customType === REFERENCE_ENTRY_TYPE ? [custom.data] : [];
     }));
+    for (const entry of restoredEntries) {
+      const custom = entry as { type?: string; customType?: string; data?: { key?: unknown; after?: unknown } };
+      if (custom.type !== "custom" || custom.customType !== CONTEXT_PLACEMENT_ENTRY_TYPE || typeof custom.data?.key !== "string") continue;
+      if (!restoredPlacements.has(custom.data.key)) restoredPlacements.set(custom.data.key, typeof custom.data.after === "string" ? custom.data.after : undefined);
+    }
     const history = restoreConversationHistory(restoredEntries);
     for (const id of history.persistedIncoming) presentedInboundEnvelopes.add(`message:${id}`);
     for (const key of history.persistedControls) presentedInboundEnvelopes.add(`control:${key}`);
@@ -3166,6 +3176,7 @@ function installParleyExtension(
     pendingHostEnvelopes.clear();
     insertedContext.clear();
     hostRecordedEnvelopes.clear();
+    restoredPlacements.clear();
     shownProjections.clear();
     presentedInboundEnvelopes.clear();
     settledInboundMessages.clear();
@@ -3229,10 +3240,20 @@ function installParleyExtension(
   onSessionCompactFailed("session_compact_failed", (_event, ctx) => {
     finishCompactionStatus(ctx);
   });
-  /** Which host message this is, cheaply and stably, so something shown after it can return to that place. */
-  function contextAnchor(message: { role: string; timestamp?: number; customType?: string; toolCallId?: string; details?: unknown }): string {
-    const key = message.role === "custom" ? inboundEnvelopeKey(message) : undefined;
-    return [message.role, key ?? message.timestamp ?? "", message.toolCallId ?? "", message.customType ?? ""].join("\0");
+  /**
+   * Which host message each one is, cheaply and stably, so something shown after it can return
+   * to that place. Messages that look alike are told apart by how many came before them, which an
+   * append-only history never changes.
+   */
+  function contextAnchors(messages: ReadonlyArray<{ role: string; timestamp?: number; customType?: string; toolCallId?: string; details?: unknown }>): string[] {
+    const occurrences = new Map<string, number>();
+    return messages.map((message) => {
+      const key = message.role === "custom" ? inboundEnvelopeKey(message) : undefined;
+      const base = [message.role, key ?? message.timestamp ?? "", message.toolCallId ?? "", message.customType ?? ""].join("\0");
+      const occurrence = occurrences.get(base) ?? 0;
+      occurrences.set(base, occurrence + 1);
+      return `${base}\0${occurrence}`;
+    });
   }
   pi.on("context", (event) => {
     if (!getLiveContext()) return;
@@ -3264,18 +3285,26 @@ function installParleyExtension(
       sessions: new Set([...projectionIdentities.sessions].filter(isCanonicalIdentity)),
     };
     // Envelope keys this host context carries, wherever they sit in it.
-    const hostKeys = new Set<string>();
+    const hostKeys = new Map<string, ContextMessage>();
     for (const message of event.messages) {
       const key = message.role === "custom" ? inboundEnvelopeKey(message) : undefined;
-      if (key) hostKeys.add(key);
+      if (key && !hostKeys.has(key)) hostKeys.set(key, message);
     }
+    // After a reload, an envelope the model first saw early goes back to that place; its host copy is the same message.
+    for (const [key, after] of restoredPlacements) {
+      const recorded = hostKeys.get(key);
+      if (!recorded || recorded.role !== "custom" || insertedContext.has(key)) continue;
+      const details = recorded.details as { message?: Message; control?: MessageControl; receivedAt?: number } | undefined;
+      const timestamp = details?.message?.receiverReceivedAt ?? details?.receivedAt ?? details?.message?.timestamp ?? details?.control?.timestamp ?? recorded.timestamp;
+      insertedContext.set(key, { after, message: { ...(recorded as unknown as InboundEnvelope), role: "custom", timestamp } });
+      restoredPlacements.delete(key);
+    }
+    const anchors = contextAnchors(event.messages);
     // Present each host message once, from its own content; later requests reuse that exact result.
-    const shownThisTime = new Set<string>();
     const presentOnce = <T,>(source: object, present: () => T): T => {
       // Text this runtime presented is final already; only older text needs remembering.
       if (((source as { details?: unknown }).details as Record<string, unknown> | undefined)?.[PRESENTED_MARK] === true) return present();
       const fingerprint = createHash("sha256").update(JSON.stringify(source)).digest("base64");
-      shownThisTime.add(fingerprint);
       if (shownProjections.has(fingerprint)) return shownProjections.get(fingerprint) as T;
       const shown = present();
       shownProjections.set(fingerprint, shown);
@@ -3332,14 +3361,14 @@ function installParleyExtension(
       }
     };
     insertAfter(undefined);
-    for (const message of event.messages) {
+    event.messages.forEach((message, index) => {
       const shown = present(message);
       if (shown) messages.push(shown);
-      insertAfter(contextAnchor(message));
-    }
+      insertAfter(anchors[index]);
+    });
     // Anything shown earlier whose place has left this context, and that the host never recorded,
     // is still the model's only copy: it stays, from here on, at the end of what's left.
-    const lastAnchor = event.messages.length ? contextAnchor(event.messages.at(-1)!) : undefined;
+    const lastAnchor = anchors.at(-1);
     for (const [key, inserted] of insertedContext) {
       if (seen.has(key) || hostRecordedEnvelopes.has(key)) continue;
       inserted.after = lastAnchor;
@@ -3355,6 +3384,7 @@ function installParleyExtension(
       if (!seen.has(key)) {
         const message = { role: "custom" as const, ...envelope };
         insertedContext.set(key, { after: lastAnchor, message });
+        recordConversationEntry(CONTEXT_PLACEMENT_ENTRY_TYPE, { key, after: lastAnchor });
         seen.add(key);
         messages.push(message);
       }
@@ -3369,9 +3399,6 @@ function installParleyExtension(
         insertedContext.set(key, { after: lastAnchor, message });
         messages.push(message);
       }
-    }
-    if (shownProjections.size > 2 * shownThisTime.size + 256) {
-      for (const fingerprint of shownProjections.keys()) if (!shownThisTime.has(fingerprint)) shownProjections.delete(fingerprint);
     }
     replyTracker.activateContexts([...freshModelContexts.values()]);
     freshModelContexts.clear();
