@@ -132,7 +132,7 @@ test("a session the host replaces keeps its identity, names and history", { time
   }
 });
 
-test("a delivery the host refuses isn't counted as shown: Parley tries again, and the model sees it once", { timeout: 60_000, skip: process.platform === "win32" }, async () => {
+test("a delivery the host refuses isn't counted as shown: Parley offers it again until the host takes it, once", { timeout: 60_000, skip: process.platform === "win32" }, async () => {
   const { host, listed, inbox, cleanup } = app();
   try {
     let refusing = true;
@@ -152,19 +152,17 @@ test("a delivery the host refuses isn't counted as shown: Parley tries again, an
     await eventually(() => offered.length >= 2, "Parley offers it again after the refusal");
     assert.equal(inbox("beta").length, 0, "nothing was accepted yet");
 
-    // The model's next call still gets it, through context, before the host takes it.
-    const context = await beta.context([{ role: "user", content: "carry on", timestamp: Date.now() }]);
-    const shown = context.filter((message) => message.role === "custom" && message.customType === "parley_message");
-    assert.equal(shown.length, 1, JSON.stringify(context.map((message) => message.role)));
-    assert.match(JSON.stringify(shown[0]!.content), /while you were paused/);
+    // The host decides what its model sees; context() hands back exactly what it was given.
+    const transcript = [{ role: "user", content: "carry on", timestamp: Date.now() }];
+    assert.deepEqual(await beta.context(transcript), transcript);
 
-    // Once the model has seen it, accepting doesn't hand it over a second time.
+    // Once the host takes it, it's taken once and not offered again.
     refusing = false;
-    const before = offered.length;
+    await eventually(() => inbox("beta").length === 1, "the host takes it");
+    const taken = offered.length;
     await new Promise((resolve) => setTimeout(resolve, 2500));
-    assert.equal(offered.length, before, "not offered again once the model has it");
-    const again = await beta.context([{ role: "user", content: "carry on", timestamp: Date.now() }, ...shown]);
-    assert.equal(again.filter((message) => message.role === "custom" && message.customType === "parley_message").length, 1, "and the copy the host kept isn't doubled");
+    assert.equal(offered.length, taken, "not offered again once taken");
+    assert.equal(inbox("beta").length, 1);
   } finally {
     await cleanup();
   }

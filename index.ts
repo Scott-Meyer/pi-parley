@@ -1,5 +1,5 @@
 import type { AgentSessionEvent, AgentToolResult, ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
-import { createHash, randomUUID } from "crypto";
+import { randomUUID } from "crypto";
 import { Type } from "typebox";
 import { Text } from "@mariozechner/pi-tui";
 import { defineTool, sessionCompactFailuresReachExtensions, sessionInfoChangesReachExtensions, StringEnum } from "./pi-compat.ts";
@@ -29,11 +29,10 @@ import {
   type ParleyOutboxResultV1,
 } from "./extension-api.ts";
 import { ReplyTracker, type ParleyContext } from "./reply-tracker.ts";
-import { ReferenceBook, REFERENCE_ENTRY_TYPE, isCanonicalIdentity, type DeclaredIdentities } from "./references.ts";
+import { ReferenceBook, REFERENCE_ENTRY_TYPE, isCanonicalIdentity } from "./references.ts";
 /** Peer-authored text reaches the model exactly as written; presentation skips it. */
 const verbatim = (text: string): string => ReferenceBook.verbatim(text);
 /** Details key marking content this runtime already presented for the model. */
-const PRESENTED_MARK = "referencesPresented";
 import { restoreConversationHistory, messageControlKey, matchesAskCounterpart, type OutstandingAsk } from "./conversation-history.ts";
 import { resolve as resolvePath } from "node:path";
 import { AsyncLocalStorage } from "node:async_hooks";
@@ -1070,117 +1069,6 @@ function installParleyExtension(
   function presentForModel(text: string, declared?: unknown): string {
     return references.current.present(text, declared === undefined ? undefined : references.current.learnFrom(declared));
   }
-  /** Content this runtime already presented is final; only older, unmarked content gets a conservative pass. */
-  function projectForModel<T extends string | Array<{ type: string; text?: string }>>(content: T, details: unknown, declared?: DeclaredIdentities): T {
-    if (typeof details === "object" && details !== null && (details as Record<string, unknown>)[PRESENTED_MARK] === true) return content;
-    const peerText = legacyPeerText(details);
-    const project = (text: string): string => references.current.present(protectLegacyPeerText(text, peerText), declared);
-    if (typeof content === "string") return project(content) as T;
-    return content.map((part) => part.type === "text" && typeof part.text === "string"
-      ? { ...part, text: project(part.text) }
-      : part) as T;
-  }
-  /**
-   * Peer-authored strings a legacy record's details declare: message and reply bodies,
-   * attachment snapshots, and retained messages named by ID. Their occurrences stay verbatim.
-   */
-  function legacyPeerText(details: unknown): string[] {
-    const found = new Set<string>();
-    const addMessage = (message: unknown): void => {
-      if (!message || typeof message !== "object") return;
-      const content = (message as { content?: { text?: unknown; attachments?: unknown } }).content;
-      if (typeof content?.text === "string") found.add(content.text);
-      if (Array.isArray(content?.attachments)) {
-        for (const attachment of content.attachments) {
-          if (typeof (attachment as { content?: unknown }).content === "string") found.add((attachment as { content: string }).content);
-        }
-      }
-    };
-    const visit = (value: unknown, depth: number): void => {
-      if (!value || typeof value !== "object" || depth > 4) return;
-      if (Array.isArray(value)) { value.forEach((item) => visit(item, depth + 1)); return; }
-      for (const [key, field] of Object.entries(value as Record<string, unknown>)) {
-        if (key === "bodyText" && typeof field === "string") found.add(field);
-        else if ((key === "message" || key === "reply" || key === "original") && field && typeof field === "object") addMessage(field);
-        else if (["messageId", "replyMessageId", "replyTo", "questionId"].includes(key) && typeof field === "string") {
-          addMessage(replyTracker.getMessage(field)?.message);
-        }
-        if (field && typeof field === "object") visit(field, depth + 1);
-      }
-    };
-    visit(details, 0);
-    return [...found].filter((text) => text.length > 0).sort((left, right) => right.length - left.length);
-  }
-  /** Mark declared peer strings and quoted preview lines verbatim, without nesting markers. */
-  function protectLegacyPeerText(text: string, peerText: readonly string[]): string {
-    let parts: Array<{ text: string; verbatim: boolean }> = [{ text, verbatim: false }];
-    const protect = (find: (segment: string) => Array<[number, number]>): void => {
-      parts = parts.flatMap((part) => {
-        if (part.verbatim) return [part];
-        const out: Array<{ text: string; verbatim: boolean }> = [];
-        let cursor = 0;
-        for (const [start, end] of find(part.text)) {
-          if (start < cursor) continue;
-          if (start > cursor) out.push({ text: part.text.slice(cursor, start), verbatim: false });
-          out.push({ text: part.text.slice(start, end), verbatim: true });
-          cursor = end;
-        }
-        if (cursor < part.text.length) out.push({ text: part.text.slice(cursor), verbatim: false });
-        return out;
-      });
-    };
-    for (const peer of peerText) {
-      protect((segment) => {
-        const ranges: Array<[number, number]> = [];
-        for (let index = segment.indexOf(peer); index !== -1; index = segment.indexOf(peer, index + peer.length)) ranges.push([index, index + peer.length]);
-        return ranges;
-      });
-    }
-    protect((segment) => [...segment.matchAll(/^(?:Original message|Reply to your message): .*$/gm)]
-      .map((match) => [match.index!, match.index! + match[0].length] as [number, number]));
-    return parts.map((part) => part.verbatim ? verbatim(part.text) : part.text).join("");
-  }
-  /**
-   * The identities a parley call's arguments declare by field. Session fields declare values the
-   * book knows or that are canonical identities, but never an already-reserved human reference;
-   * message fields declare anything that is not already a message reference.
-   */
-  function declareToolArguments(args: Record<string, unknown>, declared: DeclaredIdentities): void {
-    const book = references.current;
-    const session = (value: unknown): void => {
-      if (typeof value !== "string" || !value.trim()) return;
-      if (book.isIssuedSessionReference(value)) return;
-      if (book.isKnownSession(value) || isCanonicalIdentity(value)) declared.sessions.add(value);
-    };
-    const message = (value: unknown): void => {
-      if (typeof value !== "string" || !value.trim() || book.isIssuedMessageReference(value) || /^#\d+$/.test(value.trim())) return;
-      declared.messages.add(value);
-    };
-    session(args.to);
-    if (Array.isArray(args.targets)) args.targets.forEach(session);
-    for (const key of ["replyTo", "messageId", "supersedes", "retryOf"]) message(args[key]);
-  }
-  /**
-   * Present reference-bearing parley arguments. Each field is a typed slot: a value already
-   * issued as a reference of that field's kind is final; a declared identity of that kind is
-   * formatted directly by kind. Nothing is decided by matching spellings across kinds.
-   */
-  function presentToolArgumentsForModel(args: Record<string, unknown>, declared: DeclaredIdentities): Record<string, unknown> {
-    const book = references.current;
-    const asSession = (value: unknown): unknown => {
-      if (typeof value !== "string" || book.isIssuedSessionReference(value)) return value;
-      return declared.sessions.has(value) ? book.sessionRef(value) : value;
-    };
-    const asMessage = (value: unknown): unknown => {
-      if (typeof value !== "string" || book.isIssuedMessageReference(value)) return value;
-      return declared.messages.has(value) ? book.messageRef(value) : value;
-    };
-    const next: Record<string, unknown> = { ...args };
-    if ("to" in next) next.to = asSession(next.to);
-    if (Array.isArray(next.targets)) next.targets = next.targets.map(asSession);
-    for (const key of ["replyTo", "messageId", "supersedes", "retryOf"]) if (key in next) next[key] = asMessage(next[key]);
-    return next;
-  }
   /** Wrap a tool so every result it returns reaches the model with references, not canonical IDs. */
   function presentingTool<T extends { execute: (...args: never[]) => Promise<{ content: Array<{ type: string; text?: string }>; details?: unknown }> }>(tool: T): T {
     const execute = tool.execute;
@@ -1196,8 +1084,6 @@ function installParleyExtension(
   ): T {
     const book = options.book ?? references.current;
     const identities = book.learnFrom(result.details);
-    // Marked so the model boundary never presents it again (a second pass could touch peer text).
-    result.details = { ...(typeof result.details === "object" && result.details !== null ? result.details : {}), [PRESENTED_MARK]: true };
     for (const id of options.sessions ?? []) identities.sessions.add(id);
     for (const part of result.content) {
       if (part.type === "text" && typeof part.text === "string") part.text = book.present(part.text, identities);
@@ -1216,8 +1102,8 @@ function installParleyExtension(
       const ctx = first ? getLiveContext() : undefined;
       if (ctx) {
         try {
-          pi.sendMessage({ customType: "parley_persistence_notice", content: conversationPersistenceWarning, display: true, details: { [PRESENTED_MARK]: true } },
-            ctx.isIdle() ? { triggerTurn: false } : { deliverAs: "steer" });
+          pi.sendMessage({ customType: "parley_persistence_notice", content: conversationPersistenceWarning, display: true },
+            { triggerTurn: false });
         } catch {
           // Tool results still carry the warning.
         }
@@ -1296,10 +1182,11 @@ function installParleyExtension(
       text: entry.control.action === "cancel" ? "Withdrew an earlier message; it no longer asks for this work." : "Replaced an earlier message with a newer one.",
       ...(original ? { inReplyTo: previewText(original.message.content.text, 240) } : {}),
     };
-    const envelope = { customType: "parley_message_control", content: entry.content, display: true, details: { from: entry.from, control: entry.control, receivedAt: entry.receivedAt, display, [PRESENTED_MARK]: true }, timestamp: entry.receivedAt };
+    const envelope = { customType: "parley_message_control", content: entry.content, display: true, details: { from: entry.from, control: entry.control, receivedAt: entry.receivedAt, display }, timestamp: entry.receivedAt };
     pendingHostEnvelopes.set(`control:${key}`, envelope);
     try {
-      pi.sendMessage(envelope, ctx.isIdle() ? { triggerTurn: true } : { deliverAs: "steer" });
+      // Pi decides from its own state: steered into a running turn, or a turn started for it.
+      pi.sendMessage(envelope, { deliverAs: "steer", triggerTurn: true });
     } catch {
       // The control remains pending in memory; context injection and idle retry share this queue.
     }
@@ -1329,12 +1216,9 @@ function installParleyExtension(
   const deferredInboundControls = new Map<string, { from: SessionInfo; control: MessageControl; content: string; receivedAt: number }>();
   let inboundRetryTimer: NodeJS.Timeout | null = null;
   const pendingHostEnvelopes = new Map<string, InboundEnvelope>();
-  // What the model sees of the conversation is the host's history, append-only. Providers cache
-  // prompts by prefix, so an earlier message that reads differently on a later request re-sends
-  // everything after it. Parley adds to the conversation only through the host (sendMessage,
-  // tool results) and never edits or inserts into what the host sends the model.
-  // What each older host message was presented as, by content, so presentation never drifts with state.
-  const shownProjections = new Map<string, unknown>();
+  // Parley adds to the conversation only through the host (sendMessage, tool results) and never
+  // changes what the host sends the model: providers cache prompts by prefix, so an earlier
+  // message that read differently on a later request would re-send everything after it.
   const presentedInboundEnvelopes = new Set<string>();
   const settledInboundMessages = new Set<string>();
   const inboundMessageDispositions = new Map<string, NonNullable<ParleyContext["disposition"]>>();
@@ -1350,7 +1234,7 @@ function installParleyExtension(
       confirmPersistedInbound();
       // A busy host delivers what it queued itself; only an idle one is offered unconfirmed messages again.
       if (ctx.isIdle()) {
-        for (const entry of deferredInboundMessages.values()) sendIncomingMessage(entry, "trigger", generation);
+        for (const entry of deferredInboundMessages.values()) sendIncomingMessage(entry, generation);
         for (const key of deferredInboundControls.keys()) flushInboundControl(key);
       }
       scheduleInboundRetry();
@@ -2209,7 +2093,7 @@ function installParleyExtension(
         customType: "parley_delivery_notice",
         content: presentForModel(`**Parley delivery failed:** queued message to ${targetDisplay} (${from.cwd}) expired before delivery.\nMessage: ${references.current.messageRef(receipt.messageId)}${topic}\nReason: ${receipt.detail ?? "mailbox entry expired"}.`),
         display: true,
-        details: { to: targetDisplay, messageId: receipt.messageId, expired: true, ...(receipt.detail ? { detail: receipt.detail } : {}), [PRESENTED_MARK]: true },
+        details: { to: targetDisplay, messageId: receipt.messageId, expired: true, ...(receipt.detail ? { detail: receipt.detail } : {}) },
       },
       { triggerTurn: true },
     );
@@ -2229,7 +2113,7 @@ function installParleyExtension(
         customType: "parley_compaction_awareness",
         content: presentForModel(`**Parley compaction awareness**\n\n${notice}`, { messageId: result.id }),
         display: true,
-        details: { messageId: result.id, peerCompaction: result.peerCompaction, [PRESENTED_MARK]: true },
+        details: { messageId: result.id, peerCompaction: result.peerCompaction },
       },
       { triggerTurn: false },
     );
@@ -2313,7 +2197,7 @@ function installParleyExtension(
       isRequestedAnswer,
     };
   }
-  function sendIncomingMessage(entry: InboundMessageEntry, delivery: "trigger" | "steer", generation = runtimeGeneration, forceTrigger = false): void {
+  function sendIncomingMessage(entry: InboundMessageEntry, generation = runtimeGeneration, forceTrigger = false): void {
     if (runtimeStarted && !getLiveContext(runtimeContext, generation)) return;
     const injectedMessage = { ...entry.message, injectedAt: Date.now() };
     const { content, topic, isRequestedAnswer, display } = formatInboundEnvelope(entry, injectedMessage);
@@ -2321,15 +2205,15 @@ function installParleyExtension(
       customType: "parley_message",
       content,
       display: true,
-      details: { ...entry, message: injectedMessage, replyTopic: topic, display, [PRESENTED_MARK]: true },
+      details: { ...entry, message: injectedMessage, replyTopic: topic, display },
       timestamp: entry.message.receiverReceivedAt ?? entry.message.timestamp,
     };
     deferredInboundMessages.set(entry.message.id, entry);
     pendingHostEnvelopes.set(`message:${entry.message.id}`, envelope);
     try {
-      pi.sendMessage(envelope,
-        delivery === "trigger" && shouldTriggerInboundMessage(entry, forceTrigger || isRequestedAnswer)
-          ? { triggerTurn: true } : { deliverAs: "steer" });
+      // Say what Parley wants and let Pi decide from its own state: steered into a running turn,
+      // a turn started for it, or recorded for the next one.
+      pi.sendMessage(envelope, { deliverAs: "steer", triggerTurn: shouldTriggerInboundMessage(entry, forceTrigger || isRequestedAnswer) });
     } catch {
       emitMessageReceipt(entry.message.id, "queued", "retained locally; host injection will be retried");
     }
@@ -2345,14 +2229,14 @@ function installParleyExtension(
         customType: "parley_compaction_awareness",
         content: presentForModel(`**Parley compaction awareness**\n\n${describeCompaction(senderDisplay, message.peerCompaction, from.id)}`, { from, messageId: message.id }),
         display: true,
-        details: { messageId: message.id, peerCompaction: message.peerCompaction, [PRESENTED_MARK]: true },
+        details: { messageId: message.id, peerCompaction: message.peerCompaction },
       },
       { triggerTurn: false },
     );
     acknowledgeInboundMessageContact(client, message);
   }
-  function sendIncomingBrokerMessage(entry: InboundMessageEntry, delivery: "trigger" | "steer", generation = runtimeGeneration): void {
-    sendIncomingMessage(entry, delivery, generation);
+  function sendIncomingBrokerMessage(entry: InboundMessageEntry, generation = runtimeGeneration): void {
+    sendIncomingMessage(entry, generation);
   }
   function handleIncomingMessage(ctx: ExtensionContext, from: SessionInfo, message: Message): void {
     const messageGeneration = runtimeGeneration;
@@ -2393,17 +2277,7 @@ function installParleyExtension(
     emitMessageReceipt(receivedMessage.id, "acknowledged", "accepted by receiver");
     const entry = { from, message: receivedMessage, replyCommand, bodyText };
     void (async () => {
-      const activeContext = getLiveContext(liveContext, messageGeneration);
-      if (!activeContext) {
-        return;
-      }
-      if (!activeContext.isIdle()) {
-        sendIncomingBrokerMessage(entry, "steer");
-        return;
-      }
-      if (getLiveContext(liveContext, messageGeneration)) {
-        sendIncomingBrokerMessage(entry, "trigger", messageGeneration);
-      }
+      if (getLiveContext(liveContext, messageGeneration)) sendIncomingBrokerMessage(entry, messageGeneration);
     })();
   }
   function attachClientHandlers(nextClient: ParleyClient): void {
@@ -2909,7 +2783,7 @@ function installParleyExtension(
         content: { text: messageText },
       },
       bodyText: messageText,
-    }, "trigger", runtimeGeneration, true);
+    }, runtimeGeneration, true);
   }
   function recordSubagentDeliveryError(entryType: string, to: string, message: string, error: unknown): void {
     pi.appendEntry(entryType, {
@@ -2925,7 +2799,6 @@ function installParleyExtension(
     deferredInboundMessages.clear();
     deferredInboundControls.clear();
     pendingHostEnvelopes.clear();
-    shownProjections.clear();
     presentedInboundEnvelopes.clear();
     settledInboundMessages.clear();
     inboundMessageDispositions.clear();
@@ -2966,7 +2839,7 @@ function installParleyExtension(
       replyTracker.setDisposition(value.control.messageId, disposition);
       if (!history.persistedControls.has(key)) handleMessageControl(value.from, value.control, true);
     }
-    for (const entry of deferredInboundMessages.values()) sendIncomingMessage(entry, ctx.isIdle() ? "trigger" : "steer");
+    for (const entry of deferredInboundMessages.values()) sendIncomingMessage(entry);
     if (deferredInboundMessages.size || deferredInboundControls.size) scheduleInboundRetry();
   }
   function startSessionRuntime(ctx: ExtensionContext): void {
@@ -3163,7 +3036,6 @@ function installParleyExtension(
     deferredInboundMessages.clear();
     deferredInboundControls.clear();
     pendingHostEnvelopes.clear();
-    shownProjections.clear();
     presentedInboundEnvelopes.clear();
     settledInboundMessages.clear();
     inboundMessageDispositions.clear();
@@ -3228,92 +3100,20 @@ function installParleyExtension(
   });
   pi.on("context", (event) => {
     if (!getLiveContext()) return;
+    // Pi owns what the model is sent; Parley only notes what of its own it's being sent.
+    // Returning nothing leaves the context exactly as Pi built it.
     confirmPersistedInbound();
-    // The model gets the host's own history. Nothing here adds to it, moves it, or makes an
-    // earlier message read differently; a duplicate host copy of a message is dropped, the
-    // first copy kept. Text from older versions is made readable once and stays that way.
-    type ContextMessage = (typeof event.messages)[number];
-    const seen = new Set<string>();
-    const messages: ContextMessage[] = [];
-    // Learn what every parley call and result in this projection declares before presenting any
-    // of it, so a summary that precedes the call it mentions is still readable.
-    const projectionIdentities: DeclaredIdentities = { messages: new Set(), sessions: new Set() };
+    const shown = new Set<string>();
     for (const message of event.messages) {
-      if (message.role === "assistant" && Array.isArray(message.content)) {
-        for (const part of message.content) {
-          if (part.type === "toolCall" && part.name === PARLEY_TOOL_NAME) declareToolArguments(part.arguments, projectionIdentities);
-        }
-      } else if ((message.role === "toolResult" && (message.toolName === PARLEY_TOOL_NAME || message.toolName === "contact_supervisor"))
-        || (message.role === "custom" && message.customType?.startsWith("parley_"))) {
-        references.current.learnFrom(message.details, projectionIdentities);
-      }
+      const key = message.role === "custom" ? inboundEnvelopeKey(message) : undefined;
+      if (key) shown.add(key);
     }
-    // Older, unmarked text gets typed canonical identities only; exact replacement of arbitrary
-    // declared strings could touch authored words that are not marked verbatim.
-    const canonicalIdentities: DeclaredIdentities = {
-      messages: new Set([...projectionIdentities.messages].filter(isCanonicalIdentity)),
-      sessions: new Set([...projectionIdentities.sessions].filter(isCanonicalIdentity)),
-    };
-    // Present each host message once, from its own content; later requests reuse that exact result.
-    const presentOnce = <T,>(source: object, present: () => T): T => {
-      // Text this runtime presented is final already; only older text needs remembering.
-      if (((source as { details?: unknown }).details as Record<string, unknown> | undefined)?.[PRESENTED_MARK] === true) return present();
-      const fingerprint = createHash("sha256").update(JSON.stringify(source)).digest("base64");
-      if (shownProjections.has(fingerprint)) return shownProjections.get(fingerprint) as T;
-      const shown = present();
-      shownProjections.set(fingerprint, shown);
-      return shown;
-    };
-    const present = (message: ContextMessage): ContextMessage | undefined => {
-      if (message.role === "assistant" && Array.isArray(message.content)) {
-        if (!message.content.some((part) => part.type === "toolCall" && part.name === PARLEY_TOOL_NAME)) return message;
-        // The model's own earlier parley calls may carry canonical identities (older versions,
-        // programmatic arguments). Present them in this projection only; history is untouched.
-        return presentOnce(message, () => ({ ...message, content: message.content.map((part) => part.type === "toolCall" && part.name === PARLEY_TOOL_NAME
-          ? { ...part, arguments: presentToolArgumentsForModel(part.arguments, projectionIdentities) }
-          : part) }));
-      }
-      if (message.role === "compactionSummary" || message.role === "branchSummary") {
-        return presentOnce(message, () => ({ ...message, summary: references.current.present(message.summary, canonicalIdentities) }));
-      }
-      if (message.role === "toolResult" && (message.toolName === PARLEY_TOOL_NAME || message.toolName === "contact_supervisor")) {
-        // Results recorded before references existed (or by other versions) still reach the model readable.
-        return presentOnce(message, () => ({ ...message, content: projectForModel(message.content, message.details, canonicalIdentities) }));
-      }
-      if (message.role !== "custom" || !message.customType?.startsWith("parley_")) return message;
-      const key = inboundEnvelopeKey(message);
-      if (key) {
-        // The first copy the model saw is the one it keeps; host retries and later records are the same message.
-        if (seen.has(key)) return undefined;
-        seen.add(key);
-        const details = message.details as { message?: Message; control?: MessageControl; receivedAt?: number };
-        const timestamp = details.message?.receiverReceivedAt ?? details.receivedAt ?? details.message?.timestamp ?? details.control?.timestamp ?? message.timestamp;
-        return presentOnce(message, () => {
-          const presented = (message.details as Record<string, unknown> | undefined)?.[PRESENTED_MARK] === true;
-          const stored = typeof message.content === "string" ? message.content
-            : message.content.map((part) => part.type === "text" ? part.text : "").join("\n");
-          // An older incoming message that still carries identities is rebuilt from its typed record,
-          // so metadata and the colleague's words are told apart by structure rather than by matching
-          // text. One with nothing to present stays exactly as stored.
-          const content = !presented && message.customType === "parley_message" && details.message
-            && references.current.present(stored, canonicalIdentities) !== stored
-            ? formatInboundEnvelope(message.details as InboundMessageEntry, details.message).content
-            : projectForModel(message.content, message.details, canonicalIdentities);
-          return { ...message, content, timestamp };
-        });
-      }
-      return presentOnce(message, () => ({ ...message, content: projectForModel(message.content, message.details, canonicalIdentities) }));
-    };
-    for (const message of event.messages) {
-      const shown = present(message);
-      if (shown) messages.push(shown);
-    }
-    // What the host has put in front of the model is what the model has seen.
-    for (const key of [...pendingHostEnvelopes.keys()]) if (seen.has(key)) confirmInboundEnvelope(key);
-    for (const key of seen) presentedInboundEnvelopes.add(key);
-    replyTracker.activateContexts([...freshModelContexts.values()]);
+    for (const key of [...pendingHostEnvelopes.keys()]) if (shown.has(key)) confirmInboundEnvelope(key);
+    for (const key of shown) presentedInboundEnvelopes.add(key);
+    // Pi takes one queued message per turn; one taken later in the same run joins the
+    // conversation already being answered rather than replacing it. The run's end clears them.
+    replyTracker.includeContexts([...freshModelContexts.values()]);
     freshModelContexts.clear();
-    return { messages };
   });
   pi.on("agent_start", () => {
     if (!getLiveContext()) {

@@ -380,43 +380,6 @@ test("a result that outlives its Pi session writes nothing into the session that
   }
 });
 
-test("the model's own earlier calls and summaries reach it readable, without touching host history", async () => {
-  const harness = createExtensionHarness("projection-observer", { sessionId: "projection-observer-id" });
-  try {
-    await start(harness, "projection-observer");
-    const remote = encodeOriginQualifiedSessionIdentity({ originId: "host:projection", remoteScopeAlias: "projection", remoteStableSessionId: "projection-peer" });
-    const messages = [
-      { role: "assistant", content: [{ type: "toolCall", id: "legacy-call", name: "parley", arguments: { action: "send", to: remote, message: "A legacy request" } }] },
-      { role: "compactionSummary", summary: `Previously sent a request to ${remote}`, tokensBefore: 50, timestamp: Date.now() },
-    ];
-    const snapshot = JSON.stringify(messages);
-    const projected = (await harness.emitLifecycleResults("context", { messages })).find(Boolean) as { messages: unknown[] };
-    assert.doesNotMatch(JSON.stringify(projected.messages), /oq[sm]1\./);
-    assert.equal(JSON.stringify(messages), snapshot, "host history is not mutated");
-
-    // Ordinary UUIDs from an older session, unknown to this book, with the summary first.
-    const sessionId = "01234567-89ab-4cde-8123-456789abcdef";
-    const messageId = "abcdef01-2345-4abc-8123-456789abcdef";
-    const legacy = [
-      { role: "compactionSummary", summary: `Previously sent ${messageId} to ${sessionId}`, tokensBefore: 50, timestamp: Date.now() },
-      { role: "assistant", content: [{ type: "toolCall", id: "uuid-call", name: "parley", arguments: { action: "send", to: sessionId, replyTo: messageId, retryOf: messageId, message: "Legacy" } }] },
-    ];
-    const legacySnapshot = JSON.stringify(legacy);
-    // Session and message identifiers are separate namespaces; the same UUID in both keeps each field's kind.
-    const shared = "fedcba98-7654-4321-8fed-cba987654321";
-    const sharedProjection = ((await harness.emitLifecycleResults("context", { messages: [
-      { role: "assistant", content: [{ type: "toolCall", id: "shared-call", name: "parley", arguments: { action: "send", to: shared, replyTo: shared, message: "Shared" } }] },
-    ] })).find(Boolean) as { messages: Array<{ content: Array<{ arguments: { to: string; replyTo: string } }> }> }).messages[0]!.content[0]!.arguments;
-    assert.match(sharedProjection.replyTo, /^#\d+$/);
-    assert.doesNotMatch(sharedProjection.to, /^#|fedcba98/, `a session field stays a session reference: ${JSON.stringify(sharedProjection)}`);
-    const legacyProjected = JSON.stringify(((await harness.emitLifecycleResults("context", { messages: legacy })).find(Boolean) as { messages: unknown[] }).messages);
-    assert.ok(!legacyProjected.includes(sessionId) && !legacyProjected.includes(messageId), `typed identities are presented whatever their shape: ${legacyProjected}`);
-    assert.equal(JSON.stringify(legacy), legacySnapshot);
-  } finally {
-    await harness.emitLifecycle("session_shutdown");
-  }
-});
-
 test("a received question can be given a local label and answered by it, including after reload", async () => {
   const first = createExtensionHarness("label-observer", { sessionId: "label-observer-id" });
   const restored = createExtensionHarness("label-observer", { sessionId: "label-observer-id" });
@@ -453,7 +416,7 @@ test("a received question can be given a local label and answered by it, includi
   }
 });
 
-test("a colleague's words reach the model exactly as written, on arrival and on every replay", async () => {
+test("a colleague's words reach the model exactly as written", async () => {
   const harness = createExtensionHarness("verbatim-observer", { sessionId: "verbatim-observer-id" });
   const peer = await colleague("verbatim-peer", "verbatim-peer-id");
   try {
@@ -464,8 +427,8 @@ test("a colleague's words reach the model exactly as written, on arrival and on 
     await until(() => harness.sentMessages.some((item) => item.message.content?.includes("Literal identifier")), "message injected");
     const injected = harness.sentMessages.find((item) => item.message.content?.includes("Literal identifier"))!.message;
     assert.ok(injected.content!.includes(body), `arrival keeps the body verbatim: ${injected.content}`);
-    const projected = (await harness.emitLifecycleResults("context", { messages: [{ role: "custom", ...injected, timestamp: Date.now() }] })).find(Boolean) as { messages: Array<{ content: string }> };
-    assert.ok(projected.messages.some((item) => item.content.includes(body)), "replay through the model boundary keeps it verbatim too");
+    const results = await harness.emitLifecycleResults("context", { messages: [{ role: "custom", ...injected, timestamp: Date.now() }] });
+    assert.ok(results.every((result) => result === undefined), "the model boundary leaves it exactly as recorded");
   } finally {
     await harness.emitLifecycle("session_shutdown");
     await peer.disconnect();
@@ -531,63 +494,6 @@ test("a multi-target send that outlives its Pi session writes nothing into the n
   }
 });
 
-test("restored records from older versions keep a colleague's words exact while their metadata becomes readable", async () => {
-  const harness = createExtensionHarness("legacy-observer", { sessionId: "legacy-observer-id" });
-  const peerId = "0a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d";
-  const peer = await colleague("legacy-peer", peerId);
-  try {
-    const target = await start(harness, "legacy-observer");
-    assert.ok(row(text(await call(harness, { action: "list" })), "legacy-peer"));
-    const handle = encodeOriginQualifiedSessionIdentity({ originId: "host:legacy", remoteScopeAlias: "legacy", remoteStableSessionId: "legacy-remote" });
-    const body = `Keep ${peerId} and ${handle} as literal text, and \uE000 unchanged`;
-    const sent = await peer.send(target.id, { text: body });
-    await until(() => harness.sentMessages.some((item) => item.message.content?.includes("as literal text")), "retained arrival");
-    const from = { id: peerId, name: "legacy-peer", cwd: process.cwd() };
-    // Shapes older versions stored: raw identities throughout, no presentation marker.
-    const legacy = [
-      { role: "custom", customType: "parley_message", display: true, timestamp: Date.now(),
-        content: `**From legacy-peer (${peerId})**\n\n${body}\n\nMessage: ${sent.id}\nSession: ${peerId} · ${process.cwd()}`,
-        details: { from, message: { id: sent.id, timestamp: Date.now(), content: { text: body } }, bodyText: body, replyTopic: "" } },
-      { role: "toolResult", toolCallId: "legacy-read", toolName: "parley", isError: false, timestamp: Date.now(),
-        content: [{ type: "text", text: `From legacy-peer (${process.cwd()})\nMessage: ${sent.id}\n\n${body}` }],
-        details: { messageId: sent.id } },
-    ];
-    const snapshot = JSON.stringify(legacy);
-    const projected = ((await harness.emitLifecycleResults("context", { messages: legacy })).find(Boolean) as { messages: Array<{ content: string | Array<{ text: string }> }> }).messages;
-    const texts = projected.map((item) => typeof item.content === "string" ? item.content : item.content.map((part) => part.text).join("\n"));
-    for (const projectedText of texts) {
-      assert.ok(projectedText.includes(body), `the colleague's words are exact: ${projectedText}`);
-      assert.ok(!projectedText.replace(body, "").includes(peerId) && !projectedText.replace(body, "").includes(sent.id), `metadata is readable: ${projectedText}`);
-    }
-    assert.equal(JSON.stringify(legacy), snapshot, "host history is not mutated");
-
-    // A body that is nothing but the sender's identity (an old contact paste) is still the body.
-    const idOnly = await peer.send(target.id, { text: peerId });
-    const idOnlyLegacy = [{ role: "custom", customType: "parley_message", display: true, timestamp: Date.now(),
-      content: `**From legacy-peer (${peerId})**\n\n${peerId}\n\nMessage: ${idOnly.id}`,
-      details: { from, message: { id: idOnly.id, timestamp: Date.now(), content: { text: peerId } }, bodyText: peerId, replyTopic: "" } }];
-    const idOnlyText = ((await harness.emitLifecycleResults("context", { messages: idOnlyLegacy })).find(Boolean) as { messages: Array<{ content: string }> }).messages
-      .map((item) => item.content).join("\n");
-    assert.match(idOnlyText, /\*\*From legacy-peer\*\*/, `the header is readable: ${idOnlyText}`);
-    assert.equal(idOnlyText.split(peerId).length - 1, 1, `the identity survives exactly once, as the body: ${idOnlyText}`);
-
-    // A withdrawal's quoted original stays exact on its first projection and on every later replay.
-    const quoted = await peer.send(target.id, { text: `Keep ${peerId} as a literal`, expectsReply: true });
-    await until(() => harness.sentMessages.some((item) => item.message.content?.includes("as a literal")), "quoted request arrives");
-    await peer.cancelMessage(quoted.id);
-    await until(() => harness.sentMessages.some((item) => item.message.customType === "parley_message_control"), "withdrawal arrives");
-    const control = harness.sentMessages.find((item) => item.message.customType === "parley_message_control")!.message;
-    for (const pass of ["first", "replay"]) {
-      const replayed = ((await harness.emitLifecycleResults("context", { messages: [{ role: "custom", ...control, timestamp: Date.now() }] })).find(Boolean) as { messages: Array<{ content: string }> }).messages
-        .map((item) => item.content).join("\n");
-      assert.ok(replayed.includes(`Keep ${peerId} as a literal`), `${pass} projection keeps the quoted original exact: ${replayed}`);
-    }
-  } finally {
-    await harness.emitLifecycle("session_shutdown");
-    await peer.disconnect();
-  }
-});
-
 test("a message whose identifier is spelled like its sender's name never renames the sender", async () => {
   const harness = createExtensionHarness("cross-kind-observer", { sessionId: "cross-kind-observer-id" });
   const peer = await colleague("builder", "cross-kind-builder");
@@ -598,12 +504,6 @@ test("a message whose identifier is spelled like its sender's name never renames
     const read = text(await call(harness, { action: "read", messageId: reference }));
     assert.match(read, /^From builder /, `the sender keeps its reference: ${read}`);
     assert.match(read, new RegExp(`Message: ${reference}`));
-    // A typed message slot holding that raw identifier is still a message, despite the session alias.
-    const projected = ((await harness.emitLifecycleResults("context", { messages: [
-      { role: "assistant", content: [{ type: "toolCall", id: "cross-kind-call", name: "parley", arguments: { action: "reply", to: "builder", replyTo: "builder", message: "Answer" } }] },
-    ] })).find(Boolean) as { messages: Array<{ content: Array<{ arguments: { to: string; replyTo: string } }> }> }).messages[0]!.content[0]!.arguments;
-    assert.equal(projected.to, "builder", "the issued session reference stays as written");
-    assert.equal(projected.replyTo, reference, "the raw message identifier becomes its message reference");
   } finally {
     await harness.emitLifecycle("session_shutdown");
     await peer.disconnect();

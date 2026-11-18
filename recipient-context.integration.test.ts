@@ -56,7 +56,7 @@ function call(harness: ReturnType<typeof createExtensionHarness>, params: Record
 }
 function text(result: { content: { text: string }[] }) { return result.content.map((item) => item.text).join("\n"); }
 // Like Pi: what Parley queued with sendMessage is in the host's history by the next model call,
-// recorded and after what came before. Parley adds nothing of its own.
+// recorded and after what came before. Parley never changes the context it's given.
 const takenByHost = new WeakMap<object, unknown[]>();
 async function modelContext(harness: ReturnType<typeof createExtensionHarness>, messages: unknown[] = []) {
   const taken = takenByHost.get(harness) ?? [];
@@ -65,41 +65,16 @@ async function modelContext(harness: ReturnType<typeof createExtensionHarness>, 
     if (!harness.persistedMessages.includes(message)) harness.persistedMessages.push(message);
     taken.push({ role: "custom", ...structuredClone(message), display: true, timestamp: Date.now() });
   }
-  const result = await harness.emitLifecycleResults("context", { messages: [...messages, ...structuredClone(taken)] });
-  return (result.find(Boolean) as { messages: Array<{ role: string; customType?: string; content: string; details?: unknown; timestamp: number }> }).messages;
+  const context = [...messages, ...structuredClone(taken)] as Array<{ role: string; customType?: string; content: string; details?: unknown; timestamp: number }>;
+  const results = await harness.emitLifecycleResults("context", { messages: context });
+  assert.ok(results.every((result) => result === undefined), "Parley leaves the model's context exactly as the host built it");
+  return context;
 }
 
-test("a delivered message reaches the model identically on every later request, timed by its arrival despite SDK timestamps", async () => {
-  const peer = await colleague("timing-planner");
-  const harness = createExtensionHarness("timing-worker", { sessionId: "timing-worker-id", isIdle: () => false });
-  try {
-    const target = await start(harness, peer, "timing-worker");
-    const sent = await peer.send(target.id, { text: "Keep this arrival time stable." });
-    await until(() => harness.persistedMessages.some((entry) => entry.customType === "parley_message"), "host persistence");
-    const envelope = harness.persistedMessages.find((entry) => entry.customType === "parley_message")!;
-    const details = envelope.details as { message: Message };
-    assert.equal(details.message.id, sent.id);
-    const arrival = details.message.receiverReceivedAt!;
-    assert.ok(Number.isFinite(arrival));
-    // Real SDK sendMessage assigns its own time rather than honoring the supplied timestamp.
-    const hostHistory = [{ role: "custom", ...envelope, timestamp: arrival + 60000 }];
-    const original = structuredClone(hostHistory);
-    const first = (await modelContext(harness, hostHistory)).find((entry) => entry.customType === "parley_message")!;
-    assert.match(first.content, /^\*\*From timing-planner/);
-    assert.equal(first.timestamp, arrival);
-    const replay = (await modelContext(harness, hostHistory)).find((entry) => entry.customType === "parley_message")!;
-    assert.deepEqual(replay, first, "what the model was shown is never rewritten");
-    assert.deepEqual(hostHistory, original, "projection never mutates host-owned history");
-  } finally {
-    await harness.emitLifecycle("session_shutdown");
-    await peer.disconnect();
-  }
-});
-
-test("every request starts with exactly what the model was shown before, so prompt caches keep their prefix", async () => {
-  // A busy Pi session over several turns. Pi takes one steered message per turn into its history
-  // and records it then; a prefix-cached provider re-sends everything after the first earlier
-  // message that reads differently, or moves.
+test("Parley never changes what Pi sends the model, so prompt caches keep their prefix", async () => {
+  // A busy Pi session over several turns: Pi takes one steered message per turn into its history.
+  // A prefix-cached provider re-sends everything after the first earlier message that reads
+  // differently or moves, so Parley leaves every context exactly as Pi built it.
   const peer = await colleague("prefix-planner");
   const harness = createExtensionHarness("prefix-worker", { sessionId: "prefix-worker-id", isIdle: () => false, persistMessages: false });
   const restored = createExtensionHarness("prefix-worker", { sessionId: "prefix-worker-id", isIdle: () => false, persistMessages: false });
@@ -110,26 +85,20 @@ test("every request starts with exactly what the model was shown before, so prom
     const takeIntoHistory = (index: number) => {
       const message = harness.sentMessages[index]!.message;
       harness.persistedMessages.push(message);
-      // The SDK stamps its own time on what it records.
       history.push({ role: "custom", ...structuredClone(message), display: true, timestamp: Date.now() });
     };
     const assistant = (words: string) => history.push({ role: "assistant", content: [{ type: "text", text: words }], timestamp: Date.now() });
-    const views: unknown[][] = [];
-    const request = async () => {
-      const result = await harness.emitLifecycleResults("context", { messages: structuredClone(history) });
-      const view = structuredClone((result.find(Boolean) as { messages: unknown[] }).messages);
-      const previous = views.at(-1);
-      if (previous) assert.deepEqual(view.slice(0, previous.length), previous, `request ${views.length + 1} rewrote or moved what the model saw before`);
-      views.push(view);
-      return view;
+    const request = async (session = harness) => {
+      const results = await session.emitLifecycleResults("context", { messages: structuredClone(history) });
+      assert.ok(results.every((result) => result === undefined), "the context reaches the model exactly as Pi built it");
     };
 
     const question = await peer.send(target.id, { text: "Can the index be built online?", expectsReply: true });
     await peer.send(target.id, { text: "Also, the schema notes are attached." });
     await until(() => harness.sentMessages.length === 2, "two steered messages");
+    assert.ok(harness.sentMessages.every((item) => item.options?.deliverAs === "steer"), "both are handed to Pi to deliver");
     takeIntoHistory(0);
-    // The second is still in Pi's steering queue: the model sees it when Pi takes it, not before.
-    assert.doesNotMatch(JSON.stringify(await request()), /schema notes are attached/);
+    await request();
     assistant("Looking at both.");
     takeIntoHistory(1);
     await request();
@@ -140,23 +109,18 @@ test("every request starts with exactly what the model was shown before, so prom
     assistant("Answered.");
     await request();
     await peer.cancelMessage(question.id);
-    await until(() => harness.sentMessages.some((item) => item.message.customType === "parley_message_control"), "withdrawal steered");
-    assistant("Still answered.");
+    await until(() => harness.sentMessages.some((item) => item.message.customType === "parley_message_control"), "withdrawal handed to Pi");
     takeIntoHistory(harness.sentMessages.length - 1);
-    const withNotice = await request();
-    assert.match(String((withNotice.at(-1) as { content: string }).content), /withdrawn by its sender/, "news arrives as a new message at the end");
-    assistant("Noted the withdrawal.");
     await request();
-    assert.equal(views.at(-1)!.filter((item) => (item as { customType?: string }).customType === "parley_message_control").length, 1, "the recorded copy is the same message, not a second one");
 
-    // A reload: the same session resumes from what it recorded, and the model's view is unchanged.
+    // A reload resumes from what was recorded and sends nothing again.
     restored.entries.push(...structuredClone(harness.entries));
     restored.persistedMessages.push(...structuredClone(harness.persistedMessages));
     await harness.emitLifecycle("session_shutdown");
     extension(restored.pi as never);
     await restored.emitLifecycle("session_start");
-    const resumed = structuredClone(((await restored.emitLifecycleResults("context", { messages: structuredClone(history) })).find(Boolean) as { messages: unknown[] }).messages);
-    assert.deepEqual(resumed, views.at(-1), "a reload neither moves nor rewrites what the model saw");
+    await request(restored);
+    assert.equal(restored.sentMessages.length, 0, "nothing already recorded is delivered again");
   } finally {
     Date.now = realNow;
     await harness.emitLifecycle("session_shutdown");
@@ -456,9 +420,13 @@ test("implicit replies survive inspection without guessing between fresh convers
     const newerNote = await alpha.send(target.id, { text: "An unrelated schema note is available" });
     await until(() => harness.sentMessages.length === 6, "new note from the same sender");
     await modelContext(harness, hostHistory);
-    await call(harness, { action: "reply", to: "boundary-alpha", message: "Thanks for the new note" });
-    await until(() => alphaReplies.length === 3, "reply with an explicit sender");
-    assert.equal(alphaReplies[2]!.replyTo, newerNote.id, "specifying the sender must not switch to an older question");
+    // Both reached the model in this run, one turn apart: the sender alone doesn't pick one.
+    const bySender = await call(harness, { action: "reply", to: "boundary-alpha", message: "Thanks for the new note" });
+    assert.equal(bySender.details?.error, true, text(bySender));
+    assert.ok(mentions(text(bySender), harness.referenceFor(olderAsk.id)) && mentions(text(bySender), harness.referenceFor(newerNote.id)), text(bySender));
+    await call(harness, { action: "reply", replyTo: newerNote.id, message: "Thanks for the new note" });
+    await until(() => alphaReplies.length === 3, "reply to the note it names");
+    assert.equal(alphaReplies[2]!.replyTo, newerNote.id);
     assert.ok(mentions(text(await call(harness, { action: "pending" })), harness.referenceFor(olderAsk.id)), "acknowledging a note does not approve the older request");
   } finally { await harness.emitLifecycle("session_shutdown"); await alpha.disconnect(); await beta.disconnect(); }
 });

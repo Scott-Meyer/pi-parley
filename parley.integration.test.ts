@@ -3439,7 +3439,6 @@ test("idle interactive sessions trigger a new turn immediately", { concurrency: 
 
 		assert.equal(harness.sentMessages.length, 1);
 		assert.equal(harness.sentMessages[0]?.options?.triggerTurn, true);
-		assert.equal(harness.sentMessages[0]?.options?.deliverAs, undefined);
 	} finally {
 		await harness.emitLifecycle("session_shutdown");
 		await cleanup();
@@ -3928,12 +3927,10 @@ test("Parley journal replay and model context ignore unrelated custom entry type
     const unrelated = { role: "custom", ...envelope("unrelated_message", "context-id") };
     const other = { role: "custom", ...envelope("other_message", "context-id") };
     const foreignNotice = { role: "custom", customType: "unrelated_persistence_notice", content: "Foreign notice" };
-    const [result] = await harness.emitLifecycleResults("context", {
+    const results = await harness.emitLifecycleResults("context", {
       messages: [current, current, unrelated, unrelated, other, other, foreignNotice],
     });
-    assert.deepEqual((result as { messages: unknown[] }).messages,
-      [{ ...current, timestamp: 1 }, unrelated, unrelated, other, other, foreignNotice],
-      "only Parley messages are deduplicated and normalized to arrival timing; foreign entries remain untouched");
+    assert.ok(results.every((result) => result === undefined), "the model's context is left exactly as the host built it");
   } finally {
     await harness.emitLifecycle("session_shutdown").catch(() => undefined);
     await cleanup();
