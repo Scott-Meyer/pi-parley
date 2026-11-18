@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { spawnSync } from "node:child_process";
 
 const repo = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -107,7 +107,7 @@ try {
   // An application bundles pi-parley/host from a clean install. Parley leaves its host libraries
   // to the host, so the application installs the two it names; without them the bundle can't
   // resolve, with them it builds.
-  const { build } = await import(join(repo, "node_modules", "esbuild", "lib", "main.js"));
+  const { build } = await import(pathToFileURL(join(repo, "node_modules", "esbuild", "lib", "main.js")).href);
   writeFileSync(join(consumer, "host-app.ts"), `import { createHostedSession } from "pi-parley/host"; void createHostedSession;\n`);
   const bundleHost = () => build({ entryPoints: [join(consumer, "host-app.ts")], outfile: join(consumer, "host-app.mjs"), bundle: true,
     platform: "node", format: "esm", absWorkingDir: consumer, logLevel: "silent" });
