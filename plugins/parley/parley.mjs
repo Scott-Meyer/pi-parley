@@ -30,7 +30,7 @@ function nodeCommand(execPath = process.execPath) {
 var bundledBuild;
 var init_bundle = __esm({
   "broker/bundle.ts"() {
-    bundledBuild = true ? JSON.parse('{"packageVersion":"1.8.0","sourceId":"96ae21ae39f61c59d9ef3a852169d1f0e2b1d2670816d0a17dd530432c965019"}') : void 0;
+    bundledBuild = true ? JSON.parse('{"packageVersion":"1.8.0","sourceId":"8cc08f8d48904930d79b703baa2cb788abeb0bbdb360c13fc0d415f58e60d512"}') : void 0;
   }
 });
 
@@ -16405,10 +16405,7 @@ The earlier message is no longer the current request; prior work is not undone.`
     };
     const envelope = { customType: "parley_message_control", content: entry.content, display: true, details: { from: entry.from, control: entry.control, receivedAt: entry.receivedAt, display }, timestamp: entry.receivedAt };
     pendingHostEnvelopes.set(`control:${key}`, envelope);
-    try {
-      pi.sendMessage(envelope, { deliverAs: "steer", triggerTurn: true });
-    } catch {
-    }
+    handToHost(`control:${key}`, envelope, true);
     confirmPersistedInbound();
     scheduleInboundRetry();
   }
@@ -16429,6 +16426,25 @@ The earlier message is no longer the current request; prior work is not undone.`
   const settledInboundMessages = /* @__PURE__ */ new Set();
   const inboundMessageDispositions = /* @__PURE__ */ new Map();
   const freshModelContexts = /* @__PURE__ */ new Map();
+  const notWithHost = /* @__PURE__ */ new Set();
+  let hostReorganizing = false;
+  function handToHost(key, envelope, wake) {
+    const ctx = getLiveContext();
+    const idle = ctx?.isIdle() ?? true;
+    if (idle) hostReorganizing = false;
+    if (hostReorganizing && !idle && !agentRunning) {
+      notWithHost.add(key);
+      return "held";
+    }
+    try {
+      pi.sendMessage(envelope, idle ? { triggerTurn: wake } : { deliverAs: "steer", triggerTurn: wake });
+      notWithHost.delete(key);
+      return "handed";
+    } catch {
+      notWithHost.add(key);
+      return "refused";
+    }
+  }
   function scheduleInboundRetry() {
     if (inboundRetryTimer || !deferredInboundMessages.size && !deferredInboundControls.size) return;
     const generation = runtimeGeneration;
@@ -16437,10 +16453,9 @@ The earlier message is no longer the current request; prior work is not undone.`
       const ctx = getLiveContext(runtimeContext, generation);
       if (!ctx) return;
       confirmPersistedInbound();
-      if (ctx.isIdle()) {
-        for (const entry of deferredInboundMessages.values()) sendIncomingMessage(entry, generation);
-        for (const key of deferredInboundControls.keys()) flushInboundControl(key);
-      }
+      const idle = ctx.isIdle();
+      for (const entry of deferredInboundMessages.values()) if (idle || notWithHost.has(`message:${entry.message.id}`)) sendIncomingMessage(entry, generation);
+      for (const key of deferredInboundControls.keys()) if (idle || notWithHost.has(`control:${key}`)) flushInboundControl(key);
       scheduleInboundRetry();
     }, 1e3);
     inboundRetryTimer.unref?.();
@@ -16465,6 +16480,7 @@ The earlier message is no longer the current request; prior work is not undone.`
     return void 0;
   }
   function confirmInboundEnvelope(key) {
+    notWithHost.delete(key);
     if (!pendingHostEnvelopes.delete(key)) return;
     if (key.startsWith("message:")) {
       const id = key.slice("message:".length);
@@ -17301,9 +17317,7 @@ Session: ${entry.from.cwd}${origin}${compactionNotice}`),
     };
     deferredInboundMessages.set(entry.message.id, entry);
     pendingHostEnvelopes.set(`message:${entry.message.id}`, envelope);
-    try {
-      pi.sendMessage(envelope, { deliverAs: "steer", triggerTurn: shouldTriggerInboundMessage(entry, forceTrigger || isRequestedAnswer) });
-    } catch {
+    if (handToHost(`message:${entry.message.id}`, envelope, shouldTriggerInboundMessage(entry, forceTrigger || isRequestedAnswer)) === "refused") {
       emitMessageReceipt(entry.message.id, "queued", "retained locally; host injection will be retried");
     }
     confirmPersistedInbound();
@@ -17807,6 +17821,7 @@ Observed local session: ${target2.session ? references.current.sessionRef(target
     deferredInboundMessages.clear();
     deferredInboundControls.clear();
     pendingHostEnvelopes.clear();
+    notWithHost.clear();
     presentedInboundEnvelopes.clear();
     settledInboundMessages.clear();
     inboundMessageDispositions.clear();
@@ -18033,6 +18048,7 @@ Observed local session: ${target2.session ? references.current.sessionRef(target
     deferredInboundMessages.clear();
     deferredInboundControls.clear();
     pendingHostEnvelopes.clear();
+    notWithHost.clear();
     presentedInboundEnvelopes.clear();
     settledInboundMessages.clear();
     inboundMessageDispositions.clear();
@@ -18065,9 +18081,17 @@ Observed local session: ${target2.session ? references.current.sessionRef(target
     syncPresenceIdentity(currentSessionId);
   });
   pi.on("session_before_compact", (event, ctx) => {
+    hostReorganizing = true;
     beginCompactionStatus(ctx, event.signal);
   });
+  pi.on("session_before_tree", () => {
+    hostReorganizing = true;
+  });
+  pi.on("session_tree", () => {
+    hostReorganizing = false;
+  });
   pi.on("session_compact", (_event, ctx) => {
+    hostReorganizing = false;
     finishCompactionStatus(ctx);
     if (getLiveContext(ctx)) {
       const eventId = randomUUID6();
@@ -18079,6 +18103,7 @@ Observed local session: ${target2.session ? references.current.sessionRef(target
   });
   const onSessionCompactFailed = pi.on.bind(pi);
   onSessionCompactFailed("session_compact_failed", (_event, ctx) => {
+    hostReorganizing = false;
     finishCompactionStatus(ctx);
   });
   pi.on("context", (event) => {
@@ -18091,8 +18116,9 @@ Observed local session: ${target2.session ? references.current.sessionRef(target
     }
     for (const key of [...pendingHostEnvelopes.keys()]) if (shown.has(key)) confirmInboundEnvelope(key);
     for (const key of shown) presentedInboundEnvelopes.add(key);
-    replyTracker.includeContexts([...freshModelContexts.values()]);
-    freshModelContexts.clear();
+    const arrived = [...freshModelContexts.values()].filter((context) => shown.has(`message:${context.message.id}`));
+    replyTracker.includeContexts(arrived);
+    for (const context of arrived) freshModelContexts.delete(context.message.id);
   });
   pi.on("agent_start", () => {
     if (!getLiveContext()) {

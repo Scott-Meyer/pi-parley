@@ -129,6 +129,33 @@ test("Parley never changes what Pi sends the model, so prompt caches keep their 
   }
 });
 
+test("a message arriving while Pi compacts or switches branches outside a run waits, then wakes the session once Pi is idle", async () => {
+  // Pi starts a run for a waking message even mid-/compact or mid-/tree, alongside the
+  // reorganization rather than after it; such a run can write into the branch being left.
+  const peer = await colleague("reorganizing-planner");
+  let idle = true;
+  const harness = createExtensionHarness("reorganizing-worker", { sessionId: "reorganizing-worker-id", isIdle: () => idle });
+  const handedOver = () => harness.sentMessages.filter((item) => item.message.customType === "parley_message");
+  try {
+    const target = await start(harness, peer, "reorganizing-worker");
+    for (const [begin, end, payload] of [
+      ["session_before_compact", "session_compact", { signal: new AbortController().signal, reason: "manual" }],
+      ["session_before_tree", "session_tree", { signal: new AbortController().signal }],
+    ] as const) {
+      const before = handedOver().length;
+      idle = false;
+      await harness.emitLifecycle(begin, payload);
+      await peer.send(target.id, { text: `Review the migration (${begin})`, expectsReply: true });
+      await new Promise((resolve) => setTimeout(resolve, 1_500));
+      assert.equal(handedOver().length, before, `nothing is handed to Pi during ${begin}`);
+      await harness.emitLifecycle(end, {});
+      idle = true;
+      await until(() => handedOver().length === before + 1, `handed over once Pi is idle after ${begin}`);
+      assert.equal(handedOver().at(-1)!.options?.triggerTurn, true, "and it wakes the session");
+    }
+  } finally { await harness.emitLifecycle("session_shutdown"); await peer.disconnect(); }
+});
+
 test("a busy headless answer settles when its host takes it, not when sendMessage returns, and progress is not an answer", async () => {
   const peer = await colleague("context-planner");
   const harness = createExtensionHarness("context-worker", { sessionId: "context-worker-id", isIdle: () => false, hasUI: false, persistMessages: false });

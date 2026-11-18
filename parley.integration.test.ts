@@ -5976,15 +5976,15 @@ test("never policy wakes only for outstanding completing answers, not ordinary o
       const self = await waitForSessionByName(planner, "quiet-asker");
       await planner.send(self.id, { text: "Ordinary threaded reply.", replyTo: noticeId });
       await waitForVisibleText(harness, "Ordinary threaded reply.");
-      assert.equal(harness.sentMessages.at(-1)?.options?.deliverAs, "steer");
+      assert.equal(harness.sentMessages.at(-1)?.options?.triggerTurn, false);
       const ask = await call({ action: "ask", to: "planner", message: "Can I release?", blocking: false });
       const askId = harness.identityFor(visibleMessageId(modelText(ask)))!;
       await planner.send(self.id, { text: "Still investigating.", replyTo: askId, completesAsk: false });
       await waitForVisibleText(harness, "Still investigating.");
-      assert.equal(harness.sentMessages.at(-1)?.options?.deliverAs, "steer");
+      assert.equal(harness.sentMessages.at(-1)?.options?.triggerTurn, false);
       await planner.send(self.id, { text: "Which region?", replyTo: askId, expectsReply: true });
       await waitForVisibleText(harness, "Which region?");
-      assert.equal(harness.sentMessages.at(-1)?.options?.deliverAs, "steer");
+      assert.equal(harness.sentMessages.at(-1)?.options?.triggerTurn, false);
       assert.deepEqual(((await call({ action: "status" })).details?.outstandingAsks as Array<{ messageId: string }>).map((ask) => ask.messageId), [askId],
         "progress and clarification leave the question outstanding");
       await planner.send(self.id, { text: "Approved.", replyTo: askId });
@@ -5993,7 +5993,7 @@ test("never policy wakes only for outstanding completing answers, not ordinary o
       assert.deepEqual((await call({ action: "status" })).details?.outstandingAsks, []);
       await planner.send(self.id, { text: "Additional follow-up.", replyTo: askId });
       await waitForVisibleText(harness, "Additional follow-up.");
-      assert.equal(harness.sentMessages.at(-1)?.options?.deliverAs, "steer", "settled asks do not keep bypassing the policy");
+      assert.equal(harness.sentMessages.at(-1)?.options?.triggerTurn, false, "settled asks do not keep bypassing the policy");
     } finally {
       await harness.emitLifecycle("session_shutdown");
       await cleanup();
@@ -6018,7 +6018,7 @@ test("invalid configuration logs and preserves answers and control delivery with
         const self = await waitForSessionByName(planner, "config-fallback");
         const unsolicited = await planner.send(self.id, { text: "Unsolicited notice." });
         await waitForVisibleText(harness, "Unsolicited notice.");
-        assert.equal(harness.sentMessages.at(-1)?.options?.deliverAs, "steer");
+        assert.equal(harness.sentMessages.at(-1)?.options?.triggerTurn, false);
         const results: ParleyOutboxResultV1[] = [];
         harness.pi.events.on(PARLEY_OUTBOX_RESULT_EVENT, (result) => results.push(result as ParleyOutboxResultV1));
         harness.pi.events.emit(PARLEY_OUTBOX_REQUEST_EVENT, {

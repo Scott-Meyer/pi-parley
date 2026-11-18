@@ -1184,12 +1184,7 @@ function installParleyExtension(
     };
     const envelope = { customType: "parley_message_control", content: entry.content, display: true, details: { from: entry.from, control: entry.control, receivedAt: entry.receivedAt, display }, timestamp: entry.receivedAt };
     pendingHostEnvelopes.set(`control:${key}`, envelope);
-    try {
-      // Pi decides from its own state: steered into a running turn, or a turn started for it.
-      pi.sendMessage(envelope, { deliverAs: "steer", triggerTurn: true });
-    } catch {
-      // The control remains pending in memory; context injection and idle retry share this queue.
-    }
+    handToHost(`control:${key}`, envelope, true);
     confirmPersistedInbound();
     scheduleInboundRetry();
   }
@@ -1224,6 +1219,36 @@ function installParleyExtension(
   const inboundMessageDispositions = new Map<string, NonNullable<ParleyContext["disposition"]>>();
   const freshModelContexts = new Map<string, ParleyContext>();
 
+  // Envelopes the host doesn't hold: it refused them, or Parley waited for it to finish
+  // compacting or navigating. Unlike ones it queued, these are offered again while it's busy.
+  const notWithHost = new Set<string>();
+  // Pi is compacting or switching branches outside a run (/compact, /tree). It would start a run
+  // for a waking message alongside that, rather than after it.
+  let hostReorganizing = false;
+  /**
+   * Hand an envelope to the host the way its state calls for. Pi steers it into a running turn
+   * (or keeps it for the turn's end if it shouldn't wake), or records it when idle, starting a turn
+   * if it should wake. While Pi reorganizes outside a run, Parley holds it; the retry hands it over
+   * once Pi is idle.
+   */
+  function handToHost(key: string, envelope: InboundEnvelope, wake: boolean): "handed" | "held" | "refused" {
+    const ctx = getLiveContext();
+    const idle = ctx?.isIdle() ?? true;
+    if (idle) hostReorganizing = false;
+    if (hostReorganizing && !idle && !agentRunning) {
+      notWithHost.add(key);
+      return "held";
+    }
+    try {
+      pi.sendMessage(envelope, idle ? { triggerTurn: wake } : { deliverAs: "steer", triggerTurn: wake });
+      notWithHost.delete(key);
+      return "handed";
+    } catch {
+      notWithHost.add(key);
+      return "refused";
+    }
+  }
+
   function scheduleInboundRetry(): void {
     if (inboundRetryTimer || (!deferredInboundMessages.size && !deferredInboundControls.size)) return;
     const generation = runtimeGeneration;
@@ -1232,11 +1257,10 @@ function installParleyExtension(
       const ctx = getLiveContext(runtimeContext, generation);
       if (!ctx) return;
       confirmPersistedInbound();
-      // A busy host delivers what it queued itself; only an idle one is offered unconfirmed messages again.
-      if (ctx.isIdle()) {
-        for (const entry of deferredInboundMessages.values()) sendIncomingMessage(entry, generation);
-        for (const key of deferredInboundControls.keys()) flushInboundControl(key);
-      }
+      // A busy host delivers what it queued itself; what it doesn't hold is offered again anyway.
+      const idle = ctx.isIdle();
+      for (const entry of deferredInboundMessages.values()) if (idle || notWithHost.has(`message:${entry.message.id}`)) sendIncomingMessage(entry, generation);
+      for (const key of deferredInboundControls.keys()) if (idle || notWithHost.has(`control:${key}`)) flushInboundControl(key);
       scheduleInboundRetry();
     }, 1_000);
     inboundRetryTimer.unref?.();
@@ -1268,6 +1292,7 @@ function installParleyExtension(
   }
 
   function confirmInboundEnvelope(key: string): void {
+    notWithHost.delete(key);
     if (!pendingHostEnvelopes.delete(key)) return;
     if (key.startsWith("message:")) {
       const id = key.slice("message:".length);
@@ -2210,11 +2235,7 @@ function installParleyExtension(
     };
     deferredInboundMessages.set(entry.message.id, entry);
     pendingHostEnvelopes.set(`message:${entry.message.id}`, envelope);
-    try {
-      // Say what Parley wants and let Pi decide from its own state: steered into a running turn,
-      // a turn started for it, or recorded for the next one.
-      pi.sendMessage(envelope, { deliverAs: "steer", triggerTurn: shouldTriggerInboundMessage(entry, forceTrigger || isRequestedAnswer) });
-    } catch {
+    if (handToHost(`message:${entry.message.id}`, envelope, shouldTriggerInboundMessage(entry, forceTrigger || isRequestedAnswer)) === "refused") {
       emitMessageReceipt(entry.message.id, "queued", "retained locally; host injection will be retried");
     }
     // sendMessage is fire-and-forget on supported hosts. Returning void is not delivery confirmation.
@@ -2799,6 +2820,7 @@ function installParleyExtension(
     deferredInboundMessages.clear();
     deferredInboundControls.clear();
     pendingHostEnvelopes.clear();
+    notWithHost.clear();
     presentedInboundEnvelopes.clear();
     settledInboundMessages.clear();
     inboundMessageDispositions.clear();
@@ -3036,6 +3058,7 @@ function installParleyExtension(
     deferredInboundMessages.clear();
     deferredInboundControls.clear();
     pendingHostEnvelopes.clear();
+    notWithHost.clear();
     presentedInboundEnvelopes.clear();
     settledInboundMessages.clear();
     inboundMessageDispositions.clear();
@@ -3075,9 +3098,17 @@ function installParleyExtension(
     syncPresenceIdentity(currentSessionId);
   });
   pi.on("session_before_compact", (event, ctx) => {
+    hostReorganizing = true;
     beginCompactionStatus(ctx, event.signal);
   });
+  pi.on("session_before_tree", () => {
+    hostReorganizing = true;
+  });
+  pi.on("session_tree", () => {
+    hostReorganizing = false;
+  });
   pi.on("session_compact", (_event, ctx) => {
+    hostReorganizing = false;
     finishCompactionStatus(ctx);
     if (getLiveContext(ctx)) {
       const eventId = randomUUID();
@@ -3096,6 +3127,7 @@ function installParleyExtension(
     handler: (event: unknown, ctx: ExtensionContext) => void,
   ) => void;
   onSessionCompactFailed("session_compact_failed", (_event, ctx) => {
+    hostReorganizing = false;
     finishCompactionStatus(ctx);
   });
   pi.on("context", (event) => {
@@ -3112,8 +3144,10 @@ function installParleyExtension(
     for (const key of shown) presentedInboundEnvelopes.add(key);
     // Pi takes one queued message per turn; one taken later in the same run joins the
     // conversation already being answered rather than replacing it. The run's end clears them.
-    replyTracker.includeContexts([...freshModelContexts.values()]);
-    freshModelContexts.clear();
+    // Only what this context carries; one recorded but not here (another branch) waits until it is.
+    const arrived = [...freshModelContexts.values()].filter((context) => shown.has(`message:${context.message.id}`));
+    replyTracker.includeContexts(arrived);
+    for (const context of arrived) freshModelContexts.delete(context.message.id);
   });
   pi.on("agent_start", () => {
     if (!getLiveContext()) {
