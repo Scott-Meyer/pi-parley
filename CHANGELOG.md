@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Parley loads again on Oh My Pi 19.2.1. `/parley` uses OMP's built-in session picker and message input, and OMP draws its own transcript cards. Pi keeps its existing UI.
+
 ## 1.9.0 - 2026-11-18
 
 - `broadcast` can name its group: `to` is a pattern over references (`flightdeck:*`, `build-vm:*`, `*`), `cwd` a directory, `app` a pattern over where sessions live (`Pi*`). A group reaches the sessions it names on any computer; without one, a broadcast stays on this computer as before.

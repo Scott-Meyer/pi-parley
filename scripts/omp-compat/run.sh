@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # Checks that Parley loads in OMP and two OMP sessions can ask and reply through it.
-# Needs OMP (npm @oh-my-pi/pi-coding-agent) and Bun >= 1.3.14 on PATH, or OMP_BIN set.
+# Needs OMP on PATH (or OMP_BIN set), Node.js and Python 3.
 set -euo pipefail
 ROOT=$(cd "$(dirname "$0")/../.." && pwd)
 OMP_BIN=$(command -v "${OMP_BIN:-omp}")
-echo "Using $("$OMP_BIN" --version)"
+echo "Using $OMP_BIN"
 WORK=$(mktemp -d "${TMPDIR:-/tmp}/parley-omp.XXXXXX")
 export HOME="$WORK/home" PI_CODING_AGENT_DIR="$WORK/home/.omp/agent" OMP_SKIP_SETUP=1
 # Never go looking for this machine's real ssh connections.
@@ -31,10 +31,18 @@ SERVER=$!
 cleanup() {
   kill "$SERVER" 2>/dev/null || true
   # The broker belongs to this temporary home; stop it gracefully.
-  [ -f "$PI_CODING_AGENT_DIR/parley/broker.pid" ] && ps -o pid=,args= -p "$(cat "$PI_CODING_AGENT_DIR/parley/broker.pid")" | cut -c1-160 | sed 's/^/broker: /'
   [ -f "$PI_CODING_AGENT_DIR/parley/broker.pid" ] && kill -TERM "$(cat "$PI_CODING_AGENT_DIR/parley/broker.pid")" 2>/dev/null || true
   echo "Artifacts: $WORK"
 }
 trap cleanup EXIT
-for _ in $(seq 1 50); do grep -q fake-openai-ready "$WORK/server.log" 2>/dev/null && break; sleep 0.1; done
-node "$ROOT/scripts/omp-compat/probe.mjs" "$OMP_BIN" "$ROOT/extension.ts" "$WORK/project" "$WORK/requests.jsonl"
+for _ in $(seq 1 50); do
+  grep -qs fake-openai-ready "$WORK/server.log" && break
+  kill -0 "$SERVER" 2>/dev/null || break
+  sleep 0.1
+done
+if ! grep -qs fake-openai-ready "$WORK/server.log" || ! kill -0 "$SERVER" 2>/dev/null; then
+  echo "Fake model server did not start on 127.0.0.1:$PORT" >&2
+  cat "$WORK/server.log" >&2
+  exit 1
+fi
+node "$ROOT/scripts/omp-compat/probe.mjs" "$OMP_BIN" "$ROOT" "$WORK/project" "$WORK/requests.jsonl"

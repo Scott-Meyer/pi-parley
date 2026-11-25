@@ -5,7 +5,7 @@
 set -euo pipefail
 ROOT=$(cd "$(dirname "$0")/../.." && pwd)
 OMP_BIN=$(command -v "${OMP_BIN:-omp}")
-echo "Using $("$OMP_BIN" --version)"
+echo "Using $OMP_BIN"
 # Short: Unix socket paths under it must stay within 104 bytes.
 WORK=$(mktemp -d /tmp/plo.XXXXXX)
 LAPTOP="$WORK/laptop" BOX="$WORK/box"
@@ -45,5 +45,14 @@ cleanup() {
   echo "Artifacts: $WORK"
 }
 trap cleanup EXIT
-for _ in $(seq 1 50); do grep -q fake-openai-ready "$WORK/server.log" 2>/dev/null && break; sleep 0.1; done
-node "$ROOT/scripts/omp-compat/link-probe.mjs" "$OMP_BIN" "$ROOT/extension.ts" "$WORK/project" "$WORK/requests.jsonl" "$LAPTOP" "$BOX"
+for _ in $(seq 1 50); do
+  grep -qs fake-openai-ready "$WORK/server.log" && break
+  kill -0 "$SERVER" 2>/dev/null || break
+  sleep 0.1
+done
+if ! grep -qs fake-openai-ready "$WORK/server.log" || ! kill -0 "$SERVER" 2>/dev/null; then
+  echo "Fake model server did not start on 127.0.0.1:$PORT" >&2
+  cat "$WORK/server.log" >&2
+  exit 1
+fi
+node "$ROOT/scripts/omp-compat/link-probe.mjs" "$OMP_BIN" "$ROOT" "$WORK/project" "$WORK/requests.jsonl" "$LAPTOP" "$BOX"
