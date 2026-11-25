@@ -2,16 +2,9 @@ import type { Component, TUI } from "@mariozechner/pi-tui";
 import { truncateToWidth, visibleWidth } from "@mariozechner/pi-tui";
 import type { KeybindingsManager, Theme } from "@mariozechner/pi-coding-agent";
 import type { ParleyClient } from "../broker/client.ts";
-import { PERSON_PROVENANCE_FEATURE, type PeerCompactionNotice, type SessionInfo } from "../types.ts";
-
-export interface ComposeResult {
-  sent: boolean;
-  messageId?: string;
-  delivery?: string;
-  text?: string;
-  peerCompaction?: PeerCompactionNotice;
-  contactToken?: string;
-}
+import type { SessionInfo } from "../types.ts";
+import { sendPersonMessage, type ComposeResult } from "./host.ts";
+export type { ComposeResult } from "./host.ts";
 
 export class ComposeOverlay implements Component {
   private tui: TUI;
@@ -82,27 +75,7 @@ export class ComposeOverlay implements Component {
     this.tui.requestRender();
 
     try {
-      const result = await this.client.send(this.target.id, {
-        text: this.inputBuffer.trim(),
-        // The person typed this, not the agent. Older brokers would refuse the field.
-        ...(this.client.supportsFeature(PERSON_PROVENANCE_FEATURE) ? { provenance: { type: "session_person" as const } } : {}),
-      });
-      
-      if (!result.delivered) {
-        this.error = result.reason ?? "Message not delivered. Session may not exist or has disconnected.";
-        this.sending = false;
-        this.tui.requestRender();
-        return;
-      }
-      
-      this.done({
-        sent: true,
-        messageId: result.id,
-        text: this.inputBuffer.trim(),
-        delivery: result.delivery,
-        ...(result.peerCompaction ? { peerCompaction: result.peerCompaction } : {}),
-        ...(result.contactToken ? { contactToken: result.contactToken } : {}),
-      });
+      this.done(await sendPersonMessage(this.client, this.target, this.inputBuffer.trim()));
     } catch (error) {
       this.error = error instanceof Error ? error.message : String(error);
       this.sending = false;

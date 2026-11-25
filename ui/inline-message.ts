@@ -5,15 +5,8 @@ import type { Theme } from "@mariozechner/pi-coding-agent";
 import type { SessionInfo, Message } from "../types.ts";
 import { formatPeerCompactionNotice } from "../compaction-awareness.ts";
 
-/** Human-readable names for sessions and messages; defaults keep raw identities. */
-export interface InlineMessageReferences {
-  session(from: SessionInfo): string;
-  message(id: string): string;
-  /** Replace canonical identities inside generated text. */
-  present?(text: string): string;
-  /** Typed naming for a session identity, as the compaction notice needs it. */
-  sessionName?(id: string, name?: string): string;
-}
+import type { InlineMessageReferences } from "./host.ts";
+export type { InlineMessageReferences } from "./host.ts";
 
 /** Messages someone clicked open or shut, so a rebuilt row keeps that state. */
 const clickedOpen = new Map<string, boolean>();
